@@ -40,10 +40,18 @@ The store plane serves the node daemon and the jj backend. The control plane ser
 | `MOTTE_DATABASE_URL` | PostgreSQL DSN. |
 | `MOTTE_BUCKET_KIND` | `gcs` or `fs`. |
 | `MOTTE_BUCKET` | Bucket name for `gcs`, directory for `fs`. |
-| `MOTTE_TRUSTED_KEYS` | JSON list of `{"kid","key","scopes"}`. `key` is the standard base64 of an Ed25519 public key. |
+| `MOTTE_TRUSTED_KEYS` | JSON list of `{"kid","key","scopes"}`. `key` is the standard base64 of an Ed25519 public key. `scopes` holds only `node`, `read`, `import` and `operator`. The service refuses to start on any other scope text. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Optional. Enables OTLP trace export. |
 
-The service applies its embedded migrations at start, under a PostgreSQL advisory lock, so replicas can start together. `GET /health` answers 200. `GET /ready` answers 200 while the database answers a ping. `GET /metrics` serves Prometheus metrics. These three routes need no grant.
+The service applies its embedded migrations at start, under a PostgreSQL advisory lock, so replicas can start together. `GET /health` answers 200. `GET /ready` answers 200 while the database answers a ping. `GET /metrics` serves Prometheus metrics. These three routes need no grant. A request for a path or method that no route serves answers 404 `vcs_not_found` or 405 `method_not_allowed` in the error envelope.
+
+### Limits and memory
+
+- An object has at most 16 MiB (`gitpack.MaxObjectBytes`). A put of a larger object, and a read of a larger object in an imported pack, answer 413 `vcs_object_too_large`. A caller must not store a file above 16 MiB.
+- The service reads a request body completely before it takes memory for the request. A body above its route limit answers 413 `vcs_object_too_large`, whatever its content. The limits are 1 MiB for a JSON route, 8 MiB of base64 data plus 1 KiB for `PUT /v1/vcs/ops/{kind}/{id}` (the data limit is 8 MiB before encoding), and 96 MiB plus 4 KiB for `POST /v1/vcs/objects` and `PUT /v1/vcs/packs/{pack_id}`. The upload routes allow 2 minutes to read the body.
+- A put has at most 100000 objects and 64 MiB of object data. A blob batch or a `has` call names at most 4096 SHAs, and a blob batch returns at most 16 MiB.
+- The service keeps a memory budget of 256 MiB for requests at work. A read request reserves 16 MiB. A request with a body reserves the length of the body. The budget is the only limit on concurrency: no request excludes the others, and a slow sender holds no reservation because the body is read before the reservation.
+- A lookup of a SHA reads the pack indexes of the repository, newest pack first, and a SHA that no pack holds reads every index. The cost grows linearly with the number of packs of a repository. The service accepts this cost: it never compacts packs.
 
 ### Store plane
 
@@ -232,7 +240,7 @@ Authorization happens at claim time. For a repository that the store keeps (it h
 
 The path prefix `/v1` is additive. New fields and new routes are allowed, and clients ignore unknown fields. A breaking change gets `/v2`, served beside `/v1`. The module is tagged with semantic versions.
 
-Wire error codes keep their `vcs_` text: `vcs_claim_lost`, `vcs_generation_conflict`, `vcs_not_found`, `vcs_object_invalid`, `vcs_object_too_large`, `vcs_repo_forbidden`, `vcs_workspace_conflict`, `vcs_workspace_deleted`, `vcs_not_configured`. The error body is `{"error":{"code","message","details"}}`. A conflict on a ref carries the stored ref in `details.ref`.
+Wire error codes keep their `vcs_` text: `vcs_claim_lost`, `vcs_generation_conflict`, `vcs_not_found`, `vcs_object_invalid`, `vcs_object_too_large`, `vcs_repo_forbidden`, `vcs_workspace_conflict`, `vcs_workspace_deleted`. Three codes have no prefix: `unauthorized` (401), `invalid_body` (400) and `internal_error` (500). `method_not_allowed` (405) answers a method that its path does not serve. A panic in a handler is logged with its stack and answers 500 `internal_error` when the handler sent no status yet. The error body is `{"error":{"code","message","details"}}`. A conflict on a ref carries the stored ref in `details.ref`.
 
 ## Client
 
@@ -241,7 +249,7 @@ Package `client` has one typed method for each route of both planes. A `Client` 
 - Each call has a time budget of 2 seconds, which `WithBudget` changes. A deadline on the call context that is earlier than the budget wins.
 - The client injects the W3C trace context of the call context into the request headers.
 - The client follows no redirect. A 3xx answer is the error `ErrRedirect`, and the grant goes to no other host.
-- A failure answer is an `*Error` with the HTTP status, the wire code, the message and the details. `errors.Is` matches the sentinel of the code: `ErrNotConfigured`, `ErrNotFound`, `ErrGenerationConflict`, `ErrClaimLost`, `ErrObjectInvalid`, `ErrObjectTooLarge`, `ErrRepoForbidden`, `ErrWorkspaceConflict`, `ErrWorkspaceDeleted`, `ErrUnauthorized`, `ErrInvalidBody` and `ErrInternal`. A failure answer with no wire error body is `ErrUnexpected`.
+- A failure answer is an `*Error` with the HTTP status, the wire code, the message and the details. `errors.Is` matches the sentinel of the code: `ErrNotFound`, `ErrGenerationConflict`, `ErrClaimLost`, `ErrObjectInvalid`, `ErrObjectTooLarge`, `ErrRepoForbidden`, `ErrWorkspaceConflict`, `ErrWorkspaceDeleted`, `ErrUnauthorized`, `ErrInvalidBody` and `ErrInternal`. A failure answer with no wire error body is `ErrUnexpected`.
 - `CurrentRef` returns the stored ref that a ref generation conflict carries.
 
 Package `testserver` runs the real server in the process of a test, on a fresh schema of the PostgreSQL database that the caller names (or `MOTTE_TEST_DATABASE_URL`) and a temporary filesystem bucket. It skips the test when no DSN is set. It returns the base URL, the control-plane and node signers, and helpers that mint operator, node, read and import grants.
@@ -255,12 +263,14 @@ Package `testserver` runs the real server in the process of a test, on a fresh s
 
 ## Deployment
 
-`images/motte/Dockerfile` builds the service image for `linux/amd64` and `linux/arm64`. It holds a static `cmd/motte` binary on a distroless non-root base. The workflow `image.yml` builds it, and the `motte-vfsd` image, on a pull request. On a tag `v*` it publishes `ghcr.io/majorcontext/motte` with the same tag scheme as `motte-vfsd` and with provenance and SBOM attestations.
+`images/motte/Dockerfile` builds the service image for `linux/amd64` and `linux/arm64`. It holds a static `cmd/motte` binary on a distroless non-root base that the Dockerfile pins by digest. The workflow `image.yml` builds it, and the `motte-vfsd` image, on a pull request. On a tag `v*` it publishes `ghcr.io/majorcontext/motte` with the same tag scheme as `motte-vfsd` and with provenance and SBOM attestations.
 
 `charts/motte` installs a `Deployment` (2 replicas by default), a `ServiceAccount` and a `Service`. The pod runs as non-root with a read-only root file system. The probes use `/health` and `/ready`, and `/metrics` is on the service port. Values set:
 
 - The image (digest or tag), `replicas`, `resources` (default request 512Mi of memory), node selector, tolerations and affinity.
-- `serviceAccount.name` and `serviceAccount.annotations`, for workload identity.
+- `serviceAccount.create` (default `true`), `serviceAccount.name` and `serviceAccount.annotations`, for workload identity. With `create` false the chart makes no `ServiceAccount` and the pod uses the account that `serviceAccount.name` names, or the release name when it is empty.
+- `listenPort` (default 8080), the container port. It sets `MOTTE_LISTEN`.
+- `prometheusAnnotations` (default `true`), which adds the `prometheus.io` scrape annotations for `/metrics`, and `podAnnotations`, more annotations for the pod.
 - `service.type` (default `ClusterIP`), `service.loadBalancerIP` and `service.annotations`, so a caller can ask for an internal load balancer.
 - `database.dsnSecret`, the name and key of an existing Secret that holds the PostgreSQL DSN.
 - `bucket.kind` and `bucket.url`. An `fs` bucket is an `emptyDir` volume, for tests only, and the chart rejects it with more than 1 replica.
