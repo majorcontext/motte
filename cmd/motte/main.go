@@ -24,7 +24,6 @@ import (
 	"github.com/majorcontext/motte/internal/objstore/gcs"
 	"github.com/majorcontext/motte/internal/pg"
 	"github.com/majorcontext/motte/internal/server"
-	"github.com/majorcontext/motte/internal/store"
 )
 
 func main() {
@@ -81,8 +80,7 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	db := &pg.DB{Pool: pool}
-	srv := &server.Server{DB: db, Objects: store.New(bucket, db), Verifier: grant.NewVerifier(cfg.keys...), Logger: log}
+	srv := server.New(server.Config{Pool: pool, Bucket: bucket, Verifier: grant.NewVerifier(cfg.keys...), Logger: log})
 	hs := &http.Server{Addr: cfg.listen, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 1)
 	go func() { errc <- hs.ListenAndServe() }()

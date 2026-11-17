@@ -9,7 +9,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/majorcontext/motte/api"
 	"github.com/majorcontext/motte/internal/store"
 )
 
@@ -25,13 +24,27 @@ var (
 	ErrWrongRepo = errors.New("pg: workspace is on another repo")
 )
 
+// Ref is one ref of a repository.
+type Ref struct {
+	Name       string
+	Commit     string
+	Generation int64
+}
+
+// OpHeads is the head set of the op log of a workspace.
+type OpHeads struct {
+	Epoch      uint64
+	Generation int64
+	Heads      []string
+}
+
 // RefConflict is a lost ref compare-and-swap. Current is nil when the ref is absent.
-type RefConflict struct{ Current *api.Ref }
+type RefConflict struct{ Current *Ref }
 
 func (*RefConflict) Error() string { return "pg: ref generation conflict" }
 
 // OpHeadsConflict is a lost op-heads compare-and-swap. Current is nil when no row exists.
-type OpHeadsConflict struct{ Current *api.OpHeads }
+type OpHeadsConflict struct{ Current *OpHeads }
 
 func (*OpHeadsConflict) Error() string { return "pg: op heads generation conflict" }
 
@@ -207,15 +220,18 @@ func (d *DB) Flush(ctx context.Context, ws string, epoch uint64, generation int6
 	return err
 }
 
-func (d *DB) OpHeads(ctx context.Context, ws string) (api.OpHeads, error) {
-	var h api.OpHeads
+// Ping checks that the database answers.
+func (d *DB) Ping(ctx context.Context) error { return d.Pool.Ping(ctx) }
+
+func (d *DB) OpHeads(ctx context.Context, ws string) (OpHeads, error) {
+	var h OpHeads
 	var epoch int64
 	err := d.Pool.QueryRow(ctx, `SELECT epoch, generation, heads FROM op_heads WHERE workspace_id = $1`, ws).Scan(&epoch, &h.Generation, &h.Heads)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return api.OpHeads{}, ErrNotFound
+		return OpHeads{}, ErrNotFound
 	}
 	if err != nil {
-		return api.OpHeads{}, fmt.Errorf("pg: read op heads: %w", err)
+		return OpHeads{}, fmt.Errorf("pg: read op heads: %w", err)
 	}
 	h.Epoch = uint64(epoch)
 	return h, nil
@@ -224,7 +240,7 @@ func (d *DB) OpHeads(ctx context.Context, ws string) (api.OpHeads, error) {
 // SwapOpHeads replaces the head set when the stored generation is expect (0
 // for the first write) and the fence holds. A lost swap returns
 // *OpHeadsConflict, or ErrClaimLost when the fence fails first.
-func (d *DB) SwapOpHeads(ctx context.Context, ws string, epoch uint64, repo string, expect int64, heads []string) (api.OpHeads, error) {
+func (d *DB) SwapOpHeads(ctx context.Context, ws string, epoch uint64, repo string, expect int64, heads []string) (OpHeads, error) {
 	var generation int64
 	var err error
 	if expect == 0 {
@@ -242,25 +258,25 @@ func (d *DB) SwapOpHeads(ctx context.Context, ws string, epoch uint64, repo stri
 			RETURNING h.generation`, ws, int64(epoch), repo, expect, heads).Scan(&generation)
 	}
 	if err == nil {
-		return api.OpHeads{Epoch: epoch, Generation: generation, Heads: heads}, nil
+		return OpHeads{Epoch: epoch, Generation: generation, Heads: heads}, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
-		return api.OpHeads{}, fmt.Errorf("pg: swap op heads: %w", err)
+		return OpHeads{}, fmt.Errorf("pg: swap op heads: %w", err)
 	}
 	if err := d.lost(ctx, ws, epoch, repo); err != nil {
-		return api.OpHeads{}, err
+		return OpHeads{}, err
 	}
 	cur, err := d.OpHeads(ctx, ws)
 	if errors.Is(err, ErrNotFound) {
-		return api.OpHeads{}, &OpHeadsConflict{}
+		return OpHeads{}, &OpHeadsConflict{}
 	}
 	if err != nil {
-		return api.OpHeads{}, err
+		return OpHeads{}, err
 	}
 	if cur.Epoch > epoch {
-		return api.OpHeads{}, ErrClaimLost
+		return OpHeads{}, ErrClaimLost
 	}
-	return api.OpHeads{}, &OpHeadsConflict{Current: &cur}
+	return OpHeads{}, &OpHeadsConflict{Current: &cur}
 }
 
 // AddPack records a pack once. A repeat is a no-op.
@@ -284,25 +300,25 @@ func (d *DB) Packs(ctx context.Context, repo store.Repo) ([]store.PackRef, error
 	return out, nil
 }
 
-func (d *DB) Ref(ctx context.Context, repo, name string) (api.Ref, error) {
-	r := api.Ref{Name: name}
+func (d *DB) Ref(ctx context.Context, repo, name string) (Ref, error) {
+	r := Ref{Name: name}
 	err := d.Pool.QueryRow(ctx, `SELECT commit_sha, generation FROM refs WHERE repo = $1 AND name = $2`, repo, name).Scan(&r.Commit, &r.Generation)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return api.Ref{}, ErrNotFound
+		return Ref{}, ErrNotFound
 	}
 	if err != nil {
-		return api.Ref{}, fmt.Errorf("pg: read ref: %w", err)
+		return Ref{}, fmt.Errorf("pg: read ref: %w", err)
 	}
 	return r, nil
 }
 
 // Refs lists the refs of a repo by name.
-func (d *DB) Refs(ctx context.Context, repo string) ([]api.Ref, error) {
+func (d *DB) Refs(ctx context.Context, repo string) ([]Ref, error) {
 	rows, err := d.Pool.Query(ctx, `SELECT name, commit_sha, generation FROM refs WHERE repo = $1 ORDER BY name`, repo)
 	if err != nil {
 		return nil, fmt.Errorf("pg: list refs: %w", err)
 	}
-	out, err := pgx.CollectRows(rows, pgx.RowToStructByPos[api.Ref])
+	out, err := pgx.CollectRows(rows, pgx.RowToStructByPos[Ref])
 	if err != nil {
 		return nil, fmt.Errorf("pg: list refs: %w", err)
 	}
@@ -313,7 +329,7 @@ func (d *DB) Refs(ctx context.Context, repo string) ([]api.Ref, error) {
 // the ref) and the fence holds. Every create and update takes a new
 // generation from one sequence, so a deleted and recreated ref never repeats
 // one. ErrClaimLost wins over *RefConflict.
-func (d *DB) SwapRef(ctx context.Context, ws string, epoch uint64, repo, name string, expect int64, sha string) (api.Ref, error) {
+func (d *DB) SwapRef(ctx context.Context, ws string, epoch uint64, repo, name string, expect int64, sha string) (Ref, error) {
 	var generation int64
 	var err error
 	if expect == 0 {
@@ -332,12 +348,12 @@ func (d *DB) SwapRef(ctx context.Context, ws string, epoch uint64, repo, name st
 			RETURNING generation`, ws, int64(epoch), repo, name, sha, expect).Scan(&generation)
 	}
 	if err == nil {
-		return api.Ref{Name: name, Commit: sha, Generation: generation}, nil
+		return Ref{Name: name, Commit: sha, Generation: generation}, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
-		return api.Ref{}, fmt.Errorf("pg: swap ref: %w", err)
+		return Ref{}, fmt.Errorf("pg: swap ref: %w", err)
 	}
-	return api.Ref{}, d.refLost(ctx, ws, epoch, repo, name)
+	return Ref{}, d.refLost(ctx, ws, epoch, repo, name)
 }
 
 // DeleteRef removes a ref when its stored generation is expect and the fence holds.

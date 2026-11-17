@@ -28,10 +28,9 @@ import (
 )
 
 var (
-	ErrNotConfigured = errors.New("store: no object store")
-	ErrNotFound      = errors.New("store: object not found")
-	ErrInvalid       = errors.New("store: invalid object name or content")
-	ErrTooLarge      = errors.New("store: object too large")
+	ErrNotFound = errors.New("store: object not found")
+	ErrInvalid  = errors.New("store: invalid object name or content")
+	ErrTooLarge = errors.New("store: object too large")
 )
 
 const (
@@ -46,11 +45,10 @@ const (
 	maxOpenBytes = 256 << 20
 	blockSize    = 256 << 10
 	maxBlocks    = 4
-	slotCapacity = 4
-	// SlotRead is the weight of a request that holds one object in memory.
-	// SlotWrite is the weight of a request that holds a large body.
-	SlotRead     = 1
-	SlotWrite    = slotCapacity
+	// MemoryBudget is the bytes that requests may hold while they work, apart from the bodies that are still being read.
+	MemoryBudget = 256 << 20
+	// ReadReserve is the bytes that a read request reserves: one object at its limit.
+	ReadReserve  = gitpack.MaxObjectBytes
 	blockTimeout = 30 * time.Second
 )
 
@@ -99,7 +97,7 @@ type Service struct {
 	st    objstore.Store
 	index PackIndex
 
-	slots *semaphore.Weighted
+	budget *semaphore.Weighted
 
 	mu        sync.Mutex
 	open      map[string]*openPack
@@ -107,17 +105,18 @@ type Service struct {
 	openBytes int
 }
 
-// Slot reserves weight units of the memory that large requests may hold. The
-// caller releases it.
-func (s *Service) Slot(ctx context.Context, weight int64) (release func(), err error) {
-	if err := s.slots.Acquire(ctx, weight); err != nil {
+// Reserve takes bytes of MemoryBudget, at most the whole budget, and waits while the budget is spent. The caller
+// releases it.
+func (s *Service) Reserve(ctx context.Context, bytes int64) (release func(), err error) {
+	n := min(bytes, MemoryBudget)
+	if err := s.budget.Acquire(ctx, n); err != nil {
 		return nil, err
 	}
-	return func() { s.slots.Release(weight) }, nil
+	return func() { s.budget.Release(n) }, nil
 }
 
 func New(st objstore.Store, index PackIndex) *Service {
-	return &Service{st: st, index: index, open: map[string]*openPack{}, slots: semaphore.NewWeighted(slotCapacity)}
+	return &Service{st: st, index: index, open: map[string]*openPack{}, budget: semaphore.NewWeighted(MemoryBudget)}
 }
 
 func mapNotFound(err error) error {
