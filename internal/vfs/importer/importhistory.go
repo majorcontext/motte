@@ -18,16 +18,20 @@ import (
 	"github.com/majorcontext/motte/internal/vfs/store"
 )
 
+// historyPackBytes is the size at which a range pack is split; the store refuses a pack of 64 MiB.
+// historyChunkBytes bounds one pack of a single commit. Tests lower both.
+var (
+	historyPackBytes  int64 = 48 << 20
+	historyChunkBytes int64 = 32 << 20
+)
+
 const (
-	// historyPackBytes is the size at which a range pack is split; the store refuses a pack of 64 MiB.
-	historyPackBytes = 48 << 20
 	// historyRangeBytes and historyRangeObjects bound a range by the inflated size and the count of its
 	// objects. Both come from the objects alone, so the ranges of a repository stay the same when commits
 	// are added after them.
 	historyRangeBytes = 256 << 20
-	// historyChunkBytes and historyChunkObjects bound one pack of a single commit; the v2 index takes 28
+	// historyChunkObjects bounds one pack of a single commit; the v2 index takes 28
 	// bytes for each object and the store refuses one over 8 MiB.
-	historyChunkBytes   = 32 << 20
 	historyChunkObjects = 100_000
 	historyRangeObjects = 150_000
 	hasBatch            = 4096

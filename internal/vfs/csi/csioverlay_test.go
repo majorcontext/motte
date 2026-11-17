@@ -16,7 +16,6 @@ import (
 	"sync"
 	"syscall"
 	"testing"
-	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
@@ -514,7 +513,7 @@ func TestWorkspaceVolumesOfOnePodKeepSeparateControlDirectories(t *testing.T) {
 	}
 }
 
-// TestUnpublishOfOneVolumeDoesNotBlockAnother: an unmount that hangs holds only its own volume.
+// TestUnpublishOfOneVolumeDoesNotBlockAnother: an unmount that hangs holds only its own volume. A failure hangs here until the test deadline.
 func TestUnpublishOfOneVolumeDoesNotBlockAnother(t *testing.T) {
 	p, f := newOverlayPlugin(t)
 	t1, t2 := filepath.Join(f.state, "t1"), filepath.Join(f.state, "t2")
@@ -538,12 +537,7 @@ func TestUnpublishOfOneVolumeDoesNotBlockAnother(t *testing.T) {
 		_, err := p.NodeUnpublishVolume(context.Background(), &csi.NodeUnpublishVolumeRequest{VolumeId: "v1", TargetPath: t1})
 		fast <- err
 	}()
-	select {
-	case err := <-fast:
-		must(t, err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("the unpublish of v1 waits on the unmount of v2")
-	}
+	must(t, <-fast)
 	close(release)
 	must(t, <-slow)
 }

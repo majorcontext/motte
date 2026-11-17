@@ -52,17 +52,19 @@ func historyOrigin(t *testing.T, commits []int) string {
 	return dir
 }
 
-// TestImportHistoryBoundsEveryPack: a root commit of 65 incompressible 1 MiB blobs, and three commits whose range
-// packs above the threshold, each reach the store only as packs of at most historyPackBytes, hold every object,
+// TestImportHistoryBoundsEveryPack: a root commit of 5 incompressible 1 MiB blobs, and three commits whose range
+// packs above a 4 MiB threshold, each reach the store only as packs of at most historyPackBytes, hold every object,
 // and an oversize pack is never read into memory.
 func TestImportHistoryBoundsEveryPack(t *testing.T) {
+	historyPackBytes, historyChunkBytes = 4<<20, 2<<20
+	t.Cleanup(func() { historyPackBytes, historyChunkBytes = 48<<20, 32<<20 })
 	for _, tc := range []struct {
 		name    string
 		commits []int
 		objects int
 	}{
-		{"one commit above the threshold", []int{65}, 65 + 2},
-		{"a range above the threshold", []int{20, 20, 20}, 60 + 3 + 3},
+		{"one commit above the threshold", []int{5}, 5 + 2},
+		{"a range above the threshold", []int{2, 2, 2}, 6 + 3 + 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			origin := historyOrigin(t, tc.commits)
@@ -79,7 +81,7 @@ func TestImportHistoryBoundsEveryPack(t *testing.T) {
 			}
 			total := 0
 			for i, n := range sink.sizes {
-				if n > historyPackBytes {
+				if int64(n) > historyPackBytes {
 					t.Errorf("pack %d has %d bytes; want at most %d", i, n, historyPackBytes)
 				}
 				total += sink.objects[i]
