@@ -1,6 +1,7 @@
 {{- $dsn := required "database.dsnSecret.name is required" .Values.database.dsnSecret.name -}}
 {{- $bucket := required "bucket.url is required" .Values.bucket.url -}}
 {{- if not (has .Values.bucket.kind (list "gcs" "fs")) }}{{ fail "bucket.kind must be gcs or fs" }}{{ end -}}
+{{- if and (eq .Values.bucket.kind "fs") (gt (int .Values.replicas) 1) }}{{ fail "bucket.kind fs needs replicas 1" }}{{ end -}}
 {{- if not (or .Values.trustedKeys .Values.trustedKeysConfigMap.name) }}{{ fail "trustedKeys or trustedKeysConfigMap.name is required" }}{{ end -}}
 apiVersion: apps/v1
 kind: Deployment

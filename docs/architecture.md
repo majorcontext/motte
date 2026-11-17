@@ -263,7 +263,7 @@ Package `testserver` runs the real server in the process of a test, on a fresh s
 - `serviceAccount.name` and `serviceAccount.annotations`, for workload identity.
 - `service.type` (default `ClusterIP`), `service.loadBalancerIP` and `service.annotations`, so a caller can ask for an internal load balancer.
 - `database.dsnSecret`, the name and key of an existing Secret that holds the PostgreSQL DSN.
-- `bucket.kind` and `bucket.url`. An `fs` bucket is an `emptyDir` volume, for tests only.
+- `bucket.kind` and `bucket.url`. An `fs` bucket is an `emptyDir` volume, for tests only, and the chart rejects it with more than 1 replica.
 - `trustedKeys`, a list of `{kid, key, scopes}`, or `trustedKeysConfigMap`, an existing ConfigMap that holds the JSON list.
 - `otlpEndpoint`, optional, and `extraEnv`.
 
