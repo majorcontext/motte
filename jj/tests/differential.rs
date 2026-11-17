@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::process::Command;
 use std::sync::Arc;
 
+use common::MemStore;
 use gix::objs::Kind;
 use jj_lib::backend::{
     Backend, ChangeId, Commit, CommitId, CopyId, FileId, MillisSinceEpoch, Signature, SigningFn,
@@ -21,7 +22,7 @@ use jj_lib::object_id::ObjectId as _;
 use jj_lib::repo_path::{RepoPath, RepoPathComponentBuf};
 use jj_lib::settings::UserSettings;
 use motte_jj::backend::NativeBackend;
-use motte_jj::ctl::{CtlClient, MemStore, ObjectStore, hash_object};
+use motte_jj::ctl::{CtlClient, ObjectStore, hash_object};
 use pollster::block_on;
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
@@ -452,6 +453,79 @@ impl Gen {
     }
 }
 
+/// The IDs of every object in the git repo of the pair.
+fn git_object_ids(p: &Pair) -> Vec<gix::ObjectId> {
+    let listing = Command::new("git")
+        .args([
+            "-C",
+            p.git_dir.to_str().unwrap(),
+            "cat-file",
+            "--batch-all-objects",
+            "--batch-check",
+        ])
+        .output()
+        .unwrap();
+    assert!(listing.status.success());
+    let git_ids: Vec<gix::ObjectId> = String::from_utf8(listing.stdout)
+        .unwrap()
+        .lines()
+        .map(|l| gix::ObjectId::from_hex(l.split(' ').next().unwrap().as_bytes()).unwrap())
+        .collect();
+    git_ids
+}
+
+/// Compares the kind and bytes of every git object with the native store; returns the count.
+fn compare_objects(p: &Pair, git_ids: &[gix::ObjectId]) -> usize {
+    let repo = p.git.git_repo();
+    let mut compared = 0;
+    for gid in git_ids {
+        let obj = repo.find_object(*gid).unwrap();
+        let (kind, data) = p
+            .store
+            .get(gid)
+            .unwrap_or_else(|e| panic!("native store lacks git object {gid}: {e}"));
+        assert_eq!(kind, obj.kind, "kind mismatch {gid}");
+        assert_eq!(data, obj.data, "bytes mismatch {gid}");
+        compared += 1;
+    }
+    if let Some(mem) = &p.mem {
+        assert_eq!(
+            mem.len(),
+            git_ids.len(),
+            "object count differs (native {} vs git {})",
+            mem.len(),
+            git_ids.len()
+        );
+    } else {
+        for id in &p.wrote {
+            assert!(git_ids.contains(id));
+        }
+    }
+    compared
+}
+
+/// Reads with a native backend the objects that git wrote.
+fn cross_read(p: &Pair, g: &Gen, git_ids: &[gix::ObjectId], header: bool) {
+    let repo = p.git.git_repo();
+    let mem2 = Arc::new(MemStore::default());
+    for gid in git_ids {
+        let obj = repo.find_object(*gid).unwrap();
+        mem2.put(obj.kind, &obj.data).unwrap();
+    }
+    let tmp2 = tempfile::tempdir().unwrap();
+    let cross = NativeBackend::new(mem2, tmp2.path(), header).unwrap();
+    for id in &g.commits {
+        let mut a = block_on(p.git.read_commit(id)).unwrap();
+        let b = block_on(cross.read_commit(id)).unwrap();
+        a.predecessors.clear(); // predecessors live in the side table, not the object
+        let mut b2 = b;
+        if !header {
+            b2.change_id = a.change_id.clone(); // synthetic when no header and no side table
+        }
+        assert_eq!(a, b2, "cross read mismatch {id}");
+    }
+}
+
 fn run(header: bool, ctl: Option<&str>, n: usize, seed: u64) {
     let mut p = Pair::new(header, ctl);
     let mut g = Gen {
@@ -504,48 +578,8 @@ fn run(header: bool, ctl: Option<&str>, n: usize, seed: u64) {
         let b = block_on(p.native.read_commit(id)).unwrap();
         assert_eq!(a, b, "read_commit mismatch for {id}");
     }
-    // raw bytes: every object the native store holds must be identical in the git repo and vice versa
-    let listing = Command::new("git")
-        .args([
-            "-C",
-            p.git_dir.to_str().unwrap(),
-            "cat-file",
-            "--batch-all-objects",
-            "--batch-check",
-        ])
-        .output()
-        .unwrap();
-    assert!(listing.status.success());
-    let git_ids: Vec<gix::ObjectId> = String::from_utf8(listing.stdout)
-        .unwrap()
-        .lines()
-        .map(|l| gix::ObjectId::from_hex(l.split(' ').next().unwrap().as_bytes()).unwrap())
-        .collect();
-    let mut compared = 0;
-    let repo = p.git.git_repo();
-    for gid in &git_ids {
-        let obj = repo.find_object(*gid).unwrap();
-        let (kind, data) = p
-            .store
-            .get(gid)
-            .unwrap_or_else(|e| panic!("native store lacks git object {gid}: {e}"));
-        assert_eq!(kind, obj.kind, "kind mismatch {gid}");
-        assert_eq!(data, obj.data, "bytes mismatch {gid}");
-        compared += 1;
-    }
-    if let Some(mem) = &p.mem {
-        assert_eq!(
-            mem.len(),
-            git_ids.len(),
-            "object count differs (native {} vs git {})",
-            mem.len(),
-            git_ids.len()
-        );
-    } else {
-        for id in &p.wrote {
-            assert!(git_ids.contains(id));
-        }
-    }
+    let git_ids = git_object_ids(&p);
+    let compared = compare_objects(&p, &git_ids);
     let fsck = Command::new("git")
         .args(["-C", p.git_dir.to_str().unwrap(), "fsck", "--no-dangling"])
         .output()
@@ -572,25 +606,7 @@ fn run(header: bool, ctl: Option<&str>, n: usize, seed: u64) {
         n / 30,
         g.conflicted
     );
-
-    // cross read: native reading objects git wrote
-    let mem2 = Arc::new(MemStore::default());
-    for gid in &git_ids {
-        let obj = repo.find_object(*gid).unwrap();
-        mem2.put(obj.kind, &obj.data).unwrap();
-    }
-    let tmp2 = tempfile::tempdir().unwrap();
-    let cross = NativeBackend::new(mem2, tmp2.path(), header).unwrap();
-    for id in &g.commits {
-        let mut a = block_on(p.git.read_commit(id)).unwrap();
-        let b = block_on(cross.read_commit(id)).unwrap();
-        a.predecessors.clear(); // predecessors live in the side table, not the object
-        let mut b2 = b;
-        if !header {
-            b2.change_id = a.change_id.clone(); // synthetic when no header and no side table
-        }
-        assert_eq!(a, b2, "cross read mismatch {id}");
-    }
+    cross_read(&p, &g, &git_ids, header);
 }
 
 #[test]

@@ -9,19 +9,12 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
-use common::FakeDaemon;
+use common::{FakeDaemon, Fixture, write_tree};
 use gix::objs::Kind;
-use jj_lib::backend::{
-    Backend, ChangeId, Commit, CopyId, MillisSinceEpoch, Signature, Timestamp, Tree, TreeId,
-    TreeValue,
-};
-use jj_lib::merge::Merge;
 use jj_lib::object_id::ObjectId as _;
-use jj_lib::repo_path::{RepoPath, RepoPathComponentBuf};
 use motte_jj::backend::NativeBackend;
 use motte_jj::ctl::{CtlClient, ObjectStore, hash_object};
 use motte_jj::stores::{clear_drained, merge_remote, mirror, put_ops, read_heads, update_unsynced};
-use pollster::block_on;
 
 fn blobs(n: usize) -> Vec<Vec<u8>> {
     (0..n).map(|i| format!("blob {i}\n").into_bytes()).collect()
@@ -67,105 +60,6 @@ fn get_rejects_bytes_that_do_not_hash_to_the_id() {
         .objects
         .insert(id.to_string(), ("blob".into(), b"other".to_vec()));
     assert!(CtlClient::new(d.path()).get(&id).is_err());
-}
-
-struct Fixture {
-    daemon: FakeDaemon,
-    backend: NativeBackend,
-    dir: tempfile::TempDir,
-}
-
-impl Fixture {
-    fn new() -> Self {
-        let daemon = FakeDaemon::start(true);
-        let dir = tempfile::tempdir().unwrap();
-        let store: Arc<dyn ObjectStore> = Arc::new(CtlClient::new(daemon.path()));
-        let backend = NativeBackend::new(store, dir.path(), true).unwrap();
-        Self {
-            daemon,
-            backend,
-            dir,
-        }
-    }
-
-    fn tree(&self, files: &BTreeMap<&str, &str>) -> TreeId {
-        let entries = files
-            .iter()
-            .map(|(name, body)| {
-                let id = block_on(
-                    self.backend
-                        .write_file(RepoPath::root(), &mut body.as_bytes()),
-                )
-                .unwrap();
-                (
-                    RepoPathComponentBuf::new(*name).unwrap(),
-                    TreeValue::File {
-                        id,
-                        executable: false,
-                        copy_id: CopyId::placeholder(),
-                    },
-                )
-            })
-            .collect();
-        let t = Tree::from_sorted_entries(entries);
-        block_on(self.backend.write_tree(RepoPath::root(), &t)).unwrap()
-    }
-
-    fn commit(&self, tree: TreeId, seed: u8) -> String {
-        let sig = Signature {
-            name: "t".into(),
-            email: "t@example.com".into(),
-            timestamp: Timestamp {
-                timestamp: MillisSinceEpoch(1_700_000_000_000),
-                tz_offset: 0,
-            },
-        };
-        let c = Commit {
-            parents: vec![self.backend.root_commit_id().clone()],
-            predecessors: vec![],
-            root_tree: Merge::resolved(tree),
-            conflict_labels: Merge::resolved(String::new()),
-            change_id: ChangeId::from_bytes(&[seed; 16]),
-            description: format!("commit {seed}\n"),
-            author: sig.clone(),
-            committer: sig,
-            secure_sig: None,
-        };
-        let (id, _) = block_on(self.backend.write_commit(c, None)).unwrap();
-        id.hex()
-    }
-
-    fn jj(&self, cwd: &Path, args: &[&str]) -> String {
-        self.jj_env(cwd, args, &[])
-    }
-
-    fn jj_env(&self, cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> String {
-        let out = Command::new(env!("CARGO_BIN_EXE_jj"))
-            .args(args)
-            .envs(env.iter().copied())
-            .current_dir(cwd)
-            .env("HOME", self.dir.path())
-            .env("XDG_CONFIG_HOME", self.dir.path())
-            .env("JJ_CONFIG", self.dir.path().join("none.toml"))
-            .env("JJ_USER", "t")
-            .env("JJ_EMAIL", "t@example.com")
-            .env("MOTTE_VFS_SOCK", self.daemon.path())
-            .output()
-            .unwrap();
-        let text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert!(out.status.success(), "jj {args:?} failed:\n{text}");
-        text
-    }
-}
-
-fn write_tree(dir: &Path, files: &BTreeMap<&str, &str>) {
-    for (name, body) in files {
-        std::fs::write(dir.join(name), body).unwrap();
-    }
 }
 
 #[test]
@@ -269,7 +163,7 @@ fn a_daemon_without_overlay_mode_is_refused_with_a_clear_message() {
 }
 
 #[test]
-fn a_state_file_of_an_older_shim_still_loads() {
+fn a_state_file_with_unknown_fields_still_loads() {
     let f = Fixture::new();
     let a: BTreeMap<&str, &str> = [("a", "1")].into();
     let ta = f.tree(&a);
@@ -945,7 +839,7 @@ fn concurrent_edits_of_the_marker_lose_no_mark() {
 
 #[test]
 fn refs_create_read_list_swap_and_delete_through_the_daemon() {
-    use motte_jj::ctl::{RefInfo, RefSwap, StoreError};
+    use motte_jj::ctl::{Code, RefInfo, RefSwap};
     let d = FakeDaemon::start(true);
     let c = CtlClient::new(d.path());
     let (a, b) = ("a".repeat(40), "b".repeat(40));
@@ -981,8 +875,13 @@ fn refs_create_read_list_swap_and_delete_through_the_daemon() {
         RefSwap::Swapped(None)
     );
     assert!(c.refs().unwrap().is_empty());
-    let lost = c.swap_ref("heads/fix-vcs_generation_conflict-lost-claim", 0, &b, false);
-    assert!(matches!(lost, Err(StoreError::Daemon(m)) if m.contains("vcs_claim_lost")));
+    d.state
+        .lock()
+        .unwrap()
+        .failing
+        .insert("swapref".into(), "vcs_claim_lost".into());
+    let lost = c.swap_ref("heads/new", 0, &b, false);
+    assert!(matches!(lost, Err(e) if e.is(&Code::ClaimLost)));
 }
 
 #[test]
