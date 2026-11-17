@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"runtime/debug"
@@ -67,6 +68,12 @@ func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 // for a node grant the workspace fence, runs fn and answers a failure. The
 // span and the metrics carry the route, never the grant or a path.
 func (s *Server) handle(mux *http.ServeMux, pattern string, fn handlerFunc, scopes ...grant.Scope) {
+	s.register(mux, pattern, fn, scopes, bearerToken, "")
+}
+
+// register is handle with the way that the route reads its grant. A route with a challenge answers a refused grant
+// with a WWW-Authenticate header of it.
+func (s *Server) register(mux *http.ServeMux, pattern string, fn handlerFunc, scopes []grant.Scope, token func(*http.Request) string, challenge string) {
 	op := opName(pattern)
 	mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -89,24 +96,30 @@ func (s *Server) handle(mux *http.ServeMux, pattern string, fn handlerFunc, scop
 		}()
 		defer func() {
 			if rec := recover(); rec != nil {
+				if rec == http.ErrAbortHandler {
+					panic(rec)
+				}
 				s.logger.ErrorContext(r.Context(), "handler panic", "route", pattern, "panic", fmt.Sprint(rec), "stack", string(debug.Stack()))
 				if !sw.wrote {
 					s.writeError(sw, api.CodeInternal, "internal error", nil)
 				}
 			}
 		}()
-		c, err := s.auth(r, scopes)
+		c, err := s.auth(r, token(r), scopes)
 		if err == nil {
 			err = fn(sw, r, c)
 		}
 		if err != nil {
+			if challenge != "" && errors.Is(err, errUnauthorized) {
+				sw.Header().Set("WWW-Authenticate", challenge)
+			}
 			s.writeErr(sw, r, err)
 		}
 	})
 }
 
-func (s *Server) auth(r *http.Request, scopes []grant.Scope) (call, error) {
-	claims, err := s.verifier.Verify(bearerToken(r), s.now())
+func (s *Server) auth(r *http.Request, token string, scopes []grant.Scope) (call, error) {
+	claims, err := s.verifier.Verify(token, s.now())
 	if err != nil || !slices.Contains(scopes, claims.Scope) {
 		return call{}, errUnauthorized
 	}

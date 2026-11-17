@@ -1,6 +1,7 @@
 package server
 
 import (
+	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"io"
@@ -67,6 +68,12 @@ func packCost(n int64) int64 { return 3*n + gitpack.VerifyWorkBytes }
 // receive reads an upload body under the upload deadline and reserves cost(len(body)) bytes. The reader slot is held from before
 // the first byte until the reservation is made. The caller releases the reservation.
 func (s *Server) receive(w http.ResponseWriter, r *http.Request, limit int64, cost func(bodyLen int64) int64) ([]byte, func(), error) {
+	return s.receiveEncoded(w, r, limit, cost, false)
+}
+
+// receiveEncoded is receive that inflates a gzip body when inflate is set. The gzip header is read under the reader
+// slot and the upload deadline, like the rest of the body, and the limit applies to the inflated bytes.
+func (s *Server) receiveEncoded(w http.ResponseWriter, r *http.Request, limit int64, cost func(bodyLen int64) int64, inflate bool) ([]byte, func(), error) {
 	select {
 	case s.readers <- struct{}{}:
 	case <-r.Context().Done():
@@ -75,6 +82,14 @@ func (s *Server) receive(w http.ResponseWriter, r *http.Request, limit int64, co
 	defer func() { <-s.readers }()
 	if err := http.NewResponseController(w).SetReadDeadline(s.now().Add(uploadTimeout)); err != nil {
 		return nil, nil, err
+	}
+	if inflate && r.Header.Get("Content-Encoding") == "gzip" {
+		zr, err := gzip.NewReader(r.Body)
+		if err != nil {
+			return nil, nil, errBody
+		}
+		defer func() { _ = zr.Close() }()
+		r.Body = zr
 	}
 	body, err := readBody(w, r, limit)
 	if err != nil {

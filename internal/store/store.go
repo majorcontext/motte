@@ -212,6 +212,29 @@ func (s *Service) ImportPack(ctx context.Context, repo Repo, id string, idx, pac
 	return s.putPack(ctx, repo, id, idx, pack)
 }
 
+// ReceivePack stores the objects of a pushed pack as one pack of the repo. The pack may be thin: the service
+// resolves the base of a ref delta from the repo, so the stored pack holds whole objects.
+func (s *Service) ReceivePack(ctx context.Context, repo Repo, pack []byte) error {
+	v, err := s.view(ctx, repo)
+	if err != nil {
+		return err
+	}
+	objs, err := gitpack.Unpack(ctx, pack, func(sha gitpack.SHA) (gitpack.Type, []byte, error) { return v.get(ctx, sha) })
+	switch {
+	case errors.Is(err, gitpack.ErrCorrupt), errors.Is(err, ErrNotFound):
+		return ErrInvalid
+	case errors.Is(err, gitpack.ErrTooLarge):
+		return ErrTooLarge
+	case err != nil:
+		return err
+	case len(objs) == 0:
+		return nil
+	}
+	built, idx, _ := gitpack.Build(objs)
+	sum := sha256.Sum256(built)
+	return s.putPack(ctx, repo, hex.EncodeToString(sum[:]), idx, built)
+}
+
 func (s *Service) putPack(ctx context.Context, repo Repo, id string, idx, pack []byte) error {
 	prefix, err := repoPrefix(repo)
 	if err != nil {
@@ -479,6 +502,35 @@ func (s *Service) Get(ctx context.Context, repo Repo, sha gitpack.SHA) (gitpack.
 	return v.get(ctx, sha)
 }
 
+// Reader reads the objects of one repo against the pack list of the moment that Reader was called, so a request
+// that reads many objects lists the packs once.
+type Reader struct{ v *view }
+
+func (s *Service) Reader(ctx context.Context, repo Repo) (*Reader, error) {
+	v, err := s.view(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
+	return &Reader{v}, nil
+}
+
+func (r *Reader) Get(ctx context.Context, sha gitpack.SHA) (gitpack.Type, []byte, error) {
+	return r.v.get(ctx, sha)
+}
+
+// Has reports for each sha whether the repo holds it, from the pack indexes only.
+func (r *Reader) Has(ctx context.Context, shas []gitpack.SHA) ([]bool, error) {
+	out := make([]bool, len(shas))
+	for i, sha := range shas {
+		_, err := r.v.find(ctx, sha)
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return nil, err
+		}
+		out[i] = err == nil
+	}
+	return out, nil
+}
+
 func (s *Service) Blobs(ctx context.Context, repo Repo, shas []gitpack.SHA) ([][]byte, error) {
 	v, err := s.view(ctx, repo)
 	if err != nil {
@@ -504,19 +556,11 @@ func (s *Service) Blobs(ctx context.Context, repo Repo, shas []gitpack.SHA) ([][
 
 // Has reports for each sha whether a pack of the repo holds it. It reads the pack indexes only.
 func (s *Service) Has(ctx context.Context, repo Repo, shas []gitpack.SHA) ([]bool, error) {
-	v, err := s.view(ctx, repo)
+	r, err := s.Reader(ctx, repo)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]bool, len(shas))
-	for i, sha := range shas {
-		_, err := v.find(ctx, sha)
-		if err != nil && !errors.Is(err, ErrNotFound) {
-			return nil, err
-		}
-		out[i] = err == nil
-	}
-	return out, nil
+	return r.Has(ctx, shas)
 }
 
 // Commit returns the tree of a commit and its committer time.

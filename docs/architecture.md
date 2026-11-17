@@ -8,7 +8,7 @@ Goal: motte stores the repositories of coding agents and the state of their virt
 
 Non-goals:
 
-- No git smart-HTTP, web UI, review or pull-request model, access lists, or users.
+- No git dumb HTTP, web UI, review or pull-request model, access lists, or users.
 - No multi-region store. One store serves all callers.
 - No compaction or deletion of packs, and no purge of deleted workspaces.
 
@@ -19,7 +19,8 @@ Non-goals:
 | `grant` | Claims, Ed25519 signer, verifier. Public package. | M1 |
 | `api` | Wire types and error codes. Public package. | M1 |
 | `bucket` | Object store seam with Cloud Storage (`bucket/gcs`) and filesystem (`bucket/fs`) buckets, and its conformance suite `bucket/buckettest`. Public package. | M1 |
-| `internal/gitpack` | Reader and writer of git pack files and v2 indexes. | M1 |
+| `internal/gitpack` | Reader and writer of git pack files and v2 indexes, and the reader of a pushed pack. | M1 |
+| `internal/pktline`, `internal/gitproto` | The pkt-line framing, and the git smart HTTP protocol over an object reader: advertisement, v2 fetch and ls-refs, receive-pack. | M6 |
 | `meta` | Metadata seam: repositories, workspaces and the epoch fence, op heads, refs, pack listing. Backends `meta/postgres` and `meta/sqlite`, and the suite `meta/metatest`. Public package. | M2 |
 | Store service | HTTP service over a `meta` store and a `bucket` store, and the epoch fence. | M2 |
 | `client` | Typed Go client for callers. Public package. | M3 |
@@ -29,7 +30,7 @@ Non-goals:
 
 ## Planes
 
-The store plane serves the node daemon and the jj backend. The control plane serves the caller. Every route needs a grant in the `Authorization: Bearer` header. A grant names the repository and the workspace. No route takes either from the request.
+The store plane serves the node daemon and the jj backend. The control plane serves the caller. Every route needs a grant in the `Authorization: Bearer` header. The git routes also take it as the password of HTTP Basic. A grant names the repository and the workspace. No route takes either from the request.
 
 ### Service
 
@@ -43,7 +44,7 @@ The store plane serves the node daemon and the jj backend. The control plane ser
 | `MOTTE_SQLITE_PATH` | SQLite database file. Required for `sqlite`. |
 | `MOTTE_BUCKET_KIND` | `gcs` or `fs`. |
 | `MOTTE_BUCKET` | Bucket name for `gcs`, directory for `fs`. |
-| `MOTTE_TRUSTED_KEYS` | JSON list of `{"kid","key","scopes"}`. `key` is the standard base64 of an Ed25519 public key. `scopes` holds only `node`, `read`, `import` and `operator`. The service refuses to start on any other scope text. |
+| `MOTTE_TRUSTED_KEYS` | JSON list of `{"kid","key","scopes"}`. `key` is the standard base64 of an Ed25519 public key. `scopes` holds only `node`, `read`, `write`, `import` and `operator`. The service refuses to start on any other scope text. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Optional. Enables OTLP trace export. |
 
 The service refuses to start on a `MOTTE_META` or `MOTTE_BUCKET_KIND` value that it does not know. The service applies the embedded migrations of its metadata backend at start. The PostgreSQL backend applies them under an advisory lock, so replicas can start together. `GET /health` answers 200. `GET /ready` answers 200 while the metadata backend answers a ping. `GET /metrics` serves Prometheus metrics. These three routes need no grant. A request for a path or method that no route serves answers 404 `vcs_not_found` or 405 `method_not_allowed` in the error envelope.
@@ -99,6 +100,27 @@ A Go test starts the same composition with `testserver.StartLocal`, which needs 
 | `PUT /v1/vcs/packs/{pack_id}` | `import` |
 
 A ref route serves any repository, whether or not it has a `repos` row.
+
+### Git smart HTTP
+
+Ordinary `git` clones, fetches and pushes a repository over HTTPS. The routes need no `/v1` grant header, and the grant goes in the way that git sends credentials.
+
+| Route | Scope |
+|---|---|
+| `GET /git/<prefix>/<path>.git/info/refs?service=git-upload-pack` | `read`, `write` |
+| `POST /git/<prefix>/<path>.git/git-upload-pack` | `read`, `write` |
+| `GET /git/<prefix>/<path>.git/info/refs?service=git-receive-pack` | `write` |
+| `POST /git/<prefix>/<path>.git/git-receive-pack` | `write` |
+
+- Repository: the URL names the repository as `<prefix>/<path>` where the grant names `<prefix>:<path>`, for example `/git/native/repo_X.git` for `native:repo_X`. The path may hold `/`. The part up to the last `.git/` is the repository. The repository of the URL must equal the `repo` claim of the grant, or the answer is 403 `vcs_repo_forbidden`. A repository that does not exist answers 404 `vcs_not_found`, so a push never creates one: the control plane creates repositories. A repository exists when it has a `repos` row (prefix `native`), or has at least one ref (any other prefix).
+- Grant: the client sends HTTP Basic with any user name and a grant as the password, or `Authorization: Bearer <grant>`. A missing or refused grant answers 401 with `WWW-Authenticate: Basic realm="motte"`, so git asks for credentials or runs its credential helper. A grant of another scope for the route (a `read` grant for receive-pack) answers 403.
+- Protocols: fetch speaks protocol v2 only (`Git-Protocol: version=2`, git 2.26 and later). The advertisement lists `ls-refs`, `fetch=filter` and `object-format=sha1`. A request for upload-pack without v2 answers 400. Push speaks v0 and v1 receive-pack with the capabilities `report-status`, `delete-refs`, `ofs-delta` and `object-format=sha1`. The dumb protocol, `shallow` and `deepen` requests, `want-ref`, `packfile-uris`, `atomic`, `push-options`, signed pushes and `side-band` on receive-pack are not offered. A filter other than `blob:none` is refused with 400.
+- Ref names: a stored ref named `main` is the git ref `refs/heads/main`. A stored name that starts with `refs/` other than `refs/heads/` has the same git name. HEAD names `refs/heads/main` when it exists. A push may write `refs/heads/<name>` and any other `refs/...` name that is valid, and `<name>` must not start with `refs/`. A stored ref named under `refs/heads/` has no git name and is not listed.
+- Fetch: a `want` may name any object of the repository. The service lists the commits that the wants reach and the `have` commits that it holds do not reach, walking by commit time. It adds the trees and blobs that those commits reach and that the trees of the edge commits (the held parents) do not hold. With `filter=blob:none` it adds no blob that a tree names, and it sends a blob that a `want` names. It never sends a delta: the pack holds whole objects, so `thin-pack`, `ofs-delta`, `include-tag` and `no-progress` have no effect. A client fetches an annotated tag that it needs with a second `want`. It answers `ready` as soon as one `have` is common, and the pack then leaves out what that commit holds. It streams the pack through side-band 1 with one object in memory at a time, and reads each pack through the cache of ranged reads.
+- Push: the service reads the whole request body, inflates a `Content-Encoding: gzip` body first, reads the ref commands, and unpacks the pack. A thin pack is complete: the service resolves each ref delta base from the repository. It stores the objects as one whole pack of the repository, with the SHA-256 of the stored pack as its id, and adds it to the pack listing. Every object is hashed, so the pack is checked as `PUT /v1/vcs/packs/{pack_id}` checks it. The service does not check that the objects of a new commit are connected. It checks only that the new value of a ref exists, is a commit (or a tag, outside `refs/heads/`).
+- Ref update: each ref command goes, in order, through the one function `updateRef` of `internal/server/git.go`, which calls `meta.Store.UpdateRef`. The update is a compare and swap on the commit: `old` is the commit that the client saw, a zero `old` creates the ref and a zero `new` deletes it. A ref that is not at `old` fails that command with `ng <ref> stale info` and the other commands go on. There is no atomic push. The service does not tell a force push from a plain one, because git sends no flag for it: the client refuses a non-fast-forward unless it is forced, and the service accepts any update that passes the compare and swap, as git does with `receive.denyNonFastForwards` unset. The reply is `report-status`: `unpack ok` or the refusal of the pack, then `ok <ref>` or `ng <ref> <reason>` for each command.
+- Limits: a push body has at most 64 MiB plus 1 MiB of commands, after gzip. A pack has at most 100000 objects, 64 MiB of inflated entry data and 64 MiB of objects, and each object has at most 16 MiB (`gitpack.MaxObjectBytes`). A command list has at most 1000 commands. A fetch request body has at most 8 MiB, with at most 10000 wants and 100000 haves. A fetch holds at most 1000000 objects and commits in its sets, and a larger fetch answers 413 `vcs_object_too_large`. A fetch has no limit on the size of the pack that it streams. A push reserves its body, three times 64 MiB, 4 times 16 MiB and the verification work: B + 192 MiB + 64 MiB + 48 MiB. A fetch reserves 176 MiB. A push takes one of the 4 reader slots while it reads its body, as an upload does.
+- The git routes take no part in the epoch fence. A `write` grant moves a ref with no workspace, so a workspace that works on the same ref sees the new commit through the ref generation.
 
 ### Control plane
 
@@ -194,6 +216,7 @@ Every method that writes is one atomic unit. The unit is one conditional stateme
 | `SwapRef(ws, epoch, repo, name, 0, sha)` | The fence holds and the ref is absent. | Inserts the ref with a new generation. | `ErrClaimLost`, else `*RefConflict` with the stored ref as `Current`. |
 | `SwapRef(ws, epoch, repo, name, expect, sha)` | The fence holds and the stored generation is `expect`. | Sets the commit and a new generation. | `ErrClaimLost`, else `*RefConflict` with `Current` nil when the ref is absent. |
 | `DeleteRef(ws, epoch, repo, name, expect)` | The fence holds and the stored generation is `expect`. | Deletes the ref. | As `SwapRef`. |
+| `UpdateRef(repo, name, old, new)` | No fence. The stored commit is `old`, or the ref is absent when `old` is empty. | Creates the ref when `old` is empty, deletes it when `new` is empty, else sets the commit. Every write takes a new generation. | `*RefConflict` with the stored ref as `Current`, nil when the ref is absent. |
 | `AddPack(repo, id, bytes)` | No pack row has the repo and id. | Inserts the row with the creation time. | None. A repeat changes nothing and keeps the first `bytes`. |
 | `Packs(repo)` | None. | Lists the packs of the repo, oldest first, then by id. | None. |
 
@@ -288,7 +311,7 @@ A grant is `mg1.<base64url payload>.<base64url signature>`. The payload is JSON.
 | Claim | Meaning |
 |---|---|
 | `kid` | Key identifier. The verifier selects the public key by `kid`. |
-| `scope` | One of `node`, `read`, `import`, `operator`. |
+| `scope` | One of `node`, `read`, `write`, `import`, `operator`. |
 | `ws` | Workspace identifier. |
 | `epoch` | Claim epoch of the workspace when the grant was minted. |
 | `repo` | Repository text. |
@@ -296,7 +319,7 @@ A grant is `mg1.<base64url payload>.<base64url signature>`. The payload is JSON.
 | `subject` | The creator, for traces only. It grants nothing. |
 | `exp` | Expiry as Unix seconds. A grant is valid while `now < exp`. |
 
-Required claims by scope: `node` needs `ws`, `epoch` and `repo`. `read` and `import` need `repo`. `operator` needs none.
+Required claims by scope: `node` needs `ws`, `epoch` and `repo`. `read`, `write` and `import` need `repo`. `operator` needs none.
 
 The verifier holds only public keys. Each key has a `kid` and a set of allowed scopes. The verifier rejects a grant whose scope is not allowed for its key. Every rejection answers 401 with the same error, and the response never carries the grant.
 
@@ -304,14 +327,14 @@ The verifier holds only public keys. Each key has a `kid` and a set of allowed s
 
 The caller owns the private keys. Two signers exist:
 
-- The control-plane key may sign all scopes.
+- The control-plane key may sign all scopes. A `write` grant lets the bearer move any ref of its repository without a workspace: only the control plane or a trusted pipeline holds one.
 - The node key lives on the node daemon and may sign only `node`. A compromised node cannot mint `import` or `operator` grants. The plugin mints a `node` grant only for a pod of an allowed namespace (see Node plugin). It can mint `node` grants, bounded by the repository and epoch of the workspace row.
 
 ### Rotation
 
 1. Add the new public key to the store.
 2. Switch the signer to the new key.
-3. Remove the old key after the longest grant life: 1 hour for `node`, 60 seconds for `operator`, `read` and `import`.
+3. Remove the old key after the longest grant life: 1 hour for `node`, 60 seconds for `operator`, `read`, `write` and `import`.
 
 Both keys are valid between step 1 and step 3.
 
@@ -335,7 +358,7 @@ Package `client` has one typed method for each route of both planes. A `Client` 
 - A failure answer is an `*Error` with the HTTP status, the wire code, the message and the details. `errors.Is` matches the sentinel of the code: `ErrNotFound`, `ErrGenerationConflict`, `ErrClaimLost`, `ErrObjectInvalid`, `ErrObjectTooLarge`, `ErrRepoForbidden`, `ErrWorkspaceConflict`, `ErrWorkspaceDeleted`, `ErrUnauthorized`, `ErrInvalidBody` and `ErrInternal`. A failure answer with no wire error body is `ErrUnexpected`.
 - `CurrentRef` returns the stored ref that a ref generation conflict carries.
 
-Package `testserver` runs the real server in the process of a test, on a fresh schema of the PostgreSQL database that the caller names (or `MOTTE_TEST_DATABASE_URL`) and a temporary filesystem bucket. It skips the test when no DSN is set. It returns the base URL, the pool of its schema (for a test that sets up a state no route can make), the control-plane and node signers, and helpers that mint operator, node, read and import grants.
+Package `testserver` runs the real server in the process of a test, on a fresh schema of the PostgreSQL database that the caller names (or `MOTTE_TEST_DATABASE_URL`) and a temporary filesystem bucket. It skips the test when no DSN is set. It returns the base URL, the pool of its schema (for a test that sets up a state no route can make), the control-plane and node signers, and helpers that mint operator, node, read, write and import grants.
 
 ## Observability
 

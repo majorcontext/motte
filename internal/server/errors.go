@@ -7,6 +7,7 @@ import (
 	"syscall"
 
 	"github.com/majorcontext/motte/api"
+	"github.com/majorcontext/motte/internal/gitproto"
 	"github.com/majorcontext/motte/internal/store"
 	"github.com/majorcontext/motte/meta"
 )
@@ -21,12 +22,13 @@ func (s *Server) writeError(w http.ResponseWriter, code api.Code, msg string, de
 func (s *Server) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 	var refConflict *meta.RefConflict
 	var opConflict *meta.OpHeadsConflict
+	var badRequest gitproto.RequestError
 	switch {
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, meta.ErrNotFound):
 		s.writeError(w, api.CodeNotFound, "not found", nil)
 	case errors.Is(err, store.ErrInvalid):
 		s.writeError(w, api.CodeObjectInvalid, "invalid object name or content", nil)
-	case errors.Is(err, store.ErrTooLarge):
+	case errors.Is(err, store.ErrTooLarge), errors.Is(err, gitproto.ErrTooLarge):
 		s.writeError(w, api.CodeObjectTooLarge, "object too large", nil)
 	case errors.Is(err, meta.ErrClaimLost):
 		s.writeError(w, api.CodeClaimLost, "the claim epoch is not the live one", nil)
@@ -36,8 +38,12 @@ func (s *Server) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 		s.writeError(w, api.CodeWorkspaceConflict, "the workspace has another owner or repository", nil)
 	case errors.Is(err, errForbidden):
 		s.writeError(w, api.CodeRepoForbidden, "the repository is not readable", nil)
+	case errors.Is(err, errNotWritable):
+		s.writeError(w, api.CodeRepoForbidden, "the grant does not allow writes", nil)
 	case errors.Is(err, errUnauthorized):
 		s.writeError(w, api.CodeUnauthorized, "grant not accepted", nil)
+	case errors.As(err, &badRequest):
+		s.writeError(w, api.CodeInvalidBody, badRequest.Error(), nil)
 	case errors.Is(err, errBody):
 		s.writeError(w, api.CodeInvalidBody, "request body is not valid", nil)
 	case errors.As(err, &refConflict):
@@ -58,6 +64,7 @@ var (
 	errForbidden    = errors.New("server: repository forbidden")
 	errBody         = errors.New("server: invalid body")
 	errUnauthorized = errors.New("server: grant not accepted")
+	errNotWritable  = errors.New("server: grant cannot write")
 )
 
 // logSafe names an error by its type chain and its innermost cause, which a log line may hold. The message of a

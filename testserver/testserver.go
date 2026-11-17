@@ -72,7 +72,7 @@ func run(t testing.TB, store meta.Store) *Server {
 	srv := server.New(server.Config{
 		Meta: store, Bucket: root.Bucket("motte"),
 		Verifier: grant.NewVerifier(
-			grant.Key{Kid: "cp", Public: cpPub, Scopes: []grant.Scope{grant.ScopeNode, grant.ScopeRead, grant.ScopeImport, grant.ScopeOperator}},
+			grant.Key{Kid: "cp", Public: cpPub, Scopes: []grant.Scope{grant.ScopeNode, grant.ScopeRead, grant.ScopeWrite, grant.ScopeImport, grant.ScopeOperator}},
 			grant.Key{Kid: "node", Public: nodePub, Scopes: []grant.Scope{grant.ScopeNode}}),
 	})
 	ts := httptest.NewServer(srv.Handler())
@@ -112,6 +112,12 @@ func (s *Server) NodeGrant(t testing.TB, workspace string, epoch uint64, repo st
 func (s *Server) ReadGrant(t testing.TB, repo string) string {
 	t.Helper()
 	return s.Mint(t, s.Operator, grant.Claims{Scope: grant.ScopeRead, Repo: repo})
+}
+
+// WriteGrant mints a write grant.
+func (s *Server) WriteGrant(t testing.TB, repo string) string {
+	t.Helper()
+	return s.Mint(t, s.Operator, grant.Claims{Scope: grant.ScopeWrite, Repo: repo})
 }
 
 // ImportGrant mints an import grant.

@@ -11,7 +11,7 @@ func TestVerify(t *testing.T) {
 	now := time.Unix(1000, 0)
 	pubA, privA, _ := ed25519.GenerateKey(nil)
 	pubB, privB, _ := ed25519.GenerateKey(nil)
-	all := []Scope{ScopeNode, ScopeRead, ScopeImport, ScopeOperator}
+	all := []Scope{ScopeNode, ScopeRead, ScopeWrite, ScopeImport, ScopeOperator}
 	v := NewVerifier(
 		Key{Kid: "cp", Public: pubA, Scopes: all},
 		Key{Kid: "node", Public: pubB, Scopes: []Scope{ScopeNode}},
@@ -35,6 +35,8 @@ func TestVerify(t *testing.T) {
 		{"node key node scope", mint(nodeKey, node), true},
 		{"control key any scope", mint(cp, Claims{Scope: ScopeOperator, Exp: 2000}), true},
 		{"node key import scope", mint(nodeKey, Claims{Scope: ScopeImport, Repo: "n:a", Exp: 2000}), false},
+		{"write scope with a repo", mint(cp, Claims{Scope: ScopeWrite, Repo: "n:a", Exp: 2000}), true},
+		{"node key write scope", mint(nodeKey, Claims{Scope: ScopeWrite, Repo: "n:a", Exp: 2000}), false},
 		{"expired", mint(cp, Claims{Scope: ScopeRead, Repo: "n:a", Exp: 1000}), false},
 		{"unknown kid", mint(Signer{Kid: "old", Key: privA}, node), false},
 		{"wrong key for kid", mint(Signer{Kid: "cp", Key: privB}, node), false},
@@ -54,7 +56,7 @@ func TestVerify(t *testing.T) {
 
 func TestMintRejectsIncompleteClaims(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(nil)
-	for _, c := range []Claims{{Scope: ScopeNode, Repo: "n:a"}, {Scope: ScopeRead}, {Scope: "x"}} {
+	for _, c := range []Claims{{Scope: ScopeNode, Repo: "n:a"}, {Scope: ScopeRead}, {Scope: ScopeWrite}, {Scope: "x"}} {
 		if _, err := (Signer{Kid: "k", Key: priv}).Mint(c); err == nil {
 			t.Errorf("Mint(%+v) accepted", c)
 		}

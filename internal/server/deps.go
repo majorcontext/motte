@@ -19,6 +19,8 @@ type objects interface {
 	Has(ctx context.Context, repo store.Repo, shas []gitpack.SHA) ([]bool, error)
 	Get(ctx context.Context, repo store.Repo, sha gitpack.SHA) (gitpack.Type, []byte, error)
 	PutObjects(ctx context.Context, repo store.Repo, objs []gitpack.Object) ([]gitpack.SHA, error)
+	Reader(ctx context.Context, repo store.Repo) (*store.Reader, error)
+	ReceivePack(ctx context.Context, repo store.Repo, pack []byte) error
 	ImportPack(ctx context.Context, repo store.Repo, id string, idx, pack []byte) error
 	GetOp(ctx context.Context, ws string, kind store.OpKind, id string) ([]byte, error)
 	PutOp(ctx context.Context, ws string, kind store.OpKind, id string, data []byte) error
