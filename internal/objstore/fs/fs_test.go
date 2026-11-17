@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"testing"
 
 	"github.com/majorcontext/motte/internal/objstore"
@@ -30,6 +31,10 @@ func TestBucket(t *testing.T) {
 	}
 	if got, _ := b.GetRange(ctx, "a/b", 9, 3); len(got) != 0 {
 		t.Errorf("range past end = %q", got)
+	}
+	p, _ := b.(bucket).path("a/b")
+	if raw, _ := os.ReadFile(p); len(raw) != headerSize+5 || string(raw[headerSize:]) != "hello" {
+		t.Errorf("file layout: %d bytes", len(raw))
 	}
 	if _, err := b.Get(ctx, "missing"); !errors.Is(err, objstore.ErrNotFound) {
 		t.Errorf("missing: %v", err)

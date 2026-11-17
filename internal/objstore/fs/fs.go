@@ -3,20 +3,37 @@ package fs
 
 import (
 	"context"
+	"crypto/md5"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	iofs "io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/majorcontext/motte/internal/objstore"
 )
 
+// headerSize is the fixed block that precedes the bytes of an object file: a 4-byte big-endian length and the JSON
+// attributes, zero padded. The format is on disk and does not change.
+const headerSize = 4096
+
 var bucketName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$`)
+
+type attrs struct {
+	Name        string `json:"name"`
+	Size        int64  `json:"size"`
+	ContentType string `json:"content_type"`
+	MD5         string `json:"md5"`
+	Generation  int64  `json:"generation"`
+}
 
 // Root keeps objects under one directory. Use one process per root.
 type Root struct{ root string }
@@ -68,6 +85,17 @@ func (b bucket) Create(_ context.Context, key string, data []byte) (bool, error)
 	}
 	defer func() { _ = os.Remove(tmp.Name()) }()
 	defer func() { _ = tmp.Close() }()
+	sum := md5.Sum(data)
+	raw, err := json.Marshal(attrs{Name: key, Size: int64(len(data)), ContentType: "application/octet-stream", MD5: hex.EncodeToString(sum[:]), Generation: time.Now().UnixNano()})
+	if err != nil || len(raw) > headerSize-4 {
+		return false, errors.New("fs: object attributes are too large")
+	}
+	var block [headerSize]byte
+	binary.BigEndian.PutUint32(block[:4], uint32(len(raw)))
+	copy(block[4:], raw)
+	if _, err := tmp.Write(block[:]); err != nil {
+		return false, err
+	}
 	if _, err := tmp.Write(data); err != nil {
 		return false, err
 	}
@@ -122,18 +150,23 @@ func (b bucket) GetRange(_ context.Context, key string, off, n int64) ([]byte, e
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
-	info, err := f.Stat()
-	if err != nil {
-		return nil, err
+	var block [headerSize]byte
+	if _, err := io.ReadFull(f, block[:]); err != nil {
+		return nil, fmt.Errorf("fs: read header: %w", err)
 	}
-	if off >= info.Size() {
+	hl := binary.BigEndian.Uint32(block[:4])
+	var a attrs
+	if hl == 0 || hl > headerSize-4 || json.Unmarshal(block[4:4+hl], &a) != nil {
+		return nil, errors.New("fs: corrupt header")
+	}
+	if off >= a.Size {
 		return nil, nil
 	}
-	if n < 0 || n > info.Size()-off {
-		n = info.Size() - off
+	if n < 0 || n > a.Size-off {
+		n = a.Size - off
 	}
 	out := make([]byte, n)
-	if _, err := f.ReadAt(out, off); err != nil {
+	if _, err := f.ReadAt(out, headerSize+off); err != nil {
 		return nil, err
 	}
 	return out, nil
