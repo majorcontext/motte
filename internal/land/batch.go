@@ -12,6 +12,9 @@ import (
 	"github.com/majorcontext/motte/internal/gitpack"
 )
 
+// MaxObjectBytes is the largest object that a land may make.
+var MaxObjectBytes = gitpack.MaxObjectBytes
+
 // MaxChangedPaths is the most distinct leaves that one land may change.
 var MaxChangedPaths = 100000
 
@@ -74,6 +77,7 @@ type Batch struct {
 	produced map[gitpack.SHA][]Entry
 	diffs    map[gitpack.SHA]diffResult
 	cached   int
+	tooBig   bool
 }
 
 // diffResult is the paths that differ between a base and the start tip, and false when they are too many to keep.
@@ -104,6 +108,9 @@ func (b *Batch) put(t gitpack.Type, data []byte) gitpack.SHA {
 		b.byID[sha] = len(b.objs)
 		b.objs = append(b.objs, gitpack.Object{Type: t, Data: data})
 		b.bytes += len(data)
+	}
+	if len(data) > MaxObjectBytes {
+		b.tooBig = true
 	}
 	return sha
 }
@@ -164,9 +171,12 @@ func (b *Batch) walk(ctx context.Context, base, head gitpack.SHA) ([]link, error
 // also changed since base, and Invalid or ErrTooLarge when the range cannot land. A failed land leaves no trace.
 func (b *Batch) Land(ctx context.Context, base, head gitpack.SHA, when time.Time) (Landed, error) {
 	b.trees, b.produced = b.produced, map[gitpack.SHA][]Entry{}
-	b.loaded = 0
+	b.loaded, b.tooBig = 0, false
 	b.mark, b.markSize = len(b.objs), b.bytes
 	l, err := b.land(ctx, base, head, when)
+	if err == nil && b.tooBig {
+		err = ErrTooLarge
+	}
 	if err != nil {
 		for _, o := range b.objs[b.mark:] {
 			delete(b.byID, gitpack.Hash(o.Type, o.Data))

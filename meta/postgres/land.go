@@ -167,7 +167,7 @@ func (s *Store) LandRef(ctx context.Context, m meta.LandMove, owner string, now 
 			ended AS (
 				UPDATE land_queue q SET state = 'done', result = r.result, done_at = $4, generation = CASE WHEN r.landed THEN (SELECT generation FROM moved) END
 				FROM jsonb_to_recordset($13::jsonb) AS r(id text, result text, landed boolean)
-				WHERE q.repo = $1 AND q.id = r.id AND EXISTS (SELECT 1 FROM moved) RETURNING 1)
+				WHERE q.repo = $1 AND q.id = r.id AND q.state <> 'done' AND EXISTS (SELECT 1 FROM moved) RETURNING 1)
 			SELECT generation FROM moved`,
 			m.Repo, m.Ref, owner, now, m.Old, m.New, part, seq, m.Kind, int64(len(m.Rows)), string(rawRows), m.Retain(), string(doneRows(m.Results))).Scan(&generation)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -201,7 +201,7 @@ func (s *Store) FinishLands(ctx context.Context, repo, ref, owner string, now ti
 		ended AS (
 			UPDATE land_queue q SET state = 'done', result = r.result, done_at = $4
 			FROM jsonb_to_recordset($5::jsonb) AS r(id text, result text, landed boolean)
-			WHERE q.repo = $1 AND q.id = r.id AND EXISTS (SELECT 1 FROM lease) RETURNING 1)
+			WHERE q.repo = $1 AND q.id = r.id AND q.state <> 'done' AND EXISTS (SELECT 1 FROM lease) RETURNING 1)
 		SELECT EXISTS (SELECT 1 FROM lease)`, repo, ref, owner, now, string(doneRows(results))).Scan(&held)
 	if err != nil {
 		return fmt.Errorf("postgres: finish lands: %w", err)

@@ -128,7 +128,7 @@ func (s *Store) ClaimLands(ctx context.Context, repo, ref, owner string, now tim
 func (s *Store) FinishLands(ctx context.Context, repo, ref, owner string, now time.Time, results []meta.LandDone) error {
 	var held bool
 	err := inTx(ctx, s.db, func(tx *sql.Tx) error {
-		stmt, err := tx.PrepareContext(ctx, `UPDATE land_queue SET state = 'done', result = ?5, done_at = ?4 WHERE repo = ?1 AND id = ?6 AND `+leaseHeld)
+		stmt, err := tx.PrepareContext(ctx, `UPDATE land_queue SET state = 'done', result = ?5, done_at = ?4 WHERE repo = ?1 AND id = ?6 AND state <> 'done' AND `+leaseHeld)
 		if err != nil {
 			return err
 		}
@@ -226,7 +226,7 @@ func landRows(ctx context.Context, tx *sql.Tx, m meta.LandMove, part int, now in
 		}
 	}
 	doneStmt, err := tx.PrepareContext(ctx, `UPDATE land_queue SET state = 'done', result = ?4, done_at = ?5, generation = CASE WHEN ?6 THEN `+nextGeneration+` END
-		WHERE repo = ?2 AND id = ?3 AND `+applied)
+		WHERE repo = ?2 AND id = ?3 AND state <> 'done' AND `+applied)
 	if err != nil {
 		return err
 	}

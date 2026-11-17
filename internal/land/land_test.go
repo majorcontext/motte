@@ -234,3 +234,26 @@ func TestTheCacheOfBaseDiffsIsBounded(t *testing.T) {
 		}
 	}
 }
+
+func TestALandThatMakesAnObjectAboveTheLimitFailsAloneAndLeavesNoTrace(t *testing.T) {
+	defer func(n int) { MaxObjectBytes = n }(MaxObjectBytes)
+	m := mem{}
+	base := m.commit(gitpack.SHA{}, m.tree(map[string]string{"a": "1"}), "")
+	one := m.commit(base, m.tree(map[string]string{"a": "1", "b": "1"}), "")
+	two := m.commit(base, m.tree(map[string]string{"a": "1", "c": "1"}), "")
+	tip := m.commit(base, m.tree(map[string]string{"a": "1", "d": "1"}), "")
+	b := m.batch(tip)
+	MaxObjectBytes = 1 << 20
+	if _, err := b.Land(context.Background(), base, one, time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	held := b.Bytes()
+	MaxObjectBytes = 100
+	if _, err := b.Land(context.Background(), base, two, time.Unix(1, 0)); !errors.Is(err, ErrTooLarge) || b.Bytes() != held {
+		t.Fatalf("err = %v, bytes = %d, want ErrTooLarge and %d", err, b.Bytes(), held)
+	}
+	MaxObjectBytes = 1 << 20
+	if _, err := b.Land(context.Background(), base, two, time.Unix(1, 0)); err != nil {
+		t.Fatalf("a land after the refused one: %v", err)
+	}
+}

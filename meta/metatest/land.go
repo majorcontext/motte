@@ -229,6 +229,10 @@ func landFinish(t *testing.T, s meta.Store) {
 	if it, _ := s.LandItem(ctx, repoText, "a"); !it.Done || it.Result != "r" {
 		t.Errorf("item = %+v", it)
 	}
+	ok(t, s.FinishLands(ctx, repoText, landRef, "o1", t0, []meta.LandDone{{ID: "a", Result: "second"}}))
+	if it, _ := s.LandItem(ctx, repoText, "a"); it.Result != "r" {
+		t.Errorf("result = %q after a second end, want an item that is done to stay as it was", it.Result)
+	}
 	if got, _ := s.Ref(ctx, repoText, landRef); got != seed {
 		t.Errorf("ref = %+v, want it unmoved", got)
 	}
