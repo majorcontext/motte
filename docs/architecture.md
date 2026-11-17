@@ -46,6 +46,7 @@ The store plane serves the node daemon and the jj backend. The control plane ser
 | `MOTTE_BUCKET_KIND` | `gcs` or `fs`. |
 | `MOTTE_BUCKET` | Bucket name for `gcs`, directory for `fs`. |
 | `MOTTE_TRUSTED_KEYS` | JSON list of `{"kid","key","scopes"}`. `key` is the standard base64 of an Ed25519 public key. `scopes` holds only `node`, `read`, `write`, `import`, `operator` and `merge`. The service refuses to start on any other scope text. |
+| `MOTTE_EVENT_RETENTION` | Optional. How long a ref event is kept, as a Go duration. Default `336h`. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Optional. Enables OTLP trace export. |
 
 The service refuses to start on a `MOTTE_META` or `MOTTE_BUCKET_KIND` value that it does not know. The service applies the embedded migrations of its metadata backend at start. The PostgreSQL backend applies them under an advisory lock, so replicas can start together. `GET /health` answers 200. `GET /ready` answers 200 while the metadata backend answers a ping. `GET /metrics` serves Prometheus metrics. These three routes need no grant. A request for a path or method that no route serves answers 404 `vcs_not_found` or 405 `method_not_allowed` in the error envelope.
