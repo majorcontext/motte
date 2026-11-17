@@ -9,7 +9,6 @@ import (
 )
 
 var (
-	ErrNotConfigured      = errors.New("motte: not configured")
 	ErrNotFound           = errors.New("motte: not found")
 	ErrGenerationConflict = errors.New("motte: generation conflict")
 	ErrClaimLost          = errors.New("motte: claim lost")
@@ -28,7 +27,6 @@ var (
 )
 
 var sentinels = map[api.Code]error{
-	api.CodeNotConfigured:      ErrNotConfigured,
 	api.CodeNotFound:           ErrNotFound,
 	api.CodeGenerationConflict: ErrGenerationConflict,
 	api.CodeClaimLost:          ErrClaimLost,

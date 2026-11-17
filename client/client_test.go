@@ -17,7 +17,6 @@ import (
 
 func TestWireCodesMapToSentinels(t *testing.T) {
 	cases := map[api.Code]error{
-		api.CodeNotConfigured:      client.ErrNotConfigured,
 		api.CodeNotFound:           client.ErrNotFound,
 		api.CodeGenerationConflict: client.ErrGenerationConflict,
 		api.CodeClaimLost:          client.ErrClaimLost,

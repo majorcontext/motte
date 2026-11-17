@@ -122,6 +122,9 @@ const (
 	// maxVerifyWork bounds the bytes that verifying one pack may inflate.
 	verifyCacheBytes = 32 << 20
 	maxVerifyWork    = 2 << 30
+	// VerifyWorkBytes bounds the working memory of Verify: the base cache, the object kept past it, and the delta, its
+	// base and its result while one object resolves.
+	VerifyWorkBytes = verifyCacheBytes + 4*MaxObjectBytes
 )
 
 var (

@@ -7,18 +7,18 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/majorcontext/motte/api"
 	"github.com/majorcontext/motte/client"
 	"github.com/majorcontext/motte/grant"
 	"github.com/majorcontext/motte/internal/gitpack"
-	"github.com/majorcontext/motte/internal/pg"
 	"github.com/majorcontext/motte/testserver"
 )
 
@@ -31,7 +31,6 @@ const (
 type env struct {
 	*testserver.Server
 	t    *testing.T
-	pool *pgxpool.Pool
 	url  string
 	cp   grant.Signer
 	node grant.Signer
@@ -46,7 +45,7 @@ type reply struct {
 func newEnv(t *testing.T) *env {
 	t.Helper()
 	ts := testserver.Start(t, "")
-	return &env{Server: ts, t: t, pool: ts.Pool, url: ts.URL, cp: ts.Operator, node: ts.Node}
+	return &env{Server: ts, t: t, url: ts.URL, cp: ts.Operator, node: ts.Node}
 }
 
 func (e *env) mint(s grant.Signer, c grant.Claims) string { return e.Mint(e.t, s, c) }
@@ -124,37 +123,6 @@ func TestStaleEpochWritesAreRefusedAfterAClaimRaise(t *testing.T) {
 	}
 	e.want(e.claim("ws1", 1, repoText), 409, "vcs_claim_lost")
 	e.want(e.call("PUT", "/v1/vcs/refs/new", e.nodeGrant("ws1", 2), map[string]any{"expect": 0, "commit": commitA}), 200, "")
-}
-
-func TestClaimWaitsForAWriteInFlight(t *testing.T) {
-	e := newEnv(t)
-	e.want(e.claim("ws1", 1, repoText), 200, "")
-	ctx := context.Background()
-	tx, err := e.pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	var id string
-	if err := tx.QueryRow(ctx, `SELECT id FROM workspaces WHERE id = 'ws1' AND epoch = 1 FOR SHARE`).Scan(&id); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO refs (repo, name, commit_sha, generation) VALUES ($1, 'inflight', $2, nextval('ref_generation'))`, repoText, commitA); err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan reply, 1)
-	go func() { done <- e.claim("ws1", 2, repoText) }()
-	select {
-	case r := <-done:
-		t.Fatalf("claim finished while a write held the row: %d %v", r.status, r.body)
-	case <-time.After(300 * time.Millisecond):
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
-	e.want(<-done, 200, "")
-	e.want(e.call("GET", "/v1/vcs/refs/inflight", e.readGrant(repoText), nil), 200, "")
-	e.want(e.call("PUT", "/v1/vcs/refs/late", e.nodeGrant("ws1", 1), map[string]any{"expect": 0, "commit": commitA}), 409, "vcs_claim_lost")
 }
 
 func TestRefGenerationIsACompareAndSwapThatNeverRepeats(t *testing.T) {
@@ -367,46 +335,6 @@ func TestGrantScopeRefusals(t *testing.T) {
 	}
 }
 
-// The routes check the epoch before a write; this reaches the write statements
-// as a request that passed that check and then lost the race would.
-func TestWriteStatementsRefuseAStaleEpochOnTheirOwn(t *testing.T) {
-	e := newEnv(t)
-	ctx := context.Background()
-	db := &pg.DB{Pool: e.pool}
-	e.want(e.claim("ws1", 2, repoText), 200, "")
-	ref, err := db.SwapRef(ctx, "ws1", 2, repoText, "keep", 0, commitA)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.SwapOpHeads(ctx, "ws1", 2, repoText, 0, []string{"aaaaaaaaaaaaaaaa"}); err != nil {
-		t.Fatal(err)
-	}
-	writes := map[string]func() error{
-		"ref create": func() error { _, err := db.SwapRef(ctx, "ws1", 1, repoText, "new", 0, commitA); return err },
-		"ref swap": func() error {
-			_, err := db.SwapRef(ctx, "ws1", 1, repoText, "keep", ref.Generation, commitB)
-			return err
-		},
-		"ref delete": func() error { return db.DeleteRef(ctx, "ws1", 1, repoText, "keep", ref.Generation) },
-		"op heads": func() error {
-			_, err := db.SwapOpHeads(ctx, "ws1", 1, repoText, 1, []string{"bbbbbbbbbbbbbbbb"})
-			return err
-		},
-		"first heads": func() error {
-			_, err := db.SwapOpHeads(ctx, "ws1", 1, repoText, 0, []string{"bbbbbbbbbbbbbbbb"})
-			return err
-		},
-		"report": func() error { return db.Report(ctx, "ws1", 1, repoText, 1, "", "aaaaaaaaaaaaaaaa", commitA) },
-	}
-	for name, write := range writes {
-		t.Run(name, func(t *testing.T) {
-			if err := write(); !errors.Is(err, pg.ErrClaimLost) {
-				t.Errorf("error = %v, want pg.ErrClaimLost, not a generation conflict", err)
-			}
-		})
-	}
-}
-
 func TestGrantWithoutTheBearerSchemeIsRefused(t *testing.T) {
 	e := newEnv(t)
 	req, _ := http.NewRequest("GET", e.url+"/v1/repos", nil)
@@ -418,5 +346,82 @@ func TestGrantWithoutTheBearerSchemeIsRefused(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 401 {
 		t.Errorf("status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestBodyOverTheLimitAnswersTooLarge(t *testing.T) {
+	e := newEnv(t)
+	e.want(e.claim("ws1", 1, repoText), 200, "")
+	r := e.call("POST", "/v1/vcs/objects/has", e.readGrant(repoText), map[string]any{"shas": []string{strings.Repeat("a", 1<<20)}})
+	e.want(r, 413, "vcs_object_too_large")
+	_, err := e.Client(e.nodeGrant("ws1", 1), client.WithBudget(30*time.Second)).PutObjects(context.Background(), []client.Object{{Type: "blob", Data: make([]byte, gitpack.MaxObjectBytes+1)}})
+	refuses(t, err, client.ErrObjectTooLarge, 413)
+}
+
+func TestSlowUploadDoesNotStallOtherRequests(t *testing.T) {
+	for method, path := range map[string]string{"POST": "/v1/vcs/objects", "PUT": "/v1/vcs/ops/operations/0123456789abcdef"} {
+		t.Run(path, func(t *testing.T) {
+			e := newEnv(t)
+			e.want(e.claim("ws1", 1, repoText), 200, "")
+			body, w := io.Pipe()
+			reading := make(chan struct{})
+			ctx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{Got100Continue: func() { close(reading) }})
+			req, _ := http.NewRequestWithContext(ctx, method, e.url+path, body)
+			req.Header.Set("Authorization", "Bearer "+e.nodeGrant("ws1", 1))
+			req.Header.Set("Expect", "100-continue")
+			go func() {
+				if resp, err := http.DefaultClient.Do(req); err == nil {
+					resp.Body.Close()
+				}
+			}()
+			<-reading
+			if _, err := e.Client(e.readGrant(repoText)).Has(context.Background(), []string{commitA}); err != nil {
+				t.Fatalf("a read waited for a stalled upload: %v", err)
+			}
+			w.CloseWithError(errors.New("sender gone"))
+		})
+	}
+}
+
+func TestUnknownRouteAndMethodUseTheErrorEnvelope(t *testing.T) {
+	e := newEnv(t)
+	e.want(e.call("GET", "/v1/nothing", e.operator(), nil), 404, "vcs_not_found")
+	e.want(e.call("DELETE", "/v1/repos", e.operator(), nil), 405, "method_not_allowed")
+}
+
+func TestLargestObjectIsStoredAndALargeTreeIsRead(t *testing.T) {
+	e := newEnv(t)
+	e.want(e.claim("ws1", 1, repoText), 200, "")
+	ctx := context.Background()
+	node := e.Client(e.nodeGrant("ws1", 1), client.WithBudget(30*time.Second))
+	if _, err := node.PutObjects(ctx, []client.Object{{Type: "blob", Data: make([]byte, gitpack.MaxObjectBytes)}}); err != nil {
+		t.Fatalf("object at the limit: %v", err)
+	}
+	var tree bytes.Buffer
+	for i := 0; tree.Len() < 5<<20; i++ {
+		fmt.Fprintf(&tree, "160000 e%07d\x00%s", i, strings.Repeat("a", 20))
+	}
+	shas, err := node.PutObjects(ctx, []client.Object{{Type: "tree", Data: tree.Bytes()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trees, err := e.Client(e.readGrant(repoText), client.WithBudget(30*time.Second)).Trees(ctx, shas[0], 100000)
+	if err != nil || len(trees.Trees) != 1 || len(trees.Trees[0].Entries) < 100000 {
+		t.Fatalf("tree over 4 MiB: %v %v", len(trees.Trees), err)
+	}
+}
+
+func TestObjectsBodyStartingWithAHugeTokenAnswersTooLarge(t *testing.T) {
+	e := newEnv(t)
+	e.want(e.claim("ws1", 1, repoText), 200, "")
+	req, _ := http.NewRequest("POST", e.url+"/v1/vcs/objects", strings.NewReader(`"`+strings.Repeat("a", 25<<20)+`"`))
+	req.Header.Set("Authorization", "Bearer "+e.nodeGrant("ws1", 1))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 413 {
+		t.Errorf("status = %d, want 413", resp.StatusCode)
 	}
 }

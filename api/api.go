@@ -7,7 +7,6 @@ import "net/http"
 type Code string
 
 const (
-	CodeNotConfigured      Code = "vcs_not_configured"
 	CodeNotFound           Code = "vcs_not_found"
 	CodeGenerationConflict Code = "vcs_generation_conflict"
 	CodeClaimLost          Code = "vcs_claim_lost"
@@ -19,10 +18,10 @@ const (
 	CodeUnauthorized       Code = "unauthorized"
 	CodeInvalidBody        Code = "invalid_body"
 	CodeInternal           Code = "internal_error"
+	CodeMethodNotAllowed   Code = "method_not_allowed"
 )
 
 var statuses = map[Code]int{
-	CodeNotConfigured:      http.StatusServiceUnavailable,
 	CodeNotFound:           http.StatusNotFound,
 	CodeGenerationConflict: http.StatusConflict,
 	CodeClaimLost:          http.StatusConflict,
@@ -34,6 +33,7 @@ var statuses = map[Code]int{
 	CodeUnauthorized:       http.StatusUnauthorized,
 	CodeInvalidBody:        http.StatusBadRequest,
 	CodeInternal:           http.StatusInternalServerError,
+	CodeMethodNotAllowed:   http.StatusMethodNotAllowed,
 }
 
 // Status is the HTTP status of c. An unknown code is 500.

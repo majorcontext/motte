@@ -28,10 +28,9 @@ import (
 )
 
 var (
-	ErrNotConfigured = errors.New("store: no object store")
-	ErrNotFound      = errors.New("store: object not found")
-	ErrInvalid       = errors.New("store: invalid object name or content")
-	ErrTooLarge      = errors.New("store: object too large")
+	ErrNotFound = errors.New("store: object not found")
+	ErrInvalid  = errors.New("store: invalid object name or content")
+	ErrTooLarge = errors.New("store: object too large")
 )
 
 const (
@@ -46,11 +45,8 @@ const (
 	maxOpenBytes = 256 << 20
 	blockSize    = 256 << 10
 	maxBlocks    = 4
-	slotCapacity = 4
-	// SlotRead is the weight of a request that holds one object in memory.
-	// SlotWrite is the weight of a request that holds a large body.
-	SlotRead     = 1
-	SlotWrite    = slotCapacity
+	// MemoryBudget is the bytes that requests may hold while they work, apart from the bodies that are still being read.
+	MemoryBudget = 512 << 20
 	blockTimeout = 30 * time.Second
 )
 
@@ -99,7 +95,7 @@ type Service struct {
 	st    objstore.Store
 	index PackIndex
 
-	slots *semaphore.Weighted
+	budget *semaphore.Weighted
 
 	mu        sync.Mutex
 	open      map[string]*openPack
@@ -107,17 +103,18 @@ type Service struct {
 	openBytes int
 }
 
-// Slot reserves weight units of the memory that large requests may hold. The
-// caller releases it.
-func (s *Service) Slot(ctx context.Context, weight int64) (release func(), err error) {
-	if err := s.slots.Acquire(ctx, weight); err != nil {
+// Reserve takes bytes of MemoryBudget, at most the whole budget, and waits while the budget is spent. The caller
+// releases it.
+func (s *Service) Reserve(ctx context.Context, bytes int64) (release func(), err error) {
+	n := min(bytes, MemoryBudget)
+	if err := s.budget.Acquire(ctx, n); err != nil {
 		return nil, err
 	}
-	return func() { s.slots.Release(weight) }, nil
+	return func() { s.budget.Release(n) }, nil
 }
 
 func New(st objstore.Store, index PackIndex) *Service {
-	return &Service{st: st, index: index, open: map[string]*openPack{}, slots: semaphore.NewWeighted(slotCapacity)}
+	return &Service{st: st, index: index, open: map[string]*openPack{}, budget: semaphore.NewWeighted(MemoryBudget)}
 }
 
 func mapNotFound(err error) error {
@@ -447,6 +444,19 @@ func (v *view) find(ctx context.Context, sha gitpack.SHA) (*gitpack.Pack, error)
 	return nil, ErrNotFound
 }
 
+// size is the inflated size of sha, from the pack header.
+func (v *view) size(ctx context.Context, sha gitpack.SHA) (int64, error) {
+	p, err := v.find(ctx, sha)
+	if err != nil {
+		return 0, err
+	}
+	n, _, err := p.Size(sha)
+	if errors.Is(err, gitpack.ErrNotFound) {
+		return 0, ErrNotFound
+	}
+	return n, err
+}
+
 func (v *view) get(ctx context.Context, sha gitpack.SHA) (gitpack.Type, []byte, error) {
 	p, err := v.find(ctx, sha)
 	if err != nil {
@@ -552,23 +562,36 @@ type Tree struct {
 }
 
 // TreeBulk returns a tree and its subtrees breadth first, until the entries
-// returned reach maxEntries. Blob entries carry their size.
-func (s *Service) TreeBulk(ctx context.Context, repo Repo, sha gitpack.SHA, maxEntries int) ([]Tree, error) {
+// returned reach maxEntries. Blob entries carry their size. Before it reads a
+// tree, it calls grow with the tree bytes of the trees read so far and this
+// one, taken from the pack index.
+func (s *Service) TreeBulk(ctx context.Context, repo Repo, sha gitpack.SHA, maxEntries int, grow func(treeBytes int64) error) ([]Tree, error) {
 	v, err := s.view(ctx, repo)
 	if err != nil {
 		return nil, err
 	}
 	var out []Tree
 	queue := []gitpack.SHA{sha}
-	total := 0
+	total, held := 0, int64(0)
 	for len(queue) > 0 && (len(out) == 0 || total < maxEntries) {
 		cur := queue[0]
 		queue = queue[1:]
+		size, err := v.size(ctx, cur)
+		if err != nil {
+			return nil, err
+		}
+		held += size
+		if err := grow(held); err != nil {
+			return nil, err
+		}
 		t, d, err := v.get(ctx, cur)
 		if err != nil {
 			return nil, err
 		}
-		if t != gitpack.Tree || len(d) > maxTreeBytes {
+		if t != gitpack.Tree {
+			return nil, ErrInvalid
+		}
+		if len(d) > maxTreeBytes {
 			return nil, ErrInvalid
 		}
 		tree, err := v.parseTree(ctx, cur, d)

@@ -2,27 +2,21 @@
 package testserver
 
 import (
-	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"encoding/hex"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/majorcontext/motte/client"
 	"github.com/majorcontext/motte/grant"
 	"github.com/majorcontext/motte/internal/objstore/fs"
-	"github.com/majorcontext/motte/internal/pg"
+	"github.com/majorcontext/motte/internal/pgtest"
 	"github.com/majorcontext/motte/internal/server"
-	"github.com/majorcontext/motte/internal/store"
 )
 
 // DSNEnv is the environment variable that Start reads when it gets no DSN.
-const DSNEnv = "MOTTE_TEST_DATABASE_URL"
+const DSNEnv = pgtest.DSNEnv
 
 // Server is a running store. Its control-plane key signs every scope. Its node key signs only node grants.
 type Server struct {
@@ -31,8 +25,6 @@ type Server struct {
 	Operator grant.Signer
 	// Node is the node signer.
 	Node grant.Signer
-	// Pool is the connection pool of the private schema of the server.
-	Pool *pgxpool.Pool
 	// Expire is the expiry of the grants that the helpers mint.
 	Expire time.Time
 }
@@ -42,58 +34,24 @@ type Server struct {
 // Start skips the test. Cleanup drops the schema.
 func Start(t testing.TB, dsn string) *Server {
 	t.Helper()
-	if dsn == "" {
-		dsn = os.Getenv(DSNEnv)
-	}
-	if dsn == "" {
-		t.Skip(DSNEnv + " is not set: the test needs a PostgreSQL database")
-	}
-	ctx := context.Background()
-	admin, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var raw [6]byte
-	_, _ = rand.Read(raw[:])
-	schema := "t_" + hex.EncodeToString(raw[:])
-	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.ConnConfig.RuntimeParams["search_path"] = schema
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		pool.Close()
-		_, _ = admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE")
-		admin.Close()
-	})
-	if err := pg.Migrate(ctx, pool); err != nil {
-		t.Fatal(err)
-	}
+	pool := pgtest.Pool(t, dsn)
 	root, err := fs.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	cpPub, cpKey, _ := ed25519.GenerateKey(rand.Reader)
 	nodePub, nodeKey, _ := ed25519.GenerateKey(rand.Reader)
-	db := &pg.DB{Pool: pool}
-	srv := &server.Server{
-		DB: db, Objects: store.New(root.Bucket("motte"), db),
+	srv := server.New(server.Config{
+		Pool: pool, Bucket: root.Bucket("motte"),
 		Verifier: grant.NewVerifier(
 			grant.Key{Kid: "cp", Public: cpPub, Scopes: []grant.Scope{grant.ScopeNode, grant.ScopeRead, grant.ScopeImport, grant.ScopeOperator}},
 			grant.Key{Kid: "node", Public: nodePub, Scopes: []grant.Scope{grant.ScopeNode}}),
-	}
+	})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return &Server{
 		URL: ts.URL, Operator: grant.Signer{Kid: "cp", Key: cpKey}, Node: grant.Signer{Kid: "node", Key: nodeKey},
-		Pool: pool, Expire: time.Now().Add(time.Hour),
+		Expire: time.Now().Add(time.Hour),
 	}
 }
 

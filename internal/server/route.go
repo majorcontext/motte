@@ -1,8 +1,9 @@
 package server
 
 import (
-	"errors"
+	"fmt"
 	"net/http"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -13,8 +14,8 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/majorcontext/motte/api"
 	"github.com/majorcontext/motte/grant"
-	"github.com/majorcontext/motte/internal/pg"
 	"github.com/majorcontext/motte/internal/store"
 )
 
@@ -47,11 +48,17 @@ func opName(pattern string) string {
 type statusWriter struct {
 	http.ResponseWriter
 	status int
+	wrote  bool
 }
 
 func (w *statusWriter) WriteHeader(code int) {
-	w.status = code
+	w.status, w.wrote = code, true
 	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Write(b []byte) (int, error) {
+	w.wrote = true
+	return w.ResponseWriter.Write(b)
 }
 
 func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
@@ -82,7 +89,10 @@ func (s *Server) handle(mux *http.ServeMux, pattern string, fn handlerFunc, scop
 		}()
 		defer func() {
 			if rec := recover(); rec != nil {
-				s.writeErr(sw, r, store.ErrInvalid)
+				s.logger.ErrorContext(r.Context(), "handler panic", "route", pattern, "panic", fmt.Sprint(rec), "stack", string(debug.Stack()))
+				if !sw.wrote {
+					s.writeError(sw, api.CodeInternal, "internal error", nil)
+				}
 			}
 		}()
 		c, err := s.auth(r, scopes)
@@ -96,7 +106,7 @@ func (s *Server) handle(mux *http.ServeMux, pattern string, fn handlerFunc, scop
 }
 
 func (s *Server) auth(r *http.Request, scopes []grant.Scope) (call, error) {
-	claims, err := s.Verifier.Verify(bearerToken(r), s.Now())
+	claims, err := s.verifier.Verify(bearerToken(r), s.now())
 	if err != nil || !slices.Contains(scopes, claims.Scope) {
 		return call{}, errUnauthorized
 	}
@@ -110,20 +120,13 @@ func (s *Server) auth(r *http.Request, scopes []grant.Scope) (call, error) {
 	if claims.Scope != grant.ScopeNode {
 		return c, nil
 	}
-	err = s.DB.Live(r.Context(), claims.WS, claims.Epoch, claims.Repo)
-	switch {
-	case errors.Is(err, pg.ErrNotFound), errors.Is(err, pg.ErrGone):
-		return call{}, errUnauthorized
-	case errors.Is(err, pg.ErrWrongRepo):
-		return call{}, errForbidden
-	}
-	return c, err
+	return c, authError(s.index.Live(r.Context(), claims.WS, claims.Epoch, claims.Repo))
 }
 
-// slot takes a weighted slot of the store and adds the wait to the stats of the request.
-func (s *Server) slot(r *http.Request, weight int64) (func(), error) {
+// reserve takes bytes of the memory budget and adds the wait to the stats of the request.
+func (s *Server) reserve(r *http.Request, bytes int64) (func(), error) {
 	start := time.Now()
-	release, err := s.Objects.Slot(r.Context(), weight)
+	release, err := s.objects.Reserve(r.Context(), bytes)
 	store.StatsFrom(r.Context()).AddSlotWait(time.Since(start))
 	return release, err
 }

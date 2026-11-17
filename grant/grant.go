@@ -23,6 +23,15 @@ const (
 	ScopeOperator Scope = "operator"
 )
 
+// Valid reports whether s is one of the four scopes.
+func (s Scope) Valid() bool {
+	switch s {
+	case ScopeNode, ScopeRead, ScopeImport, ScopeOperator:
+		return true
+	}
+	return false
+}
+
 const prefix = "mg1."
 
 // Claims name what a bearer may do. Epoch is the claim epoch of the workspace

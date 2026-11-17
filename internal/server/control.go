@@ -1,7 +1,6 @@
 package server
 
 import (
-	"errors"
 	"net/http"
 	"time"
 
@@ -27,7 +26,7 @@ func repoView(r pg.Repo) api.Repo {
 
 func (s *Server) createRepo(w http.ResponseWriter, r *http.Request, _ call) error {
 	var req api.CreateRepoRequest
-	if err := decodeBody(r, smallBodyMax, &req); err != nil {
+	if err := decodeBody(w, r, smallBodyMax, &req); err != nil {
 		return err
 	}
 	name, err := repos.ValidName(req.Name)
@@ -35,11 +34,11 @@ func (s *Server) createRepo(w http.ResponseWriter, r *http.Request, _ call) erro
 		return errBody
 	}
 	path := repos.NewPath()
-	names, err := s.Objects.PutObjects(r.Context(), store.Repo{Prefix: repos.Prefix, Path: path}, repos.RootObjects(s.Now()))
+	names, err := s.objects.PutObjects(r.Context(), store.Repo{Prefix: repos.Prefix, Path: path}, repos.RootObjects(s.now()))
 	if err != nil {
 		return err
 	}
-	if err := s.DB.CreateRepo(r.Context(), pg.Repo{Path: path, Name: name, Owner: req.Owner}, repos.Text(path), names[1].String()); err != nil {
+	if err := s.index.CreateRepo(r.Context(), pg.Repo{Path: path, Name: name, Owner: req.Owner}, repos.Text(path), names[1].String()); err != nil {
 		return err
 	}
 	s.writeJSON(w, http.StatusCreated, api.CreateRepoResponse{Path: path})
@@ -47,7 +46,7 @@ func (s *Server) createRepo(w http.ResponseWriter, r *http.Request, _ call) erro
 }
 
 func (s *Server) listRepos(w http.ResponseWriter, r *http.Request, _ call) error {
-	rows, err := s.DB.Repos(r.Context())
+	rows, err := s.index.Repos(r.Context())
 	if err != nil {
 		return err
 	}
@@ -60,7 +59,7 @@ func (s *Server) listRepos(w http.ResponseWriter, r *http.Request, _ call) error
 }
 
 func (s *Server) getRepo(w http.ResponseWriter, r *http.Request, _ call) error {
-	row, err := s.DB.Repo(r.Context(), r.PathValue("path"))
+	row, err := s.index.Repo(r.Context(), r.PathValue("path"))
 	if err != nil {
 		return err
 	}
@@ -71,7 +70,7 @@ func (s *Server) getRepo(w http.ResponseWriter, r *http.Request, _ call) error {
 func (s *Server) claim(w http.ResponseWriter, r *http.Request, _ call) error {
 	id := r.PathValue("id")
 	var req api.ClaimRequest
-	if err := decodeBody(r, smallBodyMax, &req); err != nil {
+	if err := decodeBody(w, r, smallBodyMax, &req); err != nil {
 		return err
 	}
 	repo, err := store.ParseRepo(req.Repo)
@@ -79,20 +78,17 @@ func (s *Server) claim(w http.ResponseWriter, r *http.Request, _ call) error {
 		return errBody
 	}
 	if repo.Prefix == repos.Prefix {
-		row, err := s.DB.Repo(r.Context(), repo.Path)
-		if errors.Is(err, pg.ErrNotFound) || err == nil && row.Owner != req.Owner {
-			return errForbidden
-		}
-		if err != nil {
+		row, err := s.index.Repo(r.Context(), repo.Path)
+		if err := ownerError(row, err, req.Owner); err != nil {
 			return err
 		}
 	}
-	ws, err := s.DB.Claim(r.Context(), id, req.Epoch, req.Owner, req.Repo)
+	ws, err := s.index.Claim(r.Context(), id, req.Epoch, req.Owner, req.Repo)
 	if err != nil {
 		return err
 	}
 	if ws.Epoch != req.Epoch {
-		return pg.ErrClaimLost
+		return errClaimLost
 	}
 	s.writeJSON(w, http.StatusOK, api.ClaimResponse{Epoch: ws.Epoch, Op: ws.Op, Snapshot: ws.Snapshot})
 	return nil
@@ -100,14 +96,14 @@ func (s *Server) claim(w http.ResponseWriter, r *http.Request, _ call) error {
 
 func (s *Server) flush(w http.ResponseWriter, r *http.Request, _ call) error {
 	var req api.FlushRequest
-	if err := decodeBody(r, smallBodyMax, &req); err != nil {
+	if err := decodeBody(w, r, smallBodyMax, &req); err != nil {
 		return err
 	}
 	if !store.ValidWorkspaceID(r.PathValue("id")) || req.Epoch == 0 || req.Generation < 0 ||
 		!lowerHex(req.Op, 16, 128) || (req.Prev != "" && !lowerHex(req.Prev, 16, 128)) || (len(req.Snapshot) != 40 && len(req.Snapshot) != 64) || !lowerHex(req.Snapshot, 40, 64) {
 		return errBody
 	}
-	if err := s.DB.Flush(r.Context(), r.PathValue("id"), req.Epoch, req.Generation, req.Prev, req.Op, req.Snapshot); err != nil {
+	if err := s.index.Flush(r.Context(), r.PathValue("id"), req.Epoch, req.Generation, req.Prev, req.Op, req.Snapshot); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -118,7 +114,7 @@ func (s *Server) deleteWorkspace(w http.ResponseWriter, r *http.Request, _ call)
 	if !store.ValidWorkspaceID(r.PathValue("id")) {
 		return errBody
 	}
-	if err := s.DB.Delete(r.Context(), r.PathValue("id")); err != nil {
+	if err := s.index.Delete(r.Context(), r.PathValue("id")); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)

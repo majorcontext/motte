@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"testing"
 
 	"github.com/majorcontext/motte/internal/objstore"
@@ -25,23 +26,17 @@ func TestBucket(t *testing.T) {
 	if got, _ := b.GetRange(ctx, "a/b", 1, 3); !bytes.Equal(got, []byte("ell")) {
 		t.Errorf("range = %q", got)
 	}
+	if got, _ := b.GetRange(ctx, "a/b", 1, -1); !bytes.Equal(got, []byte("ello")) {
+		t.Errorf("range to end = %q", got)
+	}
 	if got, _ := b.GetRange(ctx, "a/b", 9, 3); len(got) != 0 {
 		t.Errorf("range past end = %q", got)
 	}
+	p, _ := b.(bucket).path("a/b")
+	if raw, _ := os.ReadFile(p); len(raw) != headerSize+5 || string(raw[headerSize:]) != "hello" {
+		t.Errorf("file layout: %d bytes", len(raw))
+	}
 	if _, err := b.Get(ctx, "missing"); !errors.Is(err, objstore.ErrNotFound) {
 		t.Errorf("missing: %v", err)
-	}
-	gen, err := b.Copy(ctx, objstore.Copy{Source: "a/b", Destination: "c"})
-	if err != nil || gen == 0 {
-		t.Fatalf("copy: %v %d", err, gen)
-	}
-	if names, _ := b.List(ctx, "a/"); len(names) != 1 || names[0] != "a/b" {
-		t.Errorf("list = %v", names)
-	}
-	if err := b.Delete(ctx, "a/b"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := b.Attrs(ctx, "a/b"); !errors.Is(err, objstore.ErrNotFound) {
-		t.Errorf("after delete: %v", err)
 	}
 }

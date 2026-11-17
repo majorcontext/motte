@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -17,12 +18,11 @@ import (
 )
 
 const (
-	smallBodyMax  = 1 << 20
-	blobsMax      = 4096
-	uploadTimeout = 2 * time.Minute
-	treeDefault   = 4096
-	opBodyMax     = store.MaxOpBytes*4/3 + 1024
-	packBodyMax   = (store.MaxPackBytes+store.MaxIdxBytes)*4/3 + 4096
+	smallBodyMax = 1 << 20
+	blobsMax     = 4096
+	treeDefault  = 4096
+	opBodyMax    = store.MaxOpBytes*4/3 + 1024
+	packBodyMax  = (store.MaxPackBytes+store.MaxIdxBytes)*4/3 + 4096
 )
 
 func (s *Server) registerStorePlane(mux *http.ServeMux) {
@@ -100,7 +100,7 @@ func refName(r *http.Request) (string, error) {
 }
 
 func (s *Server) getCommit(w http.ResponseWriter, r *http.Request, c call) error {
-	release, err := s.slot(r, store.SlotRead)
+	release, err := s.reserve(r, reserveCommit)
 	if err != nil {
 		return err
 	}
@@ -109,7 +109,7 @@ func (s *Server) getCommit(w http.ResponseWriter, r *http.Request, c call) error
 	if err != nil {
 		return err
 	}
-	tree, when, err := s.Objects.Commit(r.Context(), c.repo, sha)
+	tree, when, err := s.objects.Commit(r.Context(), c.repo, sha)
 	if err != nil {
 		return err
 	}
@@ -118,11 +118,26 @@ func (s *Server) getCommit(w http.ResponseWriter, r *http.Request, c call) error
 }
 
 func (s *Server) getTrees(w http.ResponseWriter, r *http.Request, c call) error {
-	release, err := s.slot(r, store.SlotRead)
+	release, err := s.reserve(r, reserveTrees)
 	if err != nil {
 		return err
 	}
-	defer release()
+	held := int64(reserveTrees)
+	defer func() { release() }()
+	// grow swaps the reservation for a larger one. It never holds the old one while it waits for the new one.
+	grow := func(treeBytes int64) error {
+		if need := treeCost(treeBytes); need > held {
+			release()
+			release = func() {}
+			var err error
+			if release, err = s.reserve(r, need); err != nil {
+				release = func() {}
+				return err
+			}
+			held = need
+		}
+		return nil
+	}
 	sha, err := parseSHA(r.PathValue("sha"))
 	if err != nil {
 		return err
@@ -133,7 +148,7 @@ func (s *Server) getTrees(w http.ResponseWriter, r *http.Request, c call) error 
 			return store.ErrInvalid
 		}
 	}
-	trees, err := s.Objects.TreeBulk(r.Context(), c.repo, sha, limit)
+	trees, err := s.objects.TreeBulk(r.Context(), c.repo, sha, limit, grow)
 	if err != nil {
 		return err
 	}
@@ -151,10 +166,10 @@ func (s *Server) getTrees(w http.ResponseWriter, r *http.Request, c call) error 
 
 func (s *Server) getBlobs(w http.ResponseWriter, r *http.Request, c call) error {
 	var req api.BlobsRequest
-	if err := decodeBody(r, smallBodyMax, &req); err != nil {
+	if err := decodeBody(w, r, smallBodyMax, &req); err != nil {
 		return err
 	}
-	release, err := s.slot(r, store.SlotRead)
+	release, err := s.reserve(r, reserveObject)
 	if err != nil {
 		return err
 	}
@@ -163,7 +178,7 @@ func (s *Server) getBlobs(w http.ResponseWriter, r *http.Request, c call) error 
 	if err != nil {
 		return err
 	}
-	blobs, err := s.Objects.Blobs(r.Context(), c.repo, shas)
+	blobs, err := s.objects.Blobs(r.Context(), c.repo, shas)
 	if err != nil {
 		return err
 	}
@@ -177,10 +192,10 @@ func (s *Server) getBlobs(w http.ResponseWriter, r *http.Request, c call) error 
 
 func (s *Server) hasObjects(w http.ResponseWriter, r *http.Request, c call) error {
 	var req api.HasRequest
-	if err := decodeBody(r, smallBodyMax, &req); err != nil {
+	if err := decodeBody(w, r, smallBodyMax, &req); err != nil {
 		return err
 	}
-	release, err := s.slot(r, store.SlotRead)
+	release, err := s.reserve(r, reserveHas)
 	if err != nil {
 		return err
 	}
@@ -189,7 +204,7 @@ func (s *Server) hasObjects(w http.ResponseWriter, r *http.Request, c call) erro
 	if err != nil {
 		return err
 	}
-	present, err := s.Objects.Has(r.Context(), c.repo, shas)
+	present, err := s.objects.Has(r.Context(), c.repo, shas)
 	if err != nil {
 		return err
 	}
@@ -197,40 +212,60 @@ func (s *Server) hasObjects(w http.ResponseWriter, r *http.Request, c call) erro
 	return nil
 }
 
-type countingReader struct {
-	r io.Reader
-	n int64
+// aheadReader hands the decoder short reads and fails with store.ErrTooLarge when the decoder holds more than
+// decodeWindow bytes of unparsed text, so one huge element cannot grow its buffer.
+type aheadReader struct {
+	r   io.Reader
+	dec *json.Decoder
+	n   int64
+	// failed makes the refusal stick, because the decoder can read again after an error.
+	failed bool
 }
 
-func (c *countingReader) Read(p []byte) (int, error) {
-	n, err := c.r.Read(p)
-	c.n += int64(n)
+func (a *aheadReader) Read(p []byte) (int, error) {
+	if a.failed {
+		return 0, store.ErrTooLarge
+	}
+	n, err := a.r.Read(p[:min(len(p), 64<<10)])
+	a.n += int64(n)
+	if a.n-a.dec.InputOffset() > decodeWindow {
+		a.failed = true
+		return 0, store.ErrTooLarge
+	}
 	return n, err
 }
 
+func decodeFailure(err error) error {
+	if errors.Is(err, store.ErrTooLarge) {
+		return store.ErrTooLarge
+	}
+	return store.ErrInvalid
+}
+
 // decodeObjects reads {"objects":[...]} one object at a time, so a body full
-// of empty objects is refused at the object limit before it is held.
-func decodeObjects(body io.Reader, limit int64) ([]gitpack.Object, error) {
-	counted := &countingReader{r: io.LimitReader(body, limit+1)}
-	dec := json.NewDecoder(counted)
+// of empty objects is refused at the object limit before it is decoded.
+func decodeObjects(body []byte) ([]gitpack.Object, error) {
+	ahead := &aheadReader{r: bytes.NewReader(body)}
+	dec := json.NewDecoder(ahead)
+	ahead.dec = dec
 	var objs []gitpack.Object
 	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
-		return nil, store.ErrInvalid
+		return nil, decodeFailure(err)
 	}
 	for dec.More() {
 		key, err := dec.Token()
 		if err != nil {
-			return nil, store.ErrInvalid
+			return nil, decodeFailure(err)
 		}
 		if key != "objects" {
 			var skip json.RawMessage
 			if err := dec.Decode(&skip); err != nil {
-				return nil, store.ErrInvalid
+				return nil, decodeFailure(err)
 			}
 			continue
 		}
 		if t, err := dec.Token(); err != nil || t != json.Delim('[') {
-			return nil, store.ErrInvalid
+			return nil, decodeFailure(err)
 		}
 		for dec.More() {
 			if len(objs) >= store.MaxBatch {
@@ -238,7 +273,7 @@ func decodeObjects(body io.Reader, limit int64) ([]gitpack.Object, error) {
 			}
 			var o api.Object
 			if err := dec.Decode(&o); err != nil {
-				return nil, store.ErrInvalid
+				return nil, decodeFailure(err)
 			}
 			data, err := unb64(o.Data)
 			if err != nil {
@@ -247,32 +282,29 @@ func decodeObjects(body io.Reader, limit int64) ([]gitpack.Object, error) {
 			objs = append(objs, gitpack.Object{Type: gitpack.ParseType(o.Type), Data: data})
 		}
 		if _, err := dec.Token(); err != nil {
-			return nil, store.ErrInvalid
+			return nil, decodeFailure(err)
 		}
 	}
 	if t, err := dec.Token(); err != nil || t != json.Delim('}') {
-		return nil, store.ErrInvalid
+		return nil, decodeFailure(err)
 	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) || counted.n > limit {
-		return nil, store.ErrInvalid
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, decodeFailure(err)
 	}
 	return objs, nil
 }
 
 func (s *Server) putObjects(w http.ResponseWriter, r *http.Request, c call) error {
-	release, err := s.slot(r, store.SlotWrite)
+	body, release, err := s.receive(w, r, packBodyMax, objectsCost)
 	if err != nil {
 		return err
 	}
 	defer release()
-	if err := http.NewResponseController(w).SetReadDeadline(s.Now().Add(uploadTimeout)); err != nil {
-		return err
-	}
-	objs, err := decodeObjects(r.Body, packBodyMax)
+	objs, err := decodeObjects(body)
 	if err != nil {
 		return err
 	}
-	names, err := s.Objects.PutObjects(r.Context(), c.repo, objs)
+	names, err := s.objects.PutObjects(r.Context(), c.repo, objs)
 	if err != nil {
 		return err
 	}
@@ -285,7 +317,7 @@ func (s *Server) putObjects(w http.ResponseWriter, r *http.Request, c call) erro
 }
 
 func (s *Server) getObject(w http.ResponseWriter, r *http.Request, c call) error {
-	release, err := s.slot(r, store.SlotRead)
+	release, err := s.reserve(r, reserveObject)
 	if err != nil {
 		return err
 	}
@@ -294,7 +326,7 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, c call) error
 	if err != nil {
 		return err
 	}
-	t, data, err := s.Objects.Get(r.Context(), c.repo, sha)
+	t, data, err := s.objects.Get(r.Context(), c.repo, sha)
 	if err != nil {
 		return err
 	}
@@ -303,16 +335,13 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, c call) error
 }
 
 func (s *Server) importPack(w http.ResponseWriter, r *http.Request, c call) error {
-	release, err := s.slot(r, store.SlotWrite)
+	body, release, err := s.receive(w, r, packBodyMax, packCost)
 	if err != nil {
 		return err
 	}
 	defer release()
-	if err := http.NewResponseController(w).SetReadDeadline(s.Now().Add(uploadTimeout)); err != nil {
-		return err
-	}
 	var req api.ImportPackRequest
-	if err := decodeBody(r, packBodyMax, &req); err != nil {
+	if err := decodeJSON(body, &req); err != nil {
 		return err
 	}
 	idx, err := unb64(req.Index)
@@ -323,7 +352,7 @@ func (s *Server) importPack(w http.ResponseWriter, r *http.Request, c call) erro
 	if err != nil {
 		return err
 	}
-	if err := s.Objects.ImportPack(r.Context(), c.repo, r.PathValue("pack_id"), idx, pack); err != nil {
+	if err := s.objects.ImportPack(r.Context(), c.repo, r.PathValue("pack_id"), idx, pack); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -331,12 +360,12 @@ func (s *Server) importPack(w http.ResponseWriter, r *http.Request, c call) erro
 }
 
 func (s *Server) getOp(w http.ResponseWriter, r *http.Request, c call) error {
-	release, err := s.slot(r, store.SlotRead)
+	release, err := s.reserve(r, reserveOp)
 	if err != nil {
 		return err
 	}
 	defer release()
-	data, err := s.Objects.GetOp(r.Context(), c.claims.WS, store.OpKind(r.PathValue("kind")), r.PathValue("id"))
+	data, err := s.objects.GetOp(r.Context(), c.claims.WS, store.OpKind(r.PathValue("kind")), r.PathValue("id"))
 	if err != nil {
 		return err
 	}
@@ -345,23 +374,20 @@ func (s *Server) getOp(w http.ResponseWriter, r *http.Request, c call) error {
 }
 
 func (s *Server) putOp(w http.ResponseWriter, r *http.Request, c call) error {
-	release, err := s.slot(r, store.SlotRead)
+	body, release, err := s.receive(w, r, opBodyMax, opCost)
 	if err != nil {
 		return err
 	}
 	defer release()
-	if err := http.NewResponseController(w).SetReadDeadline(s.Now().Add(uploadTimeout)); err != nil {
-		return err
-	}
 	var req api.OpObject
-	if err := decodeBody(r, opBodyMax, &req); err != nil {
+	if err := decodeJSON(body, &req); err != nil {
 		return err
 	}
 	data, err := unb64(req.Data)
 	if err != nil {
 		return err
 	}
-	if err := s.Objects.PutOp(r.Context(), c.claims.WS, store.OpKind(r.PathValue("kind")), r.PathValue("id"), data); err != nil {
+	if err := s.objects.PutOp(r.Context(), c.claims.WS, store.OpKind(r.PathValue("kind")), r.PathValue("id"), data); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -369,39 +395,39 @@ func (s *Server) putOp(w http.ResponseWriter, r *http.Request, c call) error {
 }
 
 func (s *Server) getOpHeads(w http.ResponseWriter, r *http.Request, c call) error {
-	h, err := s.DB.OpHeads(r.Context(), c.claims.WS)
+	h, err := s.index.OpHeads(r.Context(), c.claims.WS)
 	if err != nil {
 		return err
 	}
-	s.writeJSON(w, http.StatusOK, h)
+	s.writeJSON(w, http.StatusOK, opHeadsView(h))
 	return nil
 }
 
 func (s *Server) swapOpHeads(w http.ResponseWriter, r *http.Request, c call) error {
 	var req api.SwapOpHeadsRequest
-	if err := decodeBody(r, smallBodyMax, &req); err != nil {
+	if err := decodeBody(w, r, smallBodyMax, &req); err != nil {
 		return err
 	}
 	if len(req.Heads) == 0 || req.ExpectGeneration < 0 {
 		return store.ErrInvalid
 	}
-	h, err := s.DB.SwapOpHeads(r.Context(), c.claims.WS, c.claims.Epoch, c.claims.Repo, req.ExpectGeneration, req.Heads)
+	h, err := s.index.SwapOpHeads(r.Context(), c.claims.WS, c.claims.Epoch, c.claims.Repo, req.ExpectGeneration, req.Heads)
 	if err != nil {
 		return err
 	}
-	s.writeJSON(w, http.StatusOK, h)
+	s.writeJSON(w, http.StatusOK, opHeadsView(h))
 	return nil
 }
 
 func (s *Server) setWorkspace(w http.ResponseWriter, r *http.Request, c call) error {
 	var req api.SetWorkspaceRequest
-	if err := decodeBody(r, smallBodyMax, &req); err != nil {
+	if err := decodeBody(w, r, smallBodyMax, &req); err != nil {
 		return err
 	}
 	if !lowerHex(req.Op, 16, 128) || (len(req.Commit) != 40 && len(req.Commit) != 64) || !lowerHex(req.Commit, 40, 64) || req.Generation <= 0 {
 		return store.ErrInvalid
 	}
-	if err := s.DB.Report(r.Context(), c.claims.WS, c.claims.Epoch, c.claims.Repo, req.Generation, "", req.Op, req.Commit); err != nil {
+	if err := s.index.Report(r.Context(), c.claims.WS, c.claims.Epoch, c.claims.Repo, req.Generation, "", req.Op, req.Commit); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -409,14 +435,15 @@ func (s *Server) setWorkspace(w http.ResponseWriter, r *http.Request, c call) er
 }
 
 func (s *Server) listRefs(w http.ResponseWriter, r *http.Request, c call) error {
-	refs, err := s.DB.Refs(r.Context(), c.claims.Repo)
+	refs, err := s.index.Refs(r.Context(), c.claims.Repo)
 	if err != nil {
 		return err
 	}
-	if refs == nil {
-		refs = []api.Ref{}
+	out := api.Refs{Refs: make([]api.Ref, len(refs))}
+	for i, ref := range refs {
+		out.Refs[i] = refView(ref)
 	}
-	s.writeJSON(w, http.StatusOK, api.Refs{Refs: refs})
+	s.writeJSON(w, http.StatusOK, out)
 	return nil
 }
 
@@ -425,11 +452,11 @@ func (s *Server) getRef(w http.ResponseWriter, r *http.Request, c call) error {
 	if err != nil {
 		return err
 	}
-	ref, err := s.DB.Ref(r.Context(), c.claims.Repo, name)
+	ref, err := s.index.Ref(r.Context(), c.claims.Repo, name)
 	if err != nil {
 		return err
 	}
-	s.writeJSON(w, http.StatusOK, ref)
+	s.writeJSON(w, http.StatusOK, refView(ref))
 	return nil
 }
 
@@ -439,17 +466,17 @@ func (s *Server) swapRef(w http.ResponseWriter, r *http.Request, c call) error {
 		return err
 	}
 	var req api.SwapRefRequest
-	if err := decodeBody(r, smallBodyMax, &req); err != nil {
+	if err := decodeBody(w, r, smallBodyMax, &req); err != nil {
 		return err
 	}
 	if req.Expect < 0 || !lowerHex(req.Commit, 40, 40) {
 		return store.ErrInvalid
 	}
-	ref, err := s.DB.SwapRef(r.Context(), c.claims.WS, c.claims.Epoch, c.claims.Repo, name, req.Expect, req.Commit)
+	ref, err := s.index.SwapRef(r.Context(), c.claims.WS, c.claims.Epoch, c.claims.Repo, name, req.Expect, req.Commit)
 	if err != nil {
 		return err
 	}
-	s.writeJSON(w, http.StatusOK, ref)
+	s.writeJSON(w, http.StatusOK, refView(ref))
 	return nil
 }
 
@@ -462,7 +489,7 @@ func (s *Server) deleteRef(w http.ResponseWriter, r *http.Request, c call) error
 	if err != nil || expect < 1 {
 		return store.ErrInvalid
 	}
-	if err := s.DB.DeleteRef(r.Context(), c.claims.WS, c.claims.Epoch, c.claims.Repo, name, expect); err != nil {
+	if err := s.index.DeleteRef(r.Context(), c.claims.WS, c.claims.Epoch, c.claims.Repo, name, expect); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)
