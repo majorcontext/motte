@@ -1,0 +1,49 @@
+# image is the motte-vfsd image. Set digest or tag; a digest wins.
+image:
+  repository: ghcr.io/majorcontext/motte-vfsd
+  tag: ""
+  digest: ""
+
+# registrar registers the driver with the kubelet.
+registrar:
+  image: registry.k8s.io/sig-storage/csi-node-driver-registrar@sha256:e01facb9fb9cffaf52d0053bdb979fbd8c505c8e411939a6e026dd061a6b4fbe
+
+# driverName is the CSI driver name. The caller puts it in the inline volume of a workspace pod.
+driverName: vfs.motte.dev
+
+# apiURL is the base URL of the motte store that a node reaches. The daemon reads and writes the store there with a node grant.
+apiURL: ""
+
+# grantKeySecret names the Secret that holds the node signing key: a JSON
+# document {"kid": "...", "key": "<base64 Ed25519 private key or 32-byte seed>"}.
+# The store must trust the public key for the scope "node". The daemon signs a
+# node grant with the key when the kubelet publishes a volume. Create the Secret
+# in the release namespace. That namespace needs the privileged Pod Security
+# level, because the daemon mounts a file system in the host mount namespace;
+# the chart does not create it.
+grantKeySecret:
+  name: motte-vfsd-grant-key
+  key: key
+
+# kubeletDir is the kubelet root directory of the node. stateDir holds the node cache and the lower mount point,
+# upper directory and work directory of every published volume.
+kubeletDir: /var/lib/kubelet
+stateDir: /var/lib/motte-vfsd
+
+# runtimeClassName runs the plugin pod under a runtime that allows host mount propagation. A node whose default
+# runtime is a sandboxed one needs a RuntimeClass for a plain runtime here.
+runtimeClassName: ""
+
+nodeSelector:
+  kubernetes.io/os: linux
+# nodeSelectorExpressions adds node affinity match expressions, for a node label with more than one value.
+nodeSelectorExpressions: []
+tolerations: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+
+# extraEnv adds environment variables to the plugin container, such as OTEL_EXPORTER_OTLP_ENDPOINT to export traces.
+extraEnv: []

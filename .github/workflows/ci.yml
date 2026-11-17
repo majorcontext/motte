@@ -34,6 +34,12 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...
       - run: test -z "$(gofmt -l .)"
+      # ./... skips testdata directories, so the privileged harness tools are named.
+      - run: go vet ./internal/vfs/testdata/vfsfuzz ./internal/vfs/testdata/overlaycheck ./internal/vfs/testdata/overlaykit
+      - run: go test -race ./internal/vfs/testdata/overlaykit
+      # The overlay and upper directory tests mount file systems and read trusted.* attributes, so they need root.
+      - run: sudo -E env "PATH=$PATH" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" go test -race ./internal/vfs/...
+      - run: helm lint charts/motte-vfsd --set apiURL=http://store.example --set image.tag=v0.0.0
 
   leak:
     # A fork pull request gets no secrets, so the job cannot run for it.

@@ -1,0 +1,130 @@
+{{- $image := required "image.repository is required" .Values.image.repository -}}
+{{- $ref := "" -}}
+{{- if .Values.image.digest -}}
+{{- if not (hasPrefix "sha256:" .Values.image.digest) }}{{ fail "image.digest must be a sha256 digest" }}{{ end -}}
+{{- $ref = printf "%s@%s" $image .Values.image.digest -}}
+{{- else -}}
+{{- $ref = printf "%s:%s" $image (required "image.digest or image.tag is required" .Values.image.tag) -}}
+{{- end -}}
+{{- $api := required "apiURL is required" .Values.apiURL -}}
+{{- $plugins := printf "%s/plugins/%s" .Values.kubeletDir .Values.driverName -}}
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: {{ .Values.driverName }}
+spec:
+  attachRequired: false
+  # The plugin keys the control socket directory of a workspace by the pod UID that this adds to a publish request.
+  podInfoOnMount: true
+  volumeLifecycleModes: [Ephemeral]
+  fsGroupPolicy: None
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: motte-vfsd
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: motte-vfsd
+  # A restart of the plugin ends the mounts that it serves, so a pod is replaced only when an operator deletes it.
+  updateStrategy:
+    type: OnDelete
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: motte-vfsd
+    spec:
+      automountServiceAccountToken: false
+      hostPID: true
+      {{- with .Values.runtimeClassName }}
+      runtimeClassName: {{ . }}
+      {{- end }}
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      {{- with .Values.nodeSelectorExpressions }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  {{- toYaml . | nindent 18 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: plugin
+          image: {{ $ref }}
+          args:
+            - csi
+            - --endpoint=/csi/csi.sock
+            - --driver={{ .Values.driverName }}
+            - --node-id=$(NODE_NAME)
+            - --state={{ .Values.stateDir }}
+            - --api={{ $api }}
+            - --grant-key-file=/etc/motte-vfsd/grant-key
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: OTEL_SERVICE_NAME
+              value: motte-vfsd
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          securityContext:
+            privileged: true
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: pods
+              mountPath: {{ .Values.kubeletDir }}/pods
+              mountPropagation: Bidirectional
+            - name: state
+              mountPath: {{ .Values.stateDir }}
+            - name: grant-key
+              mountPath: /etc/motte-vfsd
+              readOnly: true
+        - name: registrar
+          image: {{ .Values.registrar.image }}
+          args:
+            - --csi-address=/csi/csi.sock
+            - --kubelet-registration-path={{ $plugins }}/csi.sock
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: registration
+              mountPath: /registration
+      volumes:
+        - name: plugin-dir
+          hostPath:
+            path: {{ $plugins }}
+            type: DirectoryOrCreate
+        - name: registration
+          hostPath:
+            path: {{ .Values.kubeletDir }}/plugins_registry
+            type: Directory
+        - name: pods
+          hostPath:
+            path: {{ .Values.kubeletDir }}/pods
+            type: Directory
+        - name: state
+          hostPath:
+            path: {{ .Values.stateDir }}
+            type: DirectoryOrCreate
+        - name: grant-key
+          secret:
+            secretName: {{ .Values.grantKeySecret.name }}
+            items:
+              - key: {{ .Values.grantKeySecret.key }}
+                path: grant-key
