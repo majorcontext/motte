@@ -1,0 +1,491 @@
+package server
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/majorcontext/motte/api"
+	"github.com/majorcontext/motte/grant"
+	"github.com/majorcontext/motte/internal/gitpack"
+	"github.com/majorcontext/motte/internal/store"
+)
+
+const (
+	smallBodyMax  = 1 << 20
+	blobsMax      = 4096
+	uploadTimeout = 2 * time.Minute
+	treeDefault   = 4096
+	opBodyMax     = store.MaxOpBytes*4/3 + 1024
+	packBodyMax   = (store.MaxPackBytes+store.MaxIdxBytes)*4/3 + 4096
+	refNameMax    = 255
+)
+
+func (s *Server) registerStorePlane(mux *http.ServeMux) {
+	reader := []grant.Scope{grant.ScopeNode, grant.ScopeRead}
+	node := []grant.Scope{grant.ScopeNode}
+	s.handle(mux, "GET /v1/vcs/commits/{sha}", s.getCommit, reader...)
+	s.handle(mux, "GET /v1/vcs/trees/{sha}", s.getTrees, reader...)
+	s.handle(mux, "GET /v1/vcs/objects/{sha}", s.getObject, reader...)
+	s.handle(mux, "POST /v1/vcs/blobs/batch", s.getBlobs, reader...)
+	s.handle(mux, "GET /v1/vcs/refs", s.listRefs, reader...)
+	s.handle(mux, "GET /v1/vcs/refs/{name...}", s.getRef, reader...)
+	s.handle(mux, "POST /v1/vcs/objects/has", s.hasObjects, grant.ScopeNode, grant.ScopeRead, grant.ScopeImport)
+	s.handle(mux, "POST /v1/vcs/objects", s.putObjects, node...)
+	s.handle(mux, "PUT /v1/vcs/ops/{kind}/{id}", s.putOp, node...)
+	s.handle(mux, "GET /v1/vcs/ops/{kind}/{id}", s.getOp, node...)
+	s.handle(mux, "GET /v1/vcs/op-heads", s.getOpHeads, node...)
+	s.handle(mux, "PUT /v1/vcs/op-heads", s.swapOpHeads, node...)
+	s.handle(mux, "PUT /v1/vcs/workspace", s.setWorkspace, node...)
+	s.handle(mux, "PUT /v1/vcs/refs/{name...}", s.swapRef, node...)
+	s.handle(mux, "DELETE /v1/vcs/refs/{name...}", s.deleteRef, node...)
+	s.handle(mux, "PUT /v1/vcs/packs/{pack_id}", s.importPack, grant.ScopeImport)
+}
+
+func b64(data []byte) string { return base64.StdEncoding.EncodeToString(data) }
+
+func unb64(s string) ([]byte, error) {
+	b, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return nil, store.ErrInvalid
+	}
+	return b, nil
+}
+
+func parseSHA(s string) (gitpack.SHA, error) {
+	sha, err := gitpack.ParseSHA(s)
+	if err != nil {
+		return sha, store.ErrInvalid
+	}
+	return sha, nil
+}
+
+func parseSHAs(in []string) ([]gitpack.SHA, error) {
+	if len(in) > blobsMax {
+		return nil, store.ErrTooLarge
+	}
+	out := make([]gitpack.SHA, len(in))
+	for i, h := range in {
+		var err error
+		if out[i], err = parseSHA(h); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// lowerHex reports whether s is lowercase hex of lo to hi digits.
+func lowerHex(s string, lo, hi int) bool {
+	if len(s) < lo || len(s) > hi {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validRefName(name string) bool {
+	if name == "" || len(name) > refNameMax || name == "@" || !utf8.ValidString(name) ||
+		strings.HasPrefix(name, "/") || strings.HasSuffix(name, "/") || strings.HasSuffix(name, ".lock") || strings.HasSuffix(name, ".") ||
+		strings.Contains(name, "..") || strings.Contains(name, "//") || strings.Contains(name, "@{") {
+		return false
+	}
+	for _, c := range name {
+		if c < 0x20 || c == 0x7f || strings.ContainsRune(" ~^:?*[\\", c) {
+			return false
+		}
+	}
+	for _, part := range strings.Split(name, "/") {
+		if strings.HasPrefix(part, ".") || strings.HasSuffix(part, ".lock") {
+			return false
+		}
+	}
+	return true
+}
+
+func refName(r *http.Request) (string, error) {
+	name := r.PathValue("name")
+	if !validRefName(name) {
+		return "", store.ErrInvalid
+	}
+	return name, nil
+}
+
+func (s *Server) getCommit(w http.ResponseWriter, r *http.Request, c call) error {
+	release, err := s.slot(r, store.SlotRead)
+	if err != nil {
+		return err
+	}
+	defer release()
+	sha, err := parseSHA(r.PathValue("sha"))
+	if err != nil {
+		return err
+	}
+	tree, when, err := s.Objects.Commit(r.Context(), c.repo, sha)
+	if err != nil {
+		return err
+	}
+	s.writeJSON(w, http.StatusOK, api.Commit{Tree: tree.String(), Time: when.Format(time.RFC3339)})
+	return nil
+}
+
+func (s *Server) getTrees(w http.ResponseWriter, r *http.Request, c call) error {
+	release, err := s.slot(r, store.SlotRead)
+	if err != nil {
+		return err
+	}
+	defer release()
+	sha, err := parseSHA(r.PathValue("sha"))
+	if err != nil {
+		return err
+	}
+	limit := treeDefault
+	if v := r.URL.Query().Get("max_entries"); v != "" {
+		if limit, err = strconv.Atoi(v); err != nil || limit < 1 || limit > 100000 {
+			return store.ErrInvalid
+		}
+	}
+	trees, err := s.Objects.TreeBulk(r.Context(), c.repo, sha, limit)
+	if err != nil {
+		return err
+	}
+	out := api.Trees{Trees: make([]api.Tree, 0, len(trees))}
+	for _, t := range trees {
+		vt := api.Tree{SHA: t.SHA.String(), Entries: make([]api.TreeEntry, 0, len(t.Entries))}
+		for _, e := range t.Entries {
+			vt.Entries = append(vt.Entries, api.TreeEntry{Name: b64([]byte(e.Name)), Mode: strconv.FormatUint(uint64(e.Mode), 8), SHA: e.SHA.String(), Size: e.Size})
+		}
+		out.Trees = append(out.Trees, vt)
+	}
+	s.writeJSON(w, http.StatusOK, out)
+	return nil
+}
+
+func (s *Server) getBlobs(w http.ResponseWriter, r *http.Request, c call) error {
+	var req api.BlobsRequest
+	if err := decodeBody(r, smallBodyMax, &req); err != nil {
+		return err
+	}
+	release, err := s.slot(r, store.SlotRead)
+	if err != nil {
+		return err
+	}
+	defer release()
+	shas, err := parseSHAs(req.SHAs)
+	if err != nil {
+		return err
+	}
+	blobs, err := s.Objects.Blobs(r.Context(), c.repo, shas)
+	if err != nil {
+		return err
+	}
+	out := api.Blobs{Blobs: make([]string, len(blobs))}
+	for i, b := range blobs {
+		out.Blobs[i] = b64(b)
+	}
+	s.writeJSON(w, http.StatusOK, out)
+	return nil
+}
+
+func (s *Server) hasObjects(w http.ResponseWriter, r *http.Request, c call) error {
+	var req api.HasRequest
+	if err := decodeBody(r, smallBodyMax, &req); err != nil {
+		return err
+	}
+	release, err := s.slot(r, store.SlotRead)
+	if err != nil {
+		return err
+	}
+	defer release()
+	shas, err := parseSHAs(req.SHAs)
+	if err != nil {
+		return err
+	}
+	present, err := s.Objects.Has(r.Context(), c.repo, shas)
+	if err != nil {
+		return err
+	}
+	s.writeJSON(w, http.StatusOK, api.Has{Present: present})
+	return nil
+}
+
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// decodeObjects reads {"objects":[...]} one object at a time, so a body full
+// of empty objects is refused at the object limit before it is held.
+func decodeObjects(body io.Reader, limit int64) ([]gitpack.Object, error) {
+	counted := &countingReader{r: io.LimitReader(body, limit+1)}
+	dec := json.NewDecoder(counted)
+	var objs []gitpack.Object
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return nil, store.ErrInvalid
+	}
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return nil, store.ErrInvalid
+		}
+		if key != "objects" {
+			var skip json.RawMessage
+			if err := dec.Decode(&skip); err != nil {
+				return nil, store.ErrInvalid
+			}
+			continue
+		}
+		if t, err := dec.Token(); err != nil || t != json.Delim('[') {
+			return nil, store.ErrInvalid
+		}
+		for dec.More() {
+			if len(objs) >= store.MaxBatch {
+				return nil, store.ErrInvalid
+			}
+			var o api.Object
+			if err := dec.Decode(&o); err != nil {
+				return nil, store.ErrInvalid
+			}
+			data, err := unb64(o.Data)
+			if err != nil {
+				return nil, err
+			}
+			objs = append(objs, gitpack.Object{Type: gitpack.ParseType(o.Type), Data: data})
+		}
+		if _, err := dec.Token(); err != nil {
+			return nil, store.ErrInvalid
+		}
+	}
+	if t, err := dec.Token(); err != nil || t != json.Delim('}') {
+		return nil, store.ErrInvalid
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) || counted.n > limit {
+		return nil, store.ErrInvalid
+	}
+	return objs, nil
+}
+
+func (s *Server) putObjects(w http.ResponseWriter, r *http.Request, c call) error {
+	release, err := s.slot(r, store.SlotWrite)
+	if err != nil {
+		return err
+	}
+	defer release()
+	if err := http.NewResponseController(w).SetReadDeadline(s.Now().Add(uploadTimeout)); err != nil {
+		return err
+	}
+	objs, err := decodeObjects(r.Body, packBodyMax)
+	if err != nil {
+		return err
+	}
+	names, err := s.Objects.PutObjects(r.Context(), c.repo, objs)
+	if err != nil {
+		return err
+	}
+	out := api.PutObjectsResponse{SHAs: make([]string, len(names))}
+	for i, n := range names {
+		out.SHAs[i] = n.String()
+	}
+	s.writeJSON(w, http.StatusOK, out)
+	return nil
+}
+
+func (s *Server) getObject(w http.ResponseWriter, r *http.Request, c call) error {
+	release, err := s.slot(r, store.SlotRead)
+	if err != nil {
+		return err
+	}
+	defer release()
+	sha, err := parseSHA(r.PathValue("sha"))
+	if err != nil {
+		return err
+	}
+	t, data, err := s.Objects.Get(r.Context(), c.repo, sha)
+	if err != nil {
+		return err
+	}
+	s.writeJSON(w, http.StatusOK, api.Object{Type: t.String(), Data: b64(data)})
+	return nil
+}
+
+func (s *Server) importPack(w http.ResponseWriter, r *http.Request, c call) error {
+	release, err := s.slot(r, store.SlotWrite)
+	if err != nil {
+		return err
+	}
+	defer release()
+	if err := http.NewResponseController(w).SetReadDeadline(s.Now().Add(uploadTimeout)); err != nil {
+		return err
+	}
+	var req api.ImportPackRequest
+	if err := decodeBody(r, packBodyMax, &req); err != nil {
+		return err
+	}
+	idx, err := unb64(req.Index)
+	if err != nil {
+		return err
+	}
+	pack, err := unb64(req.Pack)
+	if err != nil {
+		return err
+	}
+	if err := s.Objects.ImportPack(r.Context(), c.repo, r.PathValue("pack_id"), idx, pack); err != nil {
+		return err
+	}
+	w.WriteHeader(http.StatusNoContent)
+	return nil
+}
+
+func (s *Server) getOp(w http.ResponseWriter, r *http.Request, c call) error {
+	release, err := s.slot(r, store.SlotRead)
+	if err != nil {
+		return err
+	}
+	defer release()
+	data, err := s.Objects.GetOp(r.Context(), c.claims.WS, store.OpKind(r.PathValue("kind")), r.PathValue("id"))
+	if err != nil {
+		return err
+	}
+	s.writeJSON(w, http.StatusOK, api.OpObject{Data: b64(data)})
+	return nil
+}
+
+func (s *Server) putOp(w http.ResponseWriter, r *http.Request, c call) error {
+	release, err := s.slot(r, store.SlotRead)
+	if err != nil {
+		return err
+	}
+	defer release()
+	if err := http.NewResponseController(w).SetReadDeadline(s.Now().Add(uploadTimeout)); err != nil {
+		return err
+	}
+	var req api.OpObject
+	if err := decodeBody(r, opBodyMax, &req); err != nil {
+		return err
+	}
+	data, err := unb64(req.Data)
+	if err != nil {
+		return err
+	}
+	if err := s.Objects.PutOp(r.Context(), c.claims.WS, store.OpKind(r.PathValue("kind")), r.PathValue("id"), data); err != nil {
+		return err
+	}
+	w.WriteHeader(http.StatusNoContent)
+	return nil
+}
+
+func (s *Server) getOpHeads(w http.ResponseWriter, r *http.Request, c call) error {
+	h, err := s.DB.OpHeads(r.Context(), c.claims.WS)
+	if err != nil {
+		return err
+	}
+	s.writeJSON(w, http.StatusOK, h)
+	return nil
+}
+
+func (s *Server) swapOpHeads(w http.ResponseWriter, r *http.Request, c call) error {
+	var req api.SwapOpHeadsRequest
+	if err := decodeBody(r, smallBodyMax, &req); err != nil {
+		return err
+	}
+	if len(req.Heads) == 0 || req.ExpectGeneration < 0 {
+		return store.ErrInvalid
+	}
+	h, err := s.DB.SwapOpHeads(r.Context(), c.claims.WS, c.claims.Epoch, c.claims.Repo, req.ExpectGeneration, req.Heads)
+	if err != nil {
+		return err
+	}
+	s.writeJSON(w, http.StatusOK, h)
+	return nil
+}
+
+func (s *Server) setWorkspace(w http.ResponseWriter, r *http.Request, c call) error {
+	var req api.SetWorkspaceRequest
+	if err := decodeBody(r, smallBodyMax, &req); err != nil {
+		return err
+	}
+	if !lowerHex(req.Op, 16, 128) || (len(req.Commit) != 40 && len(req.Commit) != 64) || !lowerHex(req.Commit, 40, 64) || req.Generation <= 0 {
+		return store.ErrInvalid
+	}
+	if err := s.DB.Report(r.Context(), c.claims.WS, c.claims.Epoch, c.claims.Repo, req.Generation, "", req.Op, req.Commit); err != nil {
+		return err
+	}
+	w.WriteHeader(http.StatusNoContent)
+	return nil
+}
+
+func (s *Server) listRefs(w http.ResponseWriter, r *http.Request, c call) error {
+	refs, err := s.DB.Refs(r.Context(), c.claims.Repo)
+	if err != nil {
+		return err
+	}
+	if refs == nil {
+		refs = []api.Ref{}
+	}
+	s.writeJSON(w, http.StatusOK, api.Refs{Refs: refs})
+	return nil
+}
+
+func (s *Server) getRef(w http.ResponseWriter, r *http.Request, c call) error {
+	name, err := refName(r)
+	if err != nil {
+		return err
+	}
+	ref, err := s.DB.Ref(r.Context(), c.claims.Repo, name)
+	if err != nil {
+		return err
+	}
+	s.writeJSON(w, http.StatusOK, ref)
+	return nil
+}
+
+func (s *Server) swapRef(w http.ResponseWriter, r *http.Request, c call) error {
+	name, err := refName(r)
+	if err != nil {
+		return err
+	}
+	var req api.SwapRefRequest
+	if err := decodeBody(r, smallBodyMax, &req); err != nil {
+		return err
+	}
+	if req.Expect < 0 || !lowerHex(req.Commit, 40, 40) {
+		return store.ErrInvalid
+	}
+	ref, err := s.DB.SwapRef(r.Context(), c.claims.WS, c.claims.Epoch, c.claims.Repo, name, req.Expect, req.Commit)
+	if err != nil {
+		return err
+	}
+	s.writeJSON(w, http.StatusOK, ref)
+	return nil
+}
+
+func (s *Server) deleteRef(w http.ResponseWriter, r *http.Request, c call) error {
+	name, err := refName(r)
+	if err != nil {
+		return err
+	}
+	expect, err := strconv.ParseInt(r.URL.Query().Get("expect"), 10, 64)
+	if err != nil || expect < 1 {
+		return store.ErrInvalid
+	}
+	if err := s.DB.DeleteRef(r.Context(), c.claims.WS, c.claims.Epoch, c.claims.Repo, name, expect); err != nil {
+		return err
+	}
+	w.WriteHeader(http.StatusNoContent)
+	return nil
+}
