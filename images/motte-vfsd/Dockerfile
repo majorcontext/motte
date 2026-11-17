@@ -13,7 +13,8 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH GOFLAGS=-trimpath go build \
     -ldflags "-s -w" \
     -o /out/motte-vfsd ./cmd/motte-vfsd
 
-# git serves "motte-vfsd import". The daemon mounts with mount(2), so the image needs no fusermount.
+# git serves "motte-vfsd import". The csi command mounts with mount(2), so the image needs no fusermount.
+# The standalone mount command uses fusermount and is for a host that has it.
 FROM debian:trixie-slim@sha256:89c1ea91e897f0fe0a3731595330bc45b8bdef4047464a07116f891a94054b31
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git \

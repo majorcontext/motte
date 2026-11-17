@@ -263,7 +263,7 @@ Package `testserver` runs the real server in the process of a test, on a fresh s
 
 | Command | Meaning |
 |---|---|
-| `motte-vfsd mount` | Serves the tree of one commit as the read-only lower layer of a kernel overlay. Needs `-api`, `-commit`, `-mnt`, `-upper` and `-ctl-sock`, and `MOTTE_VFS_GRANT` in the environment. It does not refresh the grant. |
+| `motte-vfsd mount` | Standalone, for a host that has `fusermount`; `csi` mounts with `mount(2)`. Serves the tree of one commit as the read-only lower layer of a kernel overlay. Needs `-api`, `-commit`, `-mnt`, `-upper` and `-ctl-sock`, and `MOTTE_VFS_GRANT` in the environment. It does not refresh the grant. |
 | `motte-vfsd csi` | The CSI node plugin. Needs `-api` and `-grant-key-file`. Flags `-driver` (default `vfs.motte.dev`), `-endpoint`, `-node-id`, `-state`, `-uid` and `-gid`. |
 | `motte-vfsd materialize` | Writes the checkout of a commit to `-dest`. A marker file records a finished checkout, and a later run changes nothing, whatever commit it names. |
 | `motte-vfsd import` | Fetches a repository with `git`, packs it and uploads it with an `import` grant (`PUT /v1/vcs/packs/{pack_id}`). `-depth 0` imports the whole history as packs of about 48 MiB and skips the ranges that the store holds. |
@@ -272,7 +272,7 @@ The key file of `csi` is JSON `{"kid","key"}`. `key` is the standard base64 of a
 
 ### Mount mode
 
-The FUSE mount is the read-only lower layer. Every mutating operation answers `EROFS`: `mkdir`, `symlink`, `create`, `unlink`, `rmdir`, `rename`, `setattr`, `write`, `fallocate`, and an `open` with a write flag. `fsync` answers success. Entry, attribute and negative timeouts are one hour, because the lower never changes while the mount lives. A lookup reads trees in bulk (`GET /v1/vcs/trees/{sha}`). The first read of a file reads its blob and the blobs that follow it in tree order in one batch (`POST /v1/vcs/blobs/batch`). A node cache that all workspaces on the node share keeps the blobs.
+The FUSE mount is the read-only lower layer. Every mutating operation answers `EROFS`: `mkdir`, `symlink`, `create`, `unlink`, `rmdir`, `rename`, `setattr`, `write`, `fallocate`, and an `open` with a write flag. `fsync` answers success. Entry, attribute and negative timeouts are one hour, because the lower never changes while the mount lives. A lookup reads trees in bulk (`GET /v1/vcs/trees/{sha}`). The first read of a file reads its blob and the blobs that follow it in tree order in one batch (`POST /v1/vcs/blobs/batch`). A node cache that all workspaces on the node share keeps the blobs. The cache is keyed by SHA only: the control op `getbatch` serves a cached blob to any workspace that names its SHA, whatever its repository.
 
 `mount` refuses to start without `-upper` and `-ctl-sock`. It binds the socket before it mounts. It runs `upperdir.ProbeTrustedBeside` first and fails with a `CAP_SYS_ADMIN` error when the process cannot read `trusted.*` attributes on the file system of the upper directory. The probe uses a new sibling directory and never writes into the upper directory.
 
