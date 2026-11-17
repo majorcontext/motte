@@ -23,7 +23,7 @@ Non-goals:
 | Store service | HTTP service, PostgreSQL index, the epoch fence. | M2 |
 | `client` | Typed Go client for callers. Public package. | M3 |
 | `testserver` | Starts a real server in a caller's test. Public package. | M3 |
-| `internal/vfs`, `cmd/motte-vfsd`, `volume` | Node daemon that serves a virtual workspace, and its public volume attributes. | M4 |
+| `internal/vfs/...`, `cmd/motte-vfsd`, `volume` | Node daemon that serves a virtual workspace, and its public volume attributes. | M4 |
 | jj backend | `jj/`: the jj binary whose stores and working copy use the workspace daemon. Released for linux amd64 and arm64. | M5 |
 
 ## Planes
@@ -295,7 +295,18 @@ The chart creates no Secret and no namespace. A release needs `database.dsnSecre
 
 ## Virtual workspace daemon
 
-`internal/vfs` is the node daemon of the virtual workspace. `cmd/motte-vfsd` runs it. It reads and writes the store plane with a `node` grant, so a workspace holds no store credential. The FUSE server and the overlay build on Linux only. On other systems `motte-vfsd` prints a message and exits 1. The daemon writes JSON logs, and `OTEL_EXPORTER_OTLP_ENDPOINT` enables trace export. A client span name is `vcs.client.` and the route, such as `vcs.client.ref.swap`.
+The packages under `internal/vfs` are the node daemon of the virtual workspace. `cmd/motte-vfsd` runs it. It reads and writes the store plane with a `node` grant, so a workspace holds no store credential. The FUSE server and the overlay build on Linux only. On other systems `motte-vfsd` prints a message and exits 1. The daemon writes JSON logs, and `OTEL_EXPORTER_OTLP_ENDPOINT` enables trace export. A client span name is `vcs.client.` and the route, such as `vcs.client.ref.swap`.
+
+| Package | Role |
+|---|---|
+| `internal/vfs/store` | Store client, tree and blob types, and the node cache. |
+| `internal/vfs/lower` | The FUSE lower layer, and the dirty set and changes of the upper directory. |
+| `internal/vfs/ctl` | The control protocol and its socket. |
+| `internal/vfs/csi` | The CSI node plugin, the mount steps and the `mountinfo` reader. |
+| `internal/vfs/importer` | `import`: fetch with `git`, pack, upload. |
+| `internal/vfs/materialize` | `materialize`: write the checkout of a commit. |
+| `internal/vfs/tel` | Correlation, spans, log records and the health record. |
+| `internal/vfs/upperdir` | The scan of the upper directory. |
 
 `HTTPStore` is the store client of the daemon. It sends the grant as a bearer token, injects W3C trace headers, follows no redirect, and answers 403 with `ErrGrantRefused`, which no retry passes. A 409 `vcs_generation_conflict` answer becomes `RefConflictError` with the stored ref from `details.ref`. A test drives `HTTPStore` against the real service.
 
@@ -390,4 +401,4 @@ A directory that merges a base directory at another path lists every base leaf b
 
 ### Tests
 
-`internal/vfs` pins the daemon over an in-memory upper directory, the plugin over a fake of the mount seam, the ref and op-head wire against a fake store, and `HTTPStore` against the real service. `internal/vfs/upperdir` tests `Scan` against a model of overlayfs and, as root, against a real overlay. No Go test mounts FUSE. The harness under `internal/vfs/testdata` (`vfsfuzz`, `overlaycheck`, `overlaykit`) checks a real overlay over a running daemon and needs root, `/dev/fuse` and overlayfs. CI vets the tools and runs the tests of `overlaykit`.
+The packages under `internal/vfs` pin the daemon over an in-memory upper directory, the plugin over a fake of the mount seam, the ref and op-head wire against a fake store, and `HTTPStore` against the real service. `internal/vfs/upperdir` tests `Scan` against a model of overlayfs and, as root, against a real overlay. No Go test mounts FUSE. The harness under `internal/vfs/testdata` (`vfsfuzz`, `overlaycheck`, `overlaykit`) checks a real overlay over a running daemon and needs root, `/dev/fuse` and overlayfs. CI vets the tools and runs the tests of `overlaykit`.
