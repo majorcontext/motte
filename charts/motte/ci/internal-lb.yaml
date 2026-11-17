@@ -1,0 +1,20 @@
+replicas: 1
+image:
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+database:
+  dsnSecret:
+    name: motte-db
+bucket:
+  kind: fs
+  url: /var/lib/motte
+trustedKeysConfigMap:
+  name: motte-keys
+service:
+  type: LoadBalancer
+  loadBalancerIP: 10.0.0.5
+  annotations:
+    networking.gke.io/load-balancer-type: Internal
+serviceAccount:
+  annotations:
+    iam.gke.io/gcp-service-account: motte@example.iam.gserviceaccount.com
+otlpEndpoint: http://collector:4318

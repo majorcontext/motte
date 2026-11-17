@@ -1,0 +1,66 @@
+# image is the motte image. Set digest or tag; a digest wins.
+image:
+  repository: ghcr.io/majorcontext/motte
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+replicas: 2
+
+serviceAccount:
+  create: true
+  # name defaults to the release name. Set annotations for workload identity.
+  name: ""
+  annotations: {}
+
+# service exposes port 80 and targets the container port. type LoadBalancer
+# makes an internal load balancer when the cloud annotations ask for one.
+service:
+  type: ClusterIP
+  port: 80
+  loadBalancerIP: ""
+  annotations: {}
+
+# listenPort is the container port. It sets MOTTE_LISTEN.
+listenPort: 8080
+
+# database.dsnSecret names the existing Secret that holds the PostgreSQL DSN.
+# The chart creates no Secret.
+database:
+  dsnSecret:
+    name: ""
+    key: dsn
+
+# bucket sets MOTTE_BUCKET_KIND and MOTTE_BUCKET. kind is gcs or fs. An fs
+# bucket is a directory on an emptyDir volume, so its data ends with the pod;
+# use it for tests only.
+bucket:
+  kind: gcs
+  url: ""
+
+# trustedKeys is the list of public keys that the store trusts. Each entry has
+# kid, key (standard base64 of an Ed25519 public key) and scopes. Set
+# trustedKeysConfigMap to read the JSON list from an existing ConfigMap instead.
+trustedKeys: []
+trustedKeysConfigMap:
+  name: ""
+  key: trusted-keys.json
+
+# otlpEndpoint enables OTLP trace export when set.
+otlpEndpoint: ""
+
+# prometheusAnnotations adds the prometheus.io scrape annotations for /metrics.
+prometheusAnnotations: true
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 512Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+
+# extraEnv adds environment variables to the container, such as GOOGLE_CLOUD_PROJECT.
+extraEnv: []
