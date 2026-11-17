@@ -25,15 +25,18 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - run: rustup toolchain install --profile minimal
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            jj/target
-          key: cargo-release-${{ matrix.arch }}-${{ hashFiles('jj/Cargo.lock', 'jj/rust-toolchain.toml') }}
-      - run: cargo build --release --locked --bin jj
+      - name: Build in Debian bookworm
+        # The binary links the glibc of its build system. Building on bookworm
+        # (glibc 2.36) lets it run on bookworm and every newer glibc.
+        run: >
+          docker run --rm -v "$GITHUB_WORKSPACE:/w" -w /w/jj
+          rust:1.99.1-bookworm@sha256:e9da6f6c3ed5095fd5d33bf7cdf309830a178a8147888f1b2f76d5769bd9306c
+          cargo build --release --locked --bin jj
+      - name: Run the binary on Debian bookworm
+        run: >
+          docker run --rm -v "$GITHUB_WORKSPACE/jj/target/release:/b:ro"
+          debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
+          /b/jj --help
       - name: Attach the binary and its sha256 sum to the release
         env:
           GH_TOKEN: ${{ github.token }}
