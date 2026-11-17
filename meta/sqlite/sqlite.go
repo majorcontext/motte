@@ -72,6 +72,15 @@ func uniqueViolation(err error) bool {
 
 const bumpGeneration = `UPDATE counters SET value = value + 1 WHERE name = 'ref_generation'`
 
+// nextSeq is the number of the next event of the partition in the parameter at param.
+func nextSeq(param string) string {
+	return `(SELECT seq + 1 FROM event_partitions WHERE partition = ` + param + `)`
+}
+
+// bumpSeq takes the number that the event insert just used, and only when that insert changed a row, so a failed write
+// leaves no gap even in a batch that does not roll back.
+const bumpSeq = `UPDATE event_partitions SET seq = seq + 1 WHERE partition = ?1 AND EXISTS (SELECT 1 FROM events WHERE partition = ?1 AND seq = event_partitions.seq + 1)`
+
 const nextGeneration = `(SELECT value FROM counters WHERE name = 'ref_generation')`
 
 // fenceHolds is the fence of every write. ?1, ?2 and ?3 are the workspace, the epoch and the repo.
@@ -89,7 +98,11 @@ func (s *Store) CreateRepo(ctx context.Context, r meta.Repo, repoText, commit st
 		if _, err := tx.ExecContext(ctx, `INSERT INTO refs (repo, name, commit_sha, generation, updated_at) VALUES (?, 'main', ?, `+nextGeneration+`, ?)`, repoText, commit, now); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO events (repo, ref, old_commit, new_commit, generation, kind, at) VALUES (?, 'main', '', ?, `+nextGeneration+`, ?, ?)`, repoText, commit, meta.WriterOperator, now)
+		part := meta.Partition(repoText, "main")
+		if _, err := tx.ExecContext(ctx, `INSERT INTO events (partition, seq, repo, ref, old_commit, new_commit, generation, kind, at) VALUES (?1, `+nextSeq("?1")+`, ?2, 'main', '', ?3, `+nextGeneration+`, ?4, ?5)`, part, repoText, commit, meta.WriterOperator, now); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, bumpSeq, part)
 		return err
 	})
 	if uniqueViolation(err) {
@@ -385,15 +398,18 @@ func (s *Store) swapRef(ctx context.Context, w writer, ws string, epoch uint64, 
 	var generation int64
 	err := inTx(ctx, s.db, func(tx *sql.Tx) error {
 		now := micros()
-		args := []any{ws, int64(epoch), repo, name, sha, expect, now, w.kind}
+		args := []any{ws, int64(epoch), repo, name, sha, expect, now, w.kind, meta.Partition(repo, name)}
 		if _, err := tx.ExecContext(ctx, bumpGeneration); err != nil {
 			return err
 		}
 		if expect == 0 {
 			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO events (repo, ref, old_commit, new_commit, generation, kind, at)
-				SELECT ?3, ?4, '', ?5, `+nextGeneration+`, ?8, ?7
+				INSERT INTO events (partition, seq, repo, ref, old_commit, new_commit, generation, kind, at)
+				SELECT ?9, `+nextSeq("?9")+`, ?3, ?4, '', ?5, `+nextGeneration+`, ?8, ?7
 				WHERE `+w.fence+` AND NOT EXISTS (SELECT 1 FROM refs WHERE repo = ?3 AND name = ?4)`, args...); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, bumpSeq, args[8]); err != nil {
 				return err
 			}
 			return tx.QueryRowContext(ctx, `
@@ -403,9 +419,12 @@ func (s *Store) swapRef(ctx context.Context, w writer, ws string, epoch uint64, 
 				RETURNING generation`, args...).Scan(&generation)
 		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO events (repo, ref, old_commit, new_commit, generation, kind, at)
-			SELECT ?3, ?4, commit_sha, ?5, `+nextGeneration+`, ?8, ?7
+			INSERT INTO events (partition, seq, repo, ref, old_commit, new_commit, generation, kind, at)
+			SELECT ?9, `+nextSeq("?9")+`, ?3, ?4, commit_sha, ?5, `+nextGeneration+`, ?8, ?7
 			FROM refs WHERE repo = ?3 AND name = ?4 AND generation = ?6 AND `+w.fence, args...); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, bumpSeq, args[8]); err != nil {
 			return err
 		}
 		return tx.QueryRowContext(ctx, `
@@ -424,11 +443,14 @@ func (s *Store) swapRef(ctx context.Context, w writer, ws string, epoch uint64, 
 
 func (s *Store) deleteRef(ctx context.Context, w writer, ws string, epoch uint64, repo, name string, expect int64) error {
 	err := inTx(ctx, s.db, func(tx *sql.Tx) error {
-		args := []any{ws, int64(epoch), repo, name, expect, micros(), w.kind}
+		args := []any{ws, int64(epoch), repo, name, expect, micros(), w.kind, meta.Partition(repo, name)}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO events (repo, ref, old_commit, new_commit, generation, kind, at)
-			SELECT ?3, ?4, commit_sha, '', ?5, ?7, ?6
+			INSERT INTO events (partition, seq, repo, ref, old_commit, new_commit, generation, kind, at)
+			SELECT ?8, `+nextSeq("?8")+`, ?3, ?4, commit_sha, '', ?5, ?7, ?6
 			FROM refs WHERE repo = ?3 AND name = ?4 AND generation = ?5 AND `+w.fence, args...); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, bumpSeq, args[7]); err != nil {
 			return err
 		}
 		res, err := tx.ExecContext(ctx, `DELETE FROM refs WHERE repo = ?3 AND name = ?4 AND generation = ?5 AND `+w.fence, ws, int64(epoch), repo, name, expect)

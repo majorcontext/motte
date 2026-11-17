@@ -42,9 +42,10 @@ func (s *Store) SetProtectedRefs(ctx context.Context, repo string, patterns []st
 
 // Events reads the rows first and the floor second, so a prune between the reads gives ErrEventsPruned and never a
 // silent gap.
-func (s *Store) Events(ctx context.Context, after int64, limit int) ([]meta.Event, error) {
+func (s *Store) Events(ctx context.Context, partition int, after int64, limit int) ([]meta.Event, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT seq, repo, ref, old_commit, new_commit, generation, kind, at FROM events WHERE seq > ? ORDER BY seq LIMIT ?`, after, limit)
+		SELECT partition, seq, repo, ref, old_commit, new_commit, generation, kind, at
+		FROM events WHERE partition = ? AND seq > ? ORDER BY seq LIMIT ?`, partition, after, limit)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: list events: %w", err)
 	}
@@ -53,7 +54,7 @@ func (s *Store) Events(ctx context.Context, after int64, limit int) ([]meta.Even
 	for rows.Next() {
 		var e meta.Event
 		var at int64
-		if err := rows.Scan(&e.Seq, &e.Repo, &e.Ref, &e.Old, &e.New, &e.Generation, &e.Kind, &at); err != nil {
+		if err := rows.Scan(&e.Partition, &e.Seq, &e.Repo, &e.Ref, &e.Old, &e.New, &e.Generation, &e.Kind, &at); err != nil {
 			return nil, fmt.Errorf("sqlite: list events: %w", err)
 		}
 		e.At = time.UnixMicro(at).UTC()
@@ -64,7 +65,7 @@ func (s *Store) Events(ctx context.Context, after int64, limit int) ([]meta.Even
 	}
 	_ = rows.Close()
 	var floor int64
-	if err := s.db.QueryRowContext(ctx, `SELECT value FROM counters WHERE name = 'events_floor'`).Scan(&floor); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT floor FROM event_partitions WHERE partition = ?`, partition).Scan(&floor); err != nil {
 		return nil, fmt.Errorf("sqlite: read events floor: %w", err)
 	}
 	if after < floor {
@@ -73,11 +74,28 @@ func (s *Store) Events(ctx context.Context, after int64, limit int) ([]meta.Even
 	return out, nil
 }
 
+func (s *Store) EventHeads(ctx context.Context) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT seq FROM event_partitions ORDER BY partition`)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: read event heads: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var heads []int64
+	for rows.Next() {
+		var h int64
+		if err := rows.Scan(&h); err != nil {
+			return nil, fmt.Errorf("sqlite: read event heads: %w", err)
+		}
+		heads = append(heads, h)
+	}
+	return heads, rows.Err()
+}
+
 func (s *Store) PruneEvents(ctx context.Context, before time.Time) error {
 	err := inTx(ctx, s.db, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `
-			UPDATE counters SET value = max(value, coalesce((SELECT max(seq) FROM events WHERE at < ?1), 0))
-			WHERE name = 'events_floor'`, before.UnixMicro()); err != nil {
+			UPDATE event_partitions SET floor = max(floor, coalesce((SELECT max(seq) FROM events e WHERE e.partition = event_partitions.partition AND e.at < ?1), 0))`,
+			before.UnixMicro()); err != nil {
 			return err
 		}
 		_, err := tx.ExecContext(ctx, `DELETE FROM events WHERE at < ?`, before.UnixMicro())
@@ -89,46 +107,53 @@ func (s *Store) PruneEvents(ctx context.Context, before time.Time) error {
 	return nil
 }
 
-const subscriptionColumns = `id, url, secret, repo, cursor, created_at, lease_owner, lease_until`
-
-type scanner interface{ Scan(dest ...any) error }
-
-func scanSubscription(row scanner) (meta.Subscription, error) {
-	var sub meta.Subscription
-	var created, until int64
-	if err := row.Scan(&sub.ID, &sub.URL, &sub.Secret, &sub.Repo, &sub.Cursor, &created, &sub.LeaseOwner, &until); err != nil {
-		return meta.Subscription{}, err
-	}
-	sub.CreatedAt, sub.LeaseUntil = time.UnixMicro(created).UTC(), time.UnixMicro(until).UTC()
-	return sub, nil
-}
-
 func (s *Store) CreateSubscription(ctx context.Context, sub meta.Subscription) (meta.Subscription, error) {
-	created, err := scanSubscription(s.db.QueryRowContext(ctx, `
-		INSERT INTO subscriptions (id, url, secret, repo, cursor, created_at)
-		VALUES (?, ?, ?, ?, (SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name = 'events'), 0)), ?)
-		ON CONFLICT (id) DO NOTHING RETURNING `+subscriptionColumns, sub.ID, sub.URL, sub.Secret, sub.Repo, micros()))
+	var created time.Time
+	err := inTx(ctx, s.db, func(tx *sql.Tx) error {
+		var micro int64
+		if err := tx.QueryRowContext(ctx, `
+			INSERT INTO subscriptions (id, url, secret, repo, created_at) VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT (id) DO NOTHING RETURNING created_at`, sub.ID, sub.URL, sub.Secret, sub.Repo, micros()).Scan(&micro); err != nil {
+			return err
+		}
+		created = time.UnixMicro(micro).UTC()
+		_, err := tx.ExecContext(ctx, `INSERT INTO subscription_cursors (sub_id, partition, cursor) SELECT ?, partition, seq FROM event_partitions`, sub.ID)
+		return err
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return meta.Subscription{}, meta.ErrExists
 	}
 	if err != nil {
 		return meta.Subscription{}, fmt.Errorf("sqlite: create subscription: %w", err)
 	}
-	return created, nil
+	heads, err := s.EventHeads(ctx)
+	if err != nil {
+		return meta.Subscription{}, err
+	}
+	sub.CreatedAt, sub.Cursors = created, heads
+	return sub, nil
 }
 
 func (s *Store) Subscriptions(ctx context.Context) ([]meta.Subscription, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+subscriptionColumns+` FROM subscriptions ORDER BY created_at, id`)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT s.id, s.url, s.secret, s.repo, s.created_at, c.cursor
+		FROM subscriptions s JOIN subscription_cursors c ON c.sub_id = s.id ORDER BY s.created_at, s.id, c.partition`)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: list subscriptions: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	var out []meta.Subscription
 	for rows.Next() {
-		sub, err := scanSubscription(rows)
-		if err != nil {
+		var sub meta.Subscription
+		var created, cursor int64
+		if err := rows.Scan(&sub.ID, &sub.URL, &sub.Secret, &sub.Repo, &created, &cursor); err != nil {
 			return nil, fmt.Errorf("sqlite: list subscriptions: %w", err)
 		}
+		if n := len(out); n > 0 && out[n-1].ID == sub.ID {
+			out[n-1].Cursors = append(out[n-1].Cursors, cursor)
+			continue
+		}
+		sub.CreatedAt, sub.Cursors = time.UnixMicro(created).UTC(), []int64{cursor}
 		out = append(out, sub)
 	}
 	if err := rows.Err(); err != nil {
@@ -151,9 +176,9 @@ func (s *Store) DeleteSubscription(ctx context.Context, id string) error {
 	return nil
 }
 
-func (s *Store) leaseLost(ctx context.Context, id string) error {
+func (s *Store) leaseLost(ctx context.Context, id string, partition int) error {
 	var found bool
-	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM subscriptions WHERE id = ?)`, id).Scan(&found); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM subscription_cursors WHERE sub_id = ? AND partition = ?)`, id, partition).Scan(&found); err != nil {
 		return fmt.Errorf("sqlite: read subscription: %w", err)
 	}
 	if !found {
@@ -162,22 +187,25 @@ func (s *Store) leaseLost(ctx context.Context, id string) error {
 	return meta.ErrLeaseHeld
 }
 
-func (s *Store) AcquireLease(ctx context.Context, id, owner string, now, until time.Time) (meta.Subscription, error) {
-	sub, err := scanSubscription(s.db.QueryRowContext(ctx, `
-		UPDATE subscriptions SET lease_owner = ?2, lease_until = ?4
-		WHERE id = ?1 AND (lease_owner = ?2 OR lease_until <= ?3)
-		RETURNING `+subscriptionColumns, id, owner, now.UnixMicro(), until.UnixMicro()))
+func (s *Store) AcquireLease(ctx context.Context, id string, partition int, owner string, now, until time.Time) (meta.Lease, error) {
+	l := meta.Lease{ID: id, Partition: partition}
+	err := s.db.QueryRowContext(ctx, `
+		UPDATE subscription_cursors SET lease_owner = ?3, lease_until = ?5
+		WHERE sub_id = ?1 AND partition = ?2 AND (lease_owner = ?3 OR lease_until <= ?4)
+		RETURNING cursor, (SELECT url FROM subscriptions WHERE id = ?1), (SELECT secret FROM subscriptions WHERE id = ?1), (SELECT repo FROM subscriptions WHERE id = ?1)`,
+		id, partition, owner, now.UnixMicro(), until.UnixMicro()).Scan(&l.Cursor, &l.URL, &l.Secret, &l.Repo)
 	if errors.Is(err, sql.ErrNoRows) {
-		return meta.Subscription{}, s.leaseLost(ctx, id)
+		return meta.Lease{}, s.leaseLost(ctx, id, partition)
 	}
 	if err != nil {
-		return meta.Subscription{}, fmt.Errorf("sqlite: acquire lease: %w", err)
+		return meta.Lease{}, fmt.Errorf("sqlite: acquire lease: %w", err)
 	}
-	return sub, nil
+	return l, nil
 }
 
-func (s *Store) AdvanceCursor(ctx context.Context, id, owner string, cursor int64) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE subscriptions SET cursor = max(cursor, ?3) WHERE id = ?1 AND lease_owner = ?2`, id, owner, cursor)
+func (s *Store) AdvanceCursor(ctx context.Context, id string, partition int, owner string, cursor int64) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE subscription_cursors SET cursor = max(cursor, ?4) WHERE sub_id = ?1 AND partition = ?2 AND lease_owner = ?3`, id, partition, owner, cursor)
 	if err != nil {
 		return fmt.Errorf("sqlite: advance cursor: %w", err)
 	}
@@ -185,7 +213,7 @@ func (s *Store) AdvanceCursor(ctx context.Context, id, owner string, cursor int6
 		if err != nil {
 			return err
 		}
-		return s.leaseLost(ctx, id)
+		return s.leaseLost(ctx, id, partition)
 	}
 	return nil
 }

@@ -37,9 +37,10 @@ func (s *Store) SetProtectedRefs(ctx context.Context, repo string, patterns []st
 
 // Events reads the rows first and the floor second, so a prune between the reads gives ErrEventsPruned and never a
 // silent gap.
-func (s *Store) Events(ctx context.Context, after int64, limit int) ([]meta.Event, error) {
+func (s *Store) Events(ctx context.Context, partition int, after int64, limit int) ([]meta.Event, error) {
 	rows, err := s.Pool.Query(ctx, `
-		SELECT seq, repo, ref, old_commit, new_commit, generation, kind, at FROM events WHERE seq > $1 ORDER BY seq LIMIT $2`, after, limit)
+		SELECT partition, seq, repo, ref, old_commit, new_commit, generation, kind, at
+		FROM events WHERE partition = $1 AND seq > $2 ORDER BY seq LIMIT $3`, partition, after, limit)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list events: %w", err)
 	}
@@ -48,7 +49,7 @@ func (s *Store) Events(ctx context.Context, after int64, limit int) ([]meta.Even
 		return nil, fmt.Errorf("postgres: list events: %w", err)
 	}
 	var floor int64
-	if err := s.Pool.QueryRow(ctx, `SELECT value FROM counters WHERE name = 'events_floor'`).Scan(&floor); err != nil {
+	if err := s.Pool.QueryRow(ctx, `SELECT floor FROM event_partitions WHERE partition = $1`, partition).Scan(&floor); err != nil {
 		return nil, fmt.Errorf("postgres: read events floor: %w", err)
 	}
 	if after < floor {
@@ -57,31 +58,47 @@ func (s *Store) Events(ctx context.Context, after int64, limit int) ([]meta.Even
 	return out, nil
 }
 
+func (s *Store) EventHeads(ctx context.Context) ([]int64, error) {
+	rows, err := s.Pool.Query(ctx, `SELECT seq FROM event_partitions ORDER BY partition`)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: read event heads: %w", err)
+	}
+	heads, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	if err != nil {
+		return nil, fmt.Errorf("postgres: read event heads: %w", err)
+	}
+	return heads, nil
+}
+
 func (s *Store) PruneEvents(ctx context.Context, before time.Time) error {
 	if _, err := s.Pool.Exec(ctx, `
-		WITH gone AS (DELETE FROM events WHERE at < $1 RETURNING seq)
-		UPDATE counters SET value = GREATEST(value, (SELECT max(seq) FROM gone))
-		WHERE name = 'events_floor' AND EXISTS (SELECT 1 FROM gone)`, before); err != nil {
+		WITH gone AS (DELETE FROM events WHERE at < $1 RETURNING partition, seq),
+		top AS (SELECT partition, max(seq) AS seq FROM gone GROUP BY partition)
+		UPDATE event_partitions p SET floor = GREATEST(p.floor, top.seq) FROM top WHERE p.partition = top.partition`, before); err != nil {
 		return fmt.Errorf("postgres: prune events: %w", err)
 	}
 	return nil
 }
 
-const subscriptionColumns = `id, url, secret, repo, cursor, created_at, lease_owner, lease_until`
-
-func scanSubscription(row pgx.CollectableRow) (meta.Subscription, error) {
-	return pgx.RowToStructByPos[meta.Subscription](row)
-}
+const subscriptionSelect = `
+	SELECT s.id, s.url, s.secret, s.repo, s.created_at,
+		(SELECT array_agg(c.cursor ORDER BY c.partition) FROM subscription_cursors c WHERE c.sub_id = s.id)
+	FROM subscriptions s`
 
 func (s *Store) CreateSubscription(ctx context.Context, sub meta.Subscription) (meta.Subscription, error) {
 	rows, err := s.Pool.Query(ctx, `
-		INSERT INTO subscriptions (id, url, secret, repo, cursor)
-		VALUES ($1, $2, $3, $4, (SELECT value FROM counters WHERE name = 'event_seq'))
-		ON CONFLICT (id) DO NOTHING RETURNING `+subscriptionColumns, sub.ID, sub.URL, sub.Secret, sub.Repo)
+		WITH made AS (
+			INSERT INTO subscriptions (id, url, secret, repo) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING
+			RETURNING id, url, secret, repo, created_at),
+		cursors AS (
+			INSERT INTO subscription_cursors (sub_id, partition, cursor)
+			SELECT made.id, p.partition, p.seq FROM made, event_partitions p RETURNING 1)
+		SELECT made.id, made.url, made.secret, made.repo, made.created_at, (SELECT array_agg(seq ORDER BY partition) FROM event_partitions)
+		FROM made`, sub.ID, sub.URL, sub.Secret, sub.Repo)
 	if err != nil {
 		return meta.Subscription{}, fmt.Errorf("postgres: create subscription: %w", err)
 	}
-	created, err := pgx.CollectOneRow(rows, scanSubscription)
+	created, err := pgx.CollectOneRow(rows, pgx.RowToStructByPos[meta.Subscription])
 	if errors.Is(err, pgx.ErrNoRows) {
 		return meta.Subscription{}, meta.ErrExists
 	}
@@ -92,11 +109,11 @@ func (s *Store) CreateSubscription(ctx context.Context, sub meta.Subscription) (
 }
 
 func (s *Store) Subscriptions(ctx context.Context) ([]meta.Subscription, error) {
-	rows, err := s.Pool.Query(ctx, `SELECT `+subscriptionColumns+` FROM subscriptions ORDER BY created_at, id COLLATE "C"`)
+	rows, err := s.Pool.Query(ctx, subscriptionSelect+` ORDER BY s.created_at, s.id COLLATE "C"`)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list subscriptions: %w", err)
 	}
-	out, err := pgx.CollectRows(rows, scanSubscription)
+	out, err := pgx.CollectRows(rows, pgx.RowToStructByPos[meta.Subscription])
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list subscriptions: %w", err)
 	}
@@ -115,9 +132,9 @@ func (s *Store) DeleteSubscription(ctx context.Context, id string) error {
 }
 
 // leaseLost picks the error of a lease write that changed no row.
-func (s *Store) leaseLost(ctx context.Context, id string) error {
+func (s *Store) leaseLost(ctx context.Context, id string, partition int) error {
 	var found bool
-	if err := s.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM subscriptions WHERE id = $1)`, id).Scan(&found); err != nil {
+	if err := s.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM subscription_cursors WHERE sub_id = $1 AND partition = $2)`, id, partition).Scan(&found); err != nil {
 		return fmt.Errorf("postgres: read subscription: %w", err)
 	}
 	if !found {
@@ -126,31 +143,32 @@ func (s *Store) leaseLost(ctx context.Context, id string) error {
 	return meta.ErrLeaseHeld
 }
 
-func (s *Store) AcquireLease(ctx context.Context, id, owner string, now, until time.Time) (meta.Subscription, error) {
-	rows, err := s.Pool.Query(ctx, `
-		UPDATE subscriptions SET lease_owner = $2, lease_until = $4
-		WHERE id = $1 AND (lease_owner = $2 OR lease_until <= $3)
-		RETURNING `+subscriptionColumns, id, owner, now, until)
-	if err != nil {
-		return meta.Subscription{}, fmt.Errorf("postgres: acquire lease: %w", err)
-	}
-	sub, err := pgx.CollectOneRow(rows, scanSubscription)
+func (s *Store) AcquireLease(ctx context.Context, id string, partition int, owner string, now, until time.Time) (meta.Lease, error) {
+	l := meta.Lease{ID: id, Partition: partition}
+	err := s.Pool.QueryRow(ctx, `
+		WITH taken AS (
+			UPDATE subscription_cursors SET lease_owner = $3, lease_until = $5
+			WHERE sub_id = $1 AND partition = $2 AND (lease_owner = $3 OR lease_until <= $4) RETURNING cursor)
+		SELECT s.url, s.secret, s.repo, taken.cursor FROM taken, subscriptions s WHERE s.id = $1`,
+		id, partition, owner, now, until).Scan(&l.URL, &l.Secret, &l.Repo, &l.Cursor)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return meta.Subscription{}, s.leaseLost(ctx, id)
+		return meta.Lease{}, s.leaseLost(ctx, id, partition)
 	}
 	if err != nil {
-		return meta.Subscription{}, fmt.Errorf("postgres: acquire lease: %w", err)
+		return meta.Lease{}, fmt.Errorf("postgres: acquire lease: %w", err)
 	}
-	return sub, nil
+	return l, nil
 }
 
-func (s *Store) AdvanceCursor(ctx context.Context, id, owner string, cursor int64) error {
-	tag, err := s.Pool.Exec(ctx, `UPDATE subscriptions SET cursor = GREATEST(cursor, $3) WHERE id = $1 AND lease_owner = $2`, id, owner, cursor)
+func (s *Store) AdvanceCursor(ctx context.Context, id string, partition int, owner string, cursor int64) error {
+	tag, err := s.Pool.Exec(ctx, `
+		UPDATE subscription_cursors SET cursor = GREATEST(cursor, $4) WHERE sub_id = $1 AND partition = $2 AND lease_owner = $3`,
+		id, partition, owner, cursor)
 	if err != nil {
 		return fmt.Errorf("postgres: advance cursor: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return s.leaseLost(ctx, id)
+		return s.leaseLost(ctx, id, partition)
 	}
 	return nil
 }

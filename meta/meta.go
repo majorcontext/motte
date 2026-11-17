@@ -9,6 +9,7 @@ package meta
 import (
 	"context"
 	"errors"
+	"hash/fnv"
 	"time"
 )
 
@@ -76,10 +77,26 @@ type OpHeads struct {
 	Heads      []string
 }
 
-// Event is one change of a ref. Seq is unique and ordered in commit order across
-// the store. Old is empty for a create, and New is empty for a delete. For a
-// delete Generation is the generation that the ref had. Kind is a Writer constant.
+// Partitions is the number of event partitions of a store. The partition of a
+// ref is fixed by its repo and name, so every event of one ref is in one
+// partition and in order. Changing the number is a migration.
+const Partitions = 64
+
+// Partition returns the event partition of a ref: the FNV-1a hash of the repo,
+// a zero byte and the name, modulo Partitions.
+func Partition(repo, ref string) int {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(repo + "\x00" + ref))
+	return int(h.Sum32() % Partitions)
+}
+
+// Event is one change of a ref. Its identity is Partition and Seq. Seq starts
+// at 1 in each partition and has no gap there, and it follows commit order
+// within the partition. No order holds across partitions. Old is empty for a
+// create, and New is empty for a delete. For a delete Generation is the
+// generation that the ref had. Kind is a Writer constant.
 type Event struct {
+	Partition  int
 	Seq        int64
 	Repo, Ref  string
 	Old, New   string
@@ -88,15 +105,20 @@ type Event struct {
 	At         time.Time
 }
 
-// Subscription is a registered receiver of events. Cursor is the Seq of the
-// last event that the receiver acknowledged. LeaseOwner holds the right to
-// deliver until LeaseUntil. Repo is empty for every repo.
+// Subscription is a registered receiver. Cursors holds one cursor for each
+// partition: the Seq of the last event of that partition that the receiver
+// acknowledged. Repo is empty for every repo.
 type Subscription struct {
 	ID, URL, Secret, Repo string
-	Cursor                int64
 	CreatedAt             time.Time
-	LeaseOwner            string
-	LeaseUntil            time.Time
+	Cursors               []int64
+}
+
+// Lease is the right to deliver one partition of a subscription, with the cursor of that partition.
+type Lease struct {
+	ID, URL, Secret, Repo string
+	Partition             int
+	Cursor                int64
 }
 
 // Pack is a pack that a repository holds.
@@ -178,27 +200,32 @@ type Store interface {
 	// SetProtectedRefs replaces the protected ref patterns of repo.
 	SetProtectedRefs(ctx context.Context, repo string, patterns []string) error
 
-	// Events lists at most limit events with Seq above after, oldest first.
-	// ErrEventsPruned when after is below the last pruned Seq.
-	Events(ctx context.Context, after int64, limit int) ([]Event, error)
+	// Events lists at most limit events of one partition with Seq above
+	// after, oldest first. ErrEventsPruned when after is below the last
+	// pruned Seq of the partition.
+	Events(ctx context.Context, partition int, after int64, limit int) ([]Event, error)
+	// EventHeads returns the newest Seq of each partition, 0 for none.
+	EventHeads(ctx context.Context) ([]int64, error)
 	// PruneEvents removes the events written before the time and records the
-	// highest removed Seq.
+	// highest removed Seq of each partition.
 	PruneEvents(ctx context.Context, before time.Time) error
 
-	// CreateSubscription stores s with its cursor at the newest event.
-	// ErrExists when the id exists. The returned value has Cursor and CreatedAt.
+	// CreateSubscription stores s with each cursor at the newest Seq of its
+	// partition. ErrExists when the id exists. The returned value has
+	// Cursors and CreatedAt.
 	CreateSubscription(ctx context.Context, s Subscription) (Subscription, error)
 	// Subscriptions lists every subscription, oldest first, ties by id.
 	Subscriptions(ctx context.Context) ([]Subscription, error)
-	// DeleteSubscription removes a subscription. ErrNotFound when it is absent.
+	// DeleteSubscription removes a subscription and its cursors. ErrNotFound when it is absent.
 	DeleteSubscription(ctx context.Context, id string) error
-	// AcquireLease gives owner the lease of subscription id until the
-	// time until, when no owner holds it at now or owner holds it. It returns
-	// the subscription. ErrNotFound, ErrLeaseHeld.
-	AcquireLease(ctx context.Context, id, owner string, now, until time.Time) (Subscription, error)
-	// AdvanceCursor raises the cursor of subscription id to cursor while
-	// owner holds the lease. A lower cursor changes nothing. ErrNotFound, ErrLeaseHeld.
-	AdvanceCursor(ctx context.Context, id, owner string, cursor int64) error
+	// AcquireLease gives owner the lease of one partition of subscription id
+	// until the time until, when no owner holds it at now or owner holds
+	// it. It returns the lease with the cursor. ErrNotFound, ErrLeaseHeld.
+	AcquireLease(ctx context.Context, id string, partition int, owner string, now, until time.Time) (Lease, error)
+	// AdvanceCursor raises the cursor of one partition of subscription id to
+	// cursor while owner holds its lease. A lower cursor changes nothing.
+	// ErrNotFound, ErrLeaseHeld.
+	AdvanceCursor(ctx context.Context, id string, partition int, owner string, cursor int64) error
 
 	// AddPack records a pack once. A repeat is a no-op.
 	AddPack(ctx context.Context, repo, packID string, bytes int64) error
