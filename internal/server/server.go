@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -133,11 +134,15 @@ func decodeBody(r *http.Request, limit int, out any) error {
 	return nil
 }
 
-// logSafe drops the path of a filesystem error, which a log line must not hold.
+// logSafe drops the paths of a filesystem error, which a log line must not hold.
 func logSafe(err error) string {
 	var pe *fs.PathError
 	if errors.As(err, &pe) {
 		return pe.Op + ": " + pe.Err.Error()
+	}
+	var le *os.LinkError
+	if errors.As(err, &le) {
+		return le.Op + ": " + le.Err.Error()
 	}
 	return err.Error()
 }

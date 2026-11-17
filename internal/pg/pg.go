@@ -198,7 +198,13 @@ func (d *DB) Flush(ctx context.Context, ws string, epoch uint64, generation int6
 	case deleted:
 		return ErrGone
 	}
-	return d.Report(ctx, ws, epoch, repo, generation, prev, op, snapshot)
+	err = d.Report(ctx, ws, epoch, repo, generation, prev, op, snapshot)
+	if errors.Is(err, ErrClaimLost) {
+		if gone := d.Pool.QueryRow(ctx, `SELECT deleted_at IS NOT NULL FROM workspaces WHERE id = $1`, ws).Scan(&deleted); gone == nil && deleted {
+			return ErrGone
+		}
+	}
+	return err
 }
 
 func (d *DB) OpHeads(ctx context.Context, ws string) (api.OpHeads, error) {
