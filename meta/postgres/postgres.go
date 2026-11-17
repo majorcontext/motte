@@ -42,19 +42,23 @@ func uniqueViolation(err error) bool {
 }
 
 func (s *Store) CreateRepo(ctx context.Context, r meta.Repo, repoText, commit string) error {
-	tag, err := s.Pool.Exec(ctx, `
-		WITH created AS (
-			INSERT INTO repos (path, name, owner) VALUES ($1, $2, $3) ON CONFLICT (path) DO NOTHING RETURNING path)
-		INSERT INTO refs (repo, name, commit_sha, generation)
-		SELECT $4, 'main', $5, nextval('ref_generation') FROM created`, r.Path, r.Name, r.Owner, repoText, commit)
-	if uniqueViolation(err) {
+	wrote, err := s.withEvent(ctx, func(tx pgx.Tx, seq int64) (bool, error) {
+		tag, err := tx.Exec(ctx, `
+			WITH created AS (
+				INSERT INTO repos (path, name, owner) VALUES ($1, $2, $3) ON CONFLICT (path) DO NOTHING RETURNING path),
+			made AS (
+				INSERT INTO refs (repo, name, commit_sha, generation)
+				SELECT $4::text, 'main', $5::text, nextval('ref_generation') FROM created RETURNING generation)
+			INSERT INTO events (seq, repo, ref, old_commit, new_commit, generation, kind)
+			SELECT $6::bigint, $4::text, 'main', '', $5::text, made.generation, $7::text FROM made`,
+			r.Path, r.Name, r.Owner, repoText, commit, seq, meta.WriterOperator)
+		return tag.RowsAffected() == 1, err
+	})
+	if uniqueViolation(err) || err == nil && !wrote {
 		return meta.ErrExists
 	}
 	if err != nil {
 		return fmt.Errorf("postgres: create repo: %w", err)
-	}
-	if tag.RowsAffected() != 1 {
-		return meta.ErrExists
 	}
 	return nil
 }
@@ -283,46 +287,119 @@ func (s *Store) Refs(ctx context.Context, repo string) ([]meta.Ref, error) {
 	return out, nil
 }
 
-// SwapRef takes every generation from one sequence, so a deleted and recreated ref never repeats one.
+// writer is the fence and the event kind of one ref write. A merge write has no workspace, and its guard row keeps
+// the parameters $1 and $2 in use.
+type writer struct {
+	guard string
+	kind  string
+}
+
+var (
+	nodeWriter  = writer{guard: fmt.Sprintf(guard, 1, 2, 3), kind: meta.WriterNode}
+	mergeWriter = writer{guard: `SELECT $1::text AS id WHERE $2::bigint >= 0 AND $3::text <> ''`, kind: meta.WriterMerge}
+)
+
 func (s *Store) SwapRef(ctx context.Context, ws string, epoch uint64, repo, name string, expect int64, sha string) (meta.Ref, error) {
-	var generation int64
-	var err error
-	if expect == 0 {
-		err = s.Pool.QueryRow(ctx, `
-			INSERT INTO refs (repo, name, commit_sha, generation)
-			SELECT $3, $4, $5, nextval('ref_generation') FROM workspaces
-			WHERE id = $1 AND epoch = $2 AND repo = $3 AND deleted_at IS NULL FOR SHARE
-			ON CONFLICT (repo, name) DO NOTHING
-			RETURNING generation`, ws, int64(epoch), repo, name, sha).Scan(&generation)
-	} else {
-		err = s.Pool.QueryRow(ctx, `
-			WITH guard AS (`+fmt.Sprintf(guard, 1, 2, 3)+`)
-			UPDATE refs SET commit_sha = $5, generation = nextval('ref_generation'), updated_at = now()
-			FROM guard
-			WHERE refs.repo = $3 AND refs.name = $4 AND refs.generation = $6
-			RETURNING generation`, ws, int64(epoch), repo, name, sha, expect).Scan(&generation)
-	}
-	if err == nil {
-		return meta.Ref{Name: name, Commit: sha, Generation: generation}, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return meta.Ref{}, fmt.Errorf("postgres: swap ref: %w", err)
-	}
-	return meta.Ref{}, s.refLost(ctx, ws, epoch, repo, name)
+	return s.swapRef(ctx, nodeWriter, ws, epoch, repo, name, expect, sha)
+}
+
+func (s *Store) MergeRef(ctx context.Context, repo, name string, expect int64, sha string) (meta.Ref, error) {
+	return s.swapRef(ctx, mergeWriter, "", 0, repo, name, expect, sha)
 }
 
 func (s *Store) DeleteRef(ctx context.Context, ws string, epoch uint64, repo, name string, expect int64) error {
-	tag, err := s.Pool.Exec(ctx, `
-		WITH guard AS (`+fmt.Sprintf(guard, 1, 2, 3)+`)
-		DELETE FROM refs USING guard
-		WHERE refs.repo = $3 AND refs.name = $4 AND refs.generation = $5`, ws, int64(epoch), repo, name, expect)
+	return s.deleteRef(ctx, nodeWriter, ws, epoch, repo, name, expect)
+}
+
+func (s *Store) MergeDeleteRef(ctx context.Context, repo, name string, expect int64) error {
+	return s.deleteRef(ctx, mergeWriter, "", 0, repo, name, expect)
+}
+
+// withEvent runs fn in a transaction that first takes the next event number from the row event_seq. The row lock
+// lasts to the commit, so Seq order is commit order and a reader never sees a lower Seq appear after a higher one. The
+// number is taken before any other lock, so a write in flight never holds a workspace lock while it waits for it. The
+// transaction commits only when fn reports a write, so a failed condition leaves no gap.
+func (s *Store) withEvent(ctx context.Context, fn func(tx pgx.Tx, seq int64) (bool, error)) (bool, error) {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	var seq int64
+	if err := tx.QueryRow(ctx, `UPDATE counters SET value = value + 1 WHERE name = 'event_seq' RETURNING value`).Scan(&seq); err != nil {
+		return false, err
+	}
+	wrote, err := fn(tx, seq)
+	if err != nil || !wrote {
+		return false, err
+	}
+	return true, tx.Commit(ctx)
+}
+
+// swapRef takes every generation from one sequence, so a deleted and recreated ref never repeats one. The ref write
+// and its event commit together.
+func (s *Store) swapRef(ctx context.Context, w writer, ws string, epoch uint64, repo, name string, expect int64, sha string) (meta.Ref, error) {
+	var generation int64
+	wrote, err := s.withEvent(ctx, func(tx pgx.Tx, seq int64) (bool, error) {
+		var err error
+		if expect == 0 {
+			err = tx.QueryRow(ctx, `
+				WITH guard AS (`+w.guard+`),
+				moved AS (
+					INSERT INTO refs (repo, name, commit_sha, generation)
+					SELECT $3::text, $4::text, $5::text, nextval('ref_generation') FROM guard
+					ON CONFLICT (repo, name) DO NOTHING RETURNING generation)
+				INSERT INTO events (seq, repo, ref, old_commit, new_commit, generation, kind)
+				SELECT $7::bigint, $3::text, $4::text, '', $5::text, moved.generation, $6::text FROM moved
+				RETURNING generation`, ws, int64(epoch), repo, name, sha, w.kind, seq).Scan(&generation)
+		} else {
+			err = tx.QueryRow(ctx, `
+				WITH guard AS (`+w.guard+`),
+				cur AS (
+					SELECT commit_sha FROM refs WHERE repo = $3 AND name = $4 AND generation = $8 AND EXISTS (SELECT 1 FROM guard) FOR UPDATE),
+				moved AS (
+					UPDATE refs SET commit_sha = $5, generation = nextval('ref_generation'), updated_at = now()
+					FROM cur WHERE refs.repo = $3 AND refs.name = $4 AND refs.generation = $8
+					RETURNING refs.generation, cur.commit_sha AS old_commit)
+				INSERT INTO events (seq, repo, ref, old_commit, new_commit, generation, kind)
+				SELECT $7::bigint, $3::text, $4::text, moved.old_commit, $5::text, moved.generation, $6::text FROM moved
+				RETURNING generation`, ws, int64(epoch), repo, name, sha, w.kind, seq, expect).Scan(&generation)
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return err == nil, err
+	})
+	if err != nil {
+		return meta.Ref{}, fmt.Errorf("postgres: swap ref: %w", err)
+	}
+	if wrote {
+		return meta.Ref{Name: name, Commit: sha, Generation: generation}, nil
+	}
+	return meta.Ref{}, s.refLost(ctx, w, ws, epoch, repo, name)
+}
+
+func (s *Store) deleteRef(ctx context.Context, w writer, ws string, epoch uint64, repo, name string, expect int64) error {
+	wrote, err := s.withEvent(ctx, func(tx pgx.Tx, seq int64) (bool, error) {
+		tag, err := tx.Exec(ctx, `
+			WITH guard AS (`+w.guard+`),
+			cur AS (
+				SELECT commit_sha FROM refs WHERE repo = $3 AND name = $4 AND generation = $5 AND EXISTS (SELECT 1 FROM guard) FOR UPDATE),
+			gone AS (
+				DELETE FROM refs USING cur WHERE refs.repo = $3 AND refs.name = $4 AND refs.generation = $5
+				RETURNING cur.commit_sha AS old_commit)
+			INSERT INTO events (seq, repo, ref, old_commit, new_commit, generation, kind)
+			SELECT $7::bigint, $3::text, $4::text, gone.old_commit, '', $5::bigint, $6::text FROM gone`,
+			ws, int64(epoch), repo, name, expect, w.kind, seq)
+		return tag.RowsAffected() == 1, err
+	})
 	if err != nil {
 		return fmt.Errorf("postgres: delete ref: %w", err)
 	}
-	if tag.RowsAffected() == 1 {
+	if wrote {
 		return nil
 	}
-	return s.refLost(ctx, ws, epoch, repo, name)
+	return s.refLost(ctx, w, ws, epoch, repo, name)
 }
 
 // UpdateRef compares on the commit of the ref instead of its generation.
@@ -362,9 +439,11 @@ func (s *Store) UpdateRef(ctx context.Context, repo, name, old, new string) (met
 	return meta.Ref{}, &meta.RefConflict{Current: &cur}
 }
 
-func (s *Store) refLost(ctx context.Context, ws string, epoch uint64, repo, name string) error {
-	if err := s.lost(ctx, ws, epoch, repo); err != nil {
-		return err
+func (s *Store) refLost(ctx context.Context, w writer, ws string, epoch uint64, repo, name string) error {
+	if w.kind == meta.WriterNode {
+		if err := s.lost(ctx, ws, epoch, repo); err != nil {
+			return err
+		}
 	}
 	cur, err := s.Ref(ctx, repo, name)
 	if errors.Is(err, meta.ErrNotFound) {

@@ -25,6 +25,18 @@ var (
 	ErrWorkspaceConflict = errors.New("meta: workspace owner or repo differs")
 	// ErrWrongRepo is a grant whose repo is not the repo of the workspace.
 	ErrWrongRepo = errors.New("meta: workspace is on another repo")
+	// ErrEventsPruned is a read of events from a sequence that retention removed.
+	ErrEventsPruned = errors.New("meta: events pruned")
+	// ErrLeaseHeld is a lease or cursor write by an owner that does not hold the lease.
+	ErrLeaseHeld = errors.New("meta: lease held by another owner")
+)
+
+// The kinds of writer that an Event records. Each is the scope of the grant
+// that wrote the ref.
+const (
+	WriterNode     = "node"
+	WriterMerge    = "merge"
+	WriterOperator = "operator"
 )
 
 // RefConflict is a lost ref compare-and-swap. Current is nil when the ref is absent.
@@ -62,6 +74,29 @@ type OpHeads struct {
 	Epoch      uint64
 	Generation int64
 	Heads      []string
+}
+
+// Event is one change of a ref. Seq is unique and ordered in commit order across
+// the store. Old is empty for a create, and New is empty for a delete. For a
+// delete Generation is the generation that the ref had. Kind is a Writer constant.
+type Event struct {
+	Seq        int64
+	Repo, Ref  string
+	Old, New   string
+	Generation int64
+	Kind       string
+	At         time.Time
+}
+
+// Subscription is a registered receiver of events. Cursor is the Seq of the
+// last event that the receiver acknowledged. LeaseOwner holds the right to
+// deliver until LeaseUntil. Repo is empty for every repo.
+type Subscription struct {
+	ID, URL, Secret, Repo string
+	Cursor                int64
+	CreatedAt             time.Time
+	LeaseOwner            string
+	LeaseUntil            time.Time
 }
 
 // Pack is a pack that a repository holds.
@@ -131,6 +166,39 @@ type Store interface {
 	// creates the ref and an empty new deletes it. A ref whose commit is not
 	// old is *RefConflict. Every write takes a new generation.
 	UpdateRef(ctx context.Context, repo, name, old, new string) (Ref, error)
+
+	// MergeRef is SwapRef without a workspace fence: it needs only the
+	// stored generation to be expect. The event kind is WriterMerge.
+	MergeRef(ctx context.Context, repo, name string, expect int64, sha string) (Ref, error)
+	// MergeDeleteRef is DeleteRef without a workspace fence.
+	MergeDeleteRef(ctx context.Context, repo, name string, expect int64) error
+
+	// ProtectedRefs returns the protected ref patterns of repo, empty when none.
+	ProtectedRefs(ctx context.Context, repo string) ([]string, error)
+	// SetProtectedRefs replaces the protected ref patterns of repo.
+	SetProtectedRefs(ctx context.Context, repo string, patterns []string) error
+
+	// Events lists at most limit events with Seq above after, oldest first.
+	// ErrEventsPruned when after is below the last pruned Seq.
+	Events(ctx context.Context, after int64, limit int) ([]Event, error)
+	// PruneEvents removes the events written before the time and records the
+	// highest removed Seq.
+	PruneEvents(ctx context.Context, before time.Time) error
+
+	// CreateSubscription stores s with its cursor at the newest event.
+	// ErrExists when the id exists. The returned value has Cursor and CreatedAt.
+	CreateSubscription(ctx context.Context, s Subscription) (Subscription, error)
+	// Subscriptions lists every subscription, oldest first, ties by id.
+	Subscriptions(ctx context.Context) ([]Subscription, error)
+	// DeleteSubscription removes a subscription. ErrNotFound when it is absent.
+	DeleteSubscription(ctx context.Context, id string) error
+	// AcquireLease gives owner the lease of subscription id until the
+	// time until, when no owner holds it at now or owner holds it. It returns
+	// the subscription. ErrNotFound, ErrLeaseHeld.
+	AcquireLease(ctx context.Context, id, owner string, now, until time.Time) (Subscription, error)
+	// AdvanceCursor raises the cursor of subscription id to cursor while
+	// owner holds the lease. A lower cursor changes nothing. ErrNotFound, ErrLeaseHeld.
+	AdvanceCursor(ctx context.Context, id, owner string, cursor int64) error
 
 	// AddPack records a pack once. A repeat is a no-op.
 	AddPack(ctx context.Context, repo, packID string, bytes int64) error

@@ -21,7 +21,7 @@ Non-goals:
 | `bucket` | Object store seam with Cloud Storage (`bucket/gcs`) and filesystem (`bucket/fs`) buckets, and its conformance suite `bucket/buckettest`. Public package. | M1 |
 | `internal/gitpack` | Reader and writer of git pack files and v2 indexes, and the reader of a pushed pack. | M1 |
 | `internal/pktline`, `internal/gitproto` | The pkt-line framing, and the git smart HTTP protocol over an object reader: advertisement, v2 fetch and ls-refs, receive-pack. | M6 |
-| `meta` | Metadata seam: repositories, workspaces and the epoch fence, op heads, refs, pack listing. Backends `meta/postgres` and `meta/sqlite`, and the suite `meta/metatest`. Public package. | M2 |
+| `meta` | Metadata seam: repositories, workspaces and the epoch fence, op heads, refs, protected ref patterns, ref events, event subscriptions, pack listing. Backends `meta/postgres` and `meta/sqlite`, and the suite `meta/metatest`. Public package. | M2 |
 | Store service | HTTP service over a `meta` store and a `bucket` store, and the epoch fence. | M2 |
 | `client` | Typed Go client for callers. Public package. | M3 |
 | `testserver` | Starts a real server in a caller's test, on PostgreSQL (`Start`) or on SQLite and a temporary directory (`StartLocal`). Public package. | M3 |
@@ -143,6 +143,10 @@ packs(repo, pack_id, bytes, created_at, pk(repo, pack_id))
 refs(repo, name, commit_sha, generation, updated_at, pk(repo, name)); sequence ref_generation
 workspaces(id pk, repo, owner, epoch bigint, op, snapshot, report_generation, created_at, deleted_at)
 op_heads(workspace_id pk -> workspaces, epoch, generation, heads text[], updated_at)
+counters(name pk, value)   rows event_seq, events_floor
+events(seq pk, repo, ref, old_commit, new_commit, generation, kind, at)
+protected_refs(repo pk, patterns text[])
+subscriptions(id pk, url, secret, repo, cursor, created_at, lease_owner, lease_until)
 ```
 
 A repository text has the form `<prefix>:<path>`. The prefix `native` is reserved for the repositories that `POST /v1/repos` creates. The prefix matches `^[a-z0-9][a-z0-9-]{0,62}$`. The path has 1 to 512 bytes of UTF-8. Object keys are `repos/<prefix>/<base64url path>/...` and `ops/<workspace>/...`. A repository that the caller owns elsewhere has no `repos` row. The store keeps only the packs and refs of such a repository.
@@ -181,7 +185,7 @@ A caller of the service chooses where the service keeps its state. Two seams hol
 
 | Interface | Holds | Backends |
 |---|---|---|
-| `meta.Store` | Repositories, workspaces and their epoch fence, op heads, refs, the pack listing. | `meta/postgres`, `meta/sqlite` |
+| `meta.Store` | Repositories, workspaces and their epoch fence, op heads, refs, protected ref patterns, ref events, event subscriptions, the pack listing. | `meta/postgres`, `meta/sqlite` |
 | `bucket.Store` | Pack files, pack indexes and op objects. | `bucket/gcs`, `bucket/fs` |
 
 The suites `meta/metatest` and `bucket/buckettest` export `Run(t, newBackend)`. A backend passes its suite before a server uses it. The suite is the executable form of this section, and a difference between them is a defect.
@@ -196,11 +200,13 @@ Every method that writes is one atomic unit. The unit is one conditional stateme
 - Order: names, repositories, pack ids and workspace ids are opaque text. A list sorts them by byte value of their UTF-8 text.
 - Time: `Repo.CreatedAt` and the creation time of a pack come from the clock of the backend, with a resolution of 1 millisecond or finer.
 - Racers: of N concurrent calls that need the same free condition, exactly one wins and the others get the error of a lost condition.
+- Events: every write that creates, moves or deletes a ref appends one event in the same unit as the ref write, and a write that changes nothing appends none. The event holds the repo, the ref, the old and new commit (empty when absent), the generation (that of the deleted ref for a delete), the writer kind and the time. The kind is `node` for `SwapRef` and `DeleteRef`, `merge` for `MergeRef` and `MergeDeleteRef`, and `operator` for the `main` that `CreateRepo` writes. `Seq` is positive and unique, and it follows commit order: a reader that sees `Seq` N sees every event below N that will ever exist, so a consumer that keeps the last `Seq` it read loses no event. Retention removes events and keeps the highest removed `Seq` as a floor. A read from a `Seq` below the floor is `ErrEventsPruned`.
+- Lease: a subscription row holds its lease. A lease write is one conditional statement on that row, and `now` is an argument, so the clock of the caller decides expiry. The lease passes to a new owner only when `lease_until` is at or before `now`. Owners must have clocks that differ by much less than the lease time.
 - Visibility: a method that returns nil has committed durably. A read that starts after it sees the write, in every client of the store.
 
 | Method | Condition | Effect | Error on a failed condition |
 |---|---|---|---|
-| `CreateRepo(r, repoText, commit)` | No `repos` row has path `r.Path`, and no ref `main` exists in `repoText`. | Inserts the repo row and the ref `main` at `commit` with a new generation. | `ErrExists`. Neither row exists. |
+| `CreateRepo(r, repoText, commit)` | No `repos` row has path `r.Path`, and no ref `main` exists in `repoText`. | Inserts the repo row, the ref `main` at `commit` with a new generation, and one event of kind `operator`. | `ErrExists`. Neither row exists. |
 | `Repo(path)` | None. | Returns the row. | `ErrNotFound`. |
 | `Repos()` | None. | Lists newest first: `created_at` descending, then `path` descending. | None. |
 | `Claim(id, epoch, owner, repo)` | The workspace is absent, or it is not deleted and has the same owner and repo. | Inserts the row, or sets `epoch` to the higher of the stored one and `epoch`. Returns the stored epoch, op and snapshot. | `ErrGone` for a deleted workspace. Else `ErrWorkspaceConflict`. A lower `epoch` is not an error: the caller compares the returned epoch. |
@@ -213,10 +219,22 @@ Every method that writes is one atomic unit. The unit is one conditional stateme
 | `SwapOpHeads(ws, epoch, repo, expect, heads)` | The fence holds, the stored generation is `expect` and the stored epoch is at most `epoch`. | Sets `epoch` and `heads`. Adds 1 to the generation. | `ErrClaimLost` when the fence fails or the stored epoch is above `epoch`, else `*OpHeadsConflict` with `Current` nil when no row exists. |
 | `Ref(repo, name)` | None. | Returns the ref. | `ErrNotFound`. |
 | `Refs(repo)` | None. | Lists the refs of the repo by name. | None. |
-| `SwapRef(ws, epoch, repo, name, 0, sha)` | The fence holds and the ref is absent. | Inserts the ref with a new generation. | `ErrClaimLost`, else `*RefConflict` with the stored ref as `Current`. |
-| `SwapRef(ws, epoch, repo, name, expect, sha)` | The fence holds and the stored generation is `expect`. | Sets the commit and a new generation. | `ErrClaimLost`, else `*RefConflict` with `Current` nil when the ref is absent. |
-| `DeleteRef(ws, epoch, repo, name, expect)` | The fence holds and the stored generation is `expect`. | Deletes the ref. | As `SwapRef`. |
+| `SwapRef(ws, epoch, repo, name, 0, sha)` | The fence holds and the ref is absent. | Inserts the ref with a new generation and one event of kind `node`. | `ErrClaimLost`, else `*RefConflict` with the stored ref as `Current`. |
+| `SwapRef(ws, epoch, repo, name, expect, sha)` | The fence holds and the stored generation is `expect`. | Sets the commit and a new generation, and appends one event. | `ErrClaimLost`, else `*RefConflict` with `Current` nil when the ref is absent. |
+| `DeleteRef(ws, epoch, repo, name, expect)` | The fence holds and the stored generation is `expect`. | Deletes the ref and appends one event. | As `SwapRef`. |
 | `UpdateRef(repo, name, old, new)` | No fence. The stored commit is `old`, or the ref is absent when `old` is empty. | Creates the ref when `old` is empty, deletes it when `new` is empty, else sets the commit. Every write takes a new generation. | `*RefConflict` with the stored ref as `Current`, nil when the ref is absent. |
+| `MergeRef(repo, name, 0, sha)` | The ref is absent. | Inserts the ref with a new generation and one event of kind `merge`. | `*RefConflict` with the stored ref as `Current`. |
+| `MergeRef(repo, name, expect, sha)` | The stored generation is `expect`. | Sets the commit and a new generation, and appends one event. | `*RefConflict` with `Current` nil when the ref is absent. |
+| `MergeDeleteRef(repo, name, expect)` | The stored generation is `expect`. | Deletes the ref and appends one event. | As `MergeRef`. |
+| `ProtectedRefs(repo)` | None. | Returns the patterns, in the order that `SetProtectedRefs` stored them. | None. A repo with none returns an empty list. |
+| `SetProtectedRefs(repo, patterns)` | None. | Replaces the whole list. | None. |
+| `Events(after, limit)` | `after` is not below the floor. | Lists up to `limit` events with `Seq` above `after`, by `Seq`. | `ErrEventsPruned`. |
+| `PruneEvents(before)` | None. | Deletes the events with a time before `before` and raises the floor to the highest deleted `Seq`. | None. |
+| `CreateSubscription(s)` | No subscription has the id. | Inserts the row with its cursor at the newest `Seq` that ever existed, and returns it with its creation time. | `ErrExists`. |
+| `Subscriptions()` | None. | Lists by creation time, then id. | None. |
+| `DeleteSubscription(id)` | The subscription exists. | Deletes it and its lease. | `ErrNotFound`. |
+| `AcquireLease(id, owner, now, until)` | The lease owner is `owner`, or its `lease_until` is at or before `now`. | Sets the owner and `lease_until` to `until`, and returns the row. | `ErrNotFound`, else `ErrLeaseHeld`. |
+| `AdvanceCursor(id, owner, cursor)` | The lease owner is `owner`. | Sets the cursor to the higher of the stored one and `cursor`. | `ErrNotFound`, else `ErrLeaseHeld`. |
 | `AddPack(repo, id, bytes)` | No pack row has the repo and id. | Inserts the row with the creation time. | None. A repeat changes nothing and keeps the first `bytes`. |
 | `Packs(repo)` | None. | Lists the packs of the repo, oldest first, then by id. | None. |
 
@@ -230,8 +248,8 @@ A `repo` argument of a fenced write is the repo of the grant. It must equal the 
 
 ### Provided backends
 
-- `meta/postgres` is the production backend. It keeps the schema in the section Data model, applies `meta/postgres/migrations` at start under an advisory lock, and meets each write with one statement. The fence of a ref or op-heads write is a `FOR SHARE` read of the workspace row inside the statement. A report is one `UPDATE` that locks the row itself. The generation comes from the sequence `ref_generation`. `CreateRepo` is one statement that inserts the repo row and, from its `RETURNING`, the ref.
-- `meta/sqlite` is for tests and for a service that runs with no other process. It keeps the same fields in the tables of `meta/sqlite/migrations`. It uses a pure Go driver, so the service builds with CGO disabled. It opens one connection, so its writes are ordered, and one process uses one database file. Each write is one transaction of statements in which no read feeds a write. The fence is an `EXISTS` condition of the statement. The generation comes from the row `ref_generation` of the table `counters`, which the same transaction increments. Times are integer microseconds, and the heads are JSON text.
+- `meta/postgres` is the production backend. It keeps the schema in the section Data model, applies `meta/postgres/migrations` at start under an advisory lock, and meets each write with one statement, except a ref write and `CreateRepo`. The fence of a ref or op-heads write is a `FOR SHARE` read of the workspace row inside the statement. A report is one `UPDATE` that locks the row itself. The generation comes from the sequence `ref_generation`. A ref write and `CreateRepo` are one transaction. It first takes the next event number with `UPDATE counters SET value = value + 1 WHERE name = 'event_seq' RETURNING value`. The row lock lasts to the commit, so `Seq` order is commit order, and the number comes before any workspace lock, so a claim is not starved by writes that wait for the counter. One statement then writes the ref and the event, and the transaction rolls back when no row changed, so a failed write leaves no gap. All ref writes of one store are therefore serial at the counter row.
+- `meta/sqlite` is for tests and for a service that runs with no other process. It keeps the same fields in the tables of `meta/sqlite/migrations`. It uses a pure Go driver, so the service builds with CGO disabled. It opens one connection, so its writes are ordered, and one process uses one database file. Each write is one transaction of statements in which no read feeds a write. The fence is an `EXISTS` condition of the statement. The generation comes from the row `ref_generation` of the table `counters`, which the same transaction increments. A ref write inserts its event first, with the condition of the ref write, and `events.seq` is `AUTOINCREMENT`, so a rolled-back event takes no number. Times are integer microseconds, and the heads are JSON text.
 - `bucket/gcs` and `bucket/fs` are the object backends. `gcs` writes with the precondition that the object does not exist. `fs` links a synced temporary file to its name.
 
 ### A new backend

@@ -55,6 +55,9 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 	} {
 		t.Run(c.name, func(t *testing.T) { c.fn(t, newStore(t)) })
 	}
+	for _, c := range policyCases {
+		t.Run(c.name, func(t *testing.T) { c.fn(t, newStore(t)) })
+	}
 }
 
 func is(t *testing.T, err, want error) {
