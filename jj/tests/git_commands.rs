@@ -126,13 +126,12 @@ impl Setup {
         self.f.jj_try(&self.ws.mount, args, &env)
     }
 
-    /// Makes the bookmark `name` on a new commit that adds the file `body`. A file that no base
-    /// holds at its path keeps `git push` from reading a blob that the transport lacks.
+    /// Makes the bookmark `name` on a new commit that changes the existing file `a`.
     fn bookmark(&self, name: &str, body: &str) -> String {
-        std::fs::write(self.ws.mount.join(body), body).unwrap();
+        std::fs::write(self.ws.mount.join("a"), body).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(120));
         self.f.daemon.state.lock().unwrap().entries =
-            vec![serde_json::json!({"path": body, "kind": "file"})];
+            vec![serde_json::json!({"path": "a", "kind": "file"})];
         let (m, f) = (&self.ws.mount, &self.f);
         f.jj(m, &["describe", "-m", name]);
         f.jj(m, &["bookmark", "set", name, "-r", "@"]);
