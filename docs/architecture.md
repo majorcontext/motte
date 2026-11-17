@@ -44,7 +44,7 @@ The store plane serves the node daemon and the jj backend. The control plane ser
 | `MOTTE_SQLITE_PATH` | SQLite database file. Required for `sqlite`. |
 | `MOTTE_BUCKET_KIND` | `gcs` or `fs`. |
 | `MOTTE_BUCKET` | Bucket name for `gcs`, directory for `fs`. |
-| `MOTTE_TRUSTED_KEYS` | JSON list of `{"kid","key","scopes"}`. `key` is the standard base64 of an Ed25519 public key. `scopes` holds only `node`, `read`, `write`, `import` and `operator`. The service refuses to start on any other scope text. |
+| `MOTTE_TRUSTED_KEYS` | JSON list of `{"kid","key","scopes"}`. `key` is the standard base64 of an Ed25519 public key. `scopes` holds only `node`, `read`, `write`, `import`, `operator` and `merge`. The service refuses to start on any other scope text. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Optional. Enables OTLP trace export. |
 
 The service refuses to start on a `MOTTE_META` or `MOTTE_BUCKET_KIND` value that it does not know. The service applies the embedded migrations of its metadata backend at start. The PostgreSQL backend applies them under an advisory lock, so replicas can start together. `GET /health` answers 200. `GET /ready` answers 200 while the metadata backend answers a ping. `GET /metrics` serves Prometheus metrics. These three routes need no grant. A request for a path or method that no route serves answers 404 `vcs_not_found` or 405 `method_not_allowed` in the error envelope.
@@ -311,7 +311,7 @@ A grant is `mg1.<base64url payload>.<base64url signature>`. The payload is JSON.
 | Claim | Meaning |
 |---|---|
 | `kid` | Key identifier. The verifier selects the public key by `kid`. |
-| `scope` | One of `node`, `read`, `write`, `import`, `operator`. |
+| `scope` | One of `node`, `read`, `write`, `import`, `operator`, `merge`. |
 | `ws` | Workspace identifier. |
 | `epoch` | Claim epoch of the workspace when the grant was minted. |
 | `repo` | Repository text. |
@@ -319,7 +319,7 @@ A grant is `mg1.<base64url payload>.<base64url signature>`. The payload is JSON.
 | `subject` | The creator, for traces only. It grants nothing. |
 | `exp` | Expiry as Unix seconds. A grant is valid while `now < exp`. |
 
-Required claims by scope: `node` needs `ws`, `epoch` and `repo`. `read`, `write` and `import` need `repo`. `operator` needs none.
+Required claims by scope: `node` needs `ws`, `epoch` and `repo`. `read`, `write`, `import` and `merge` need `repo`. `operator` needs none.
 
 The verifier holds only public keys. Each key has a `kid` and a set of allowed scopes. The verifier rejects a grant whose scope is not allowed for its key. Every rejection answers 401 with the same error, and the response never carries the grant.
 
@@ -328,13 +328,13 @@ The verifier holds only public keys. Each key has a `kid` and a set of allowed s
 The caller owns the private keys. Two signers exist:
 
 - The control-plane key may sign all scopes. A `write` grant lets the bearer move any ref of its repository without a workspace: only the control plane or a trusted pipeline holds one.
-- The node key lives on the node daemon and may sign only `node`. A compromised node cannot mint `import` or `operator` grants. The plugin mints a `node` grant only for a pod of an allowed namespace (see Node plugin). It can mint `node` grants, bounded by the repository and epoch of the workspace row.
+- The node key lives on the node daemon and may sign only `node`. A compromised node cannot mint `import`, `operator` or `merge` grants. The plugin mints a `node` grant only for a pod of an allowed namespace (see Node plugin). It can mint `node` grants, bounded by the repository and epoch of the workspace row.
 
 ### Rotation
 
 1. Add the new public key to the store.
 2. Switch the signer to the new key.
-3. Remove the old key after the longest grant life: 1 hour for `node`, 60 seconds for `operator`, `read`, `write` and `import`.
+3. Remove the old key after the longest grant life: 1 hour for `node`, 60 seconds for `operator`, `read`, `write`, `import` and `merge`.
 
 Both keys are valid between step 1 and step 3.
 
