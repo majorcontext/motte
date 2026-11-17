@@ -30,3 +30,16 @@ func TestBuildRoundTrip(t *testing.T) {
 		t.Error("corrupt pack verified")
 	}
 }
+
+func TestVerifyRestoresReadState(t *testing.T) {
+	pack, idx, names := Build([]Object{{Blob, []byte("x")}})
+	p, _ := NewPack(idx, bytes.NewReader(pack))
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := p.Verify(ctx, idx, pack); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	if _, _, err := p.Get(names[0]); err != nil {
+		t.Errorf("read after canceled verify: %v", err)
+	}
+}

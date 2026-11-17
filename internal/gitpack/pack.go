@@ -217,6 +217,7 @@ func (p *Pack) Verify(ctx context.Context, idx, pack []byte) error {
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].off < items[j].off })
 	p.c.max, p.c.work, p.cacheAll, p.ctx = verifyCacheBytes, 0, true, ctx
+	defer func() { p.c.max, p.c.work, p.cacheAll, p.ctx = maxCacheBytes, 0, false, nil }()
 	for _, it := range items {
 		if ctx.Err() != nil {
 			return ctx.Err()

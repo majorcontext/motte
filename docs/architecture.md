@@ -87,7 +87,7 @@ The caller raises the epoch before it commits its own increment. The caller call
 
 ### Workspace state
 
-`op`, `snapshot` and `report_generation` live on `workspaces`. A node report and a flush write one row with one ordering rule: the higher `report_generation` wins. A report with no generation writes only while the stored `op` equals `prev`.
+`op`, `snapshot` and `report_generation` live on `workspaces`. A node report and a flush write one row with one ordering rule: the higher `report_generation` wins. A flush with generation 0 writes only while the stored `op` equals `prev`.
 
 ### Delete
 

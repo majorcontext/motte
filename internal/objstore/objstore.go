@@ -97,6 +97,9 @@ func (m *Memory) GetRange(ctx context.Context, key string, off, n int64) ([]byte
 	if off >= int64(len(d)) {
 		return nil, nil
 	}
+	if n < 0 {
+		return d[off:], nil
+	}
 	return d[off:min(off+n, int64(len(d)))], nil
 }
 
