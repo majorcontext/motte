@@ -15,6 +15,8 @@ const (
 	CodeRepoForbidden      Code = "vcs_repo_forbidden"
 	CodeWorkspaceConflict  Code = "vcs_workspace_conflict"
 	CodeWorkspaceDeleted   Code = "vcs_workspace_deleted"
+	CodeRefProtected       Code = "vcs_ref_protected"
+	CodeEventsPruned       Code = "vcs_events_pruned"
 	CodeUnauthorized       Code = "unauthorized"
 	CodeInvalidBody        Code = "invalid_body"
 	CodeInternal           Code = "internal_error"
@@ -30,6 +32,8 @@ var statuses = map[Code]int{
 	CodeRepoForbidden:      http.StatusForbidden,
 	CodeWorkspaceConflict:  http.StatusConflict,
 	CodeWorkspaceDeleted:   http.StatusGone,
+	CodeRefProtected:       http.StatusForbidden,
+	CodeEventsPruned:       http.StatusGone,
 	CodeUnauthorized:       http.StatusUnauthorized,
 	CodeInvalidBody:        http.StatusBadRequest,
 	CodeInternal:           http.StatusInternalServerError,
@@ -208,3 +212,64 @@ type FlushRequest struct {
 	Op         string `json:"op"`
 	Snapshot   string `json:"snapshot"`
 }
+
+// ProtectedRefs is the body of PUT and GET /v1/repos/{repo}/protected-refs. A
+// pattern is a ref name, or a prefix that ends in "*".
+type ProtectedRefs struct {
+	Patterns []string `json:"patterns"`
+}
+
+// Event is one change of a ref. Its identity is Partition and Seq. Events of
+// one ref share a partition, and Seq has no gap and follows commit order in a
+// partition. No order holds across partitions. Old is empty for a create and
+// New is empty for a delete. Generation is that of the ref after the change, or
+// of the deleted ref. Kind is the scope of the grant that wrote the ref: node,
+// write, merge or operator. Time is RFC 3339.
+type Event struct {
+	Partition  int    `json:"partition"`
+	Seq        int64  `json:"seq"`
+	Repo       string `json:"repo"`
+	Ref        string `json:"ref"`
+	Old        string `json:"old"`
+	New        string `json:"new"`
+	Generation int64  `json:"generation"`
+	Kind       string `json:"kind"`
+	Time       string `json:"time"`
+}
+
+// Events is the answer of GET /v1/events. Cursor is opaque. A consumer passes it
+// as the cursor of the next call, and gets the events after the last one here.
+type Events struct {
+	Events []Event `json:"events"`
+	Cursor string  `json:"cursor"`
+}
+
+// CreateSubscriptionRequest is the body of POST /v1/subscriptions. Repo is empty
+// for the events of every repo.
+type CreateSubscriptionRequest struct {
+	URL    string `json:"url"`
+	Secret string `json:"secret"`
+	Repo   string `json:"repo,omitempty"`
+}
+
+// Subscription is a registered receiver. Cursor is an event cursor that holds
+// the last event that it acknowledged in each partition. The secret is never returned.
+type Subscription struct {
+	ID        string `json:"id"`
+	URL       string `json:"url"`
+	Repo      string `json:"repo,omitempty"`
+	Cursor    string `json:"cursor"`
+	CreatedAt string `json:"created_at"`
+}
+
+type Subscriptions struct {
+	Subscriptions []Subscription `json:"subscriptions"`
+}
+
+// Headers of an event delivery. Signature is "sha256=" and the lowercase hex
+// HMAC-SHA256 of the request body under the secret of the subscription.
+const (
+	HeaderSignature = "X-Motte-Signature"
+	HeaderPartition = "X-Motte-Partition"
+	HeaderSequence  = "X-Motte-Sequence"
+)

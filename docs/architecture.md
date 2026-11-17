@@ -9,6 +9,7 @@ Goal: motte stores the repositories of coding agents and the state of their virt
 Non-goals:
 
 - No git dumb HTTP, web UI, review or pull-request model, access lists, or users.
+- No policy about review or merging. The store keeps protected ref patterns and ref events, and the caller decides what they mean.
 - No multi-region store. One store serves all callers.
 - No compaction or deletion of packs, and no purge of deleted workspaces.
 
@@ -21,7 +22,7 @@ Non-goals:
 | `bucket` | Object store seam with Cloud Storage (`bucket/gcs`) and filesystem (`bucket/fs`) buckets, and its conformance suite `bucket/buckettest`. Public package. | M1 |
 | `internal/gitpack` | Reader and writer of git pack files and v2 indexes, and the reader of a pushed pack. | M1 |
 | `internal/pktline`, `internal/gitproto` | The pkt-line framing, and the git smart HTTP protocol over an object reader: advertisement, v2 fetch and ls-refs, receive-pack. | M6 |
-| `meta` | Metadata seam: repositories, workspaces and the epoch fence, op heads, refs, pack listing. Backends `meta/postgres` and `meta/sqlite`, and the suite `meta/metatest`. Public package. | M2 |
+| `meta` | Metadata seam: repositories, workspaces and the epoch fence, op heads, refs, protected ref patterns, ref events, event subscriptions, pack listing. Backends `meta/postgres` and `meta/sqlite`, and the suite `meta/metatest`. Public package. | M2 |
 | Store service | HTTP service over a `meta` store and a `bucket` store, and the epoch fence. | M2 |
 | `client` | Typed Go client for callers. Public package. | M3 |
 | `testserver` | Starts a real server in a caller's test, on PostgreSQL (`Start`) or on SQLite and a temporary directory (`StartLocal`). Public package. | M3 |
@@ -44,7 +45,8 @@ The store plane serves the node daemon and the jj backend. The control plane ser
 | `MOTTE_SQLITE_PATH` | SQLite database file. Required for `sqlite`. |
 | `MOTTE_BUCKET_KIND` | `gcs` or `fs`. |
 | `MOTTE_BUCKET` | Bucket name for `gcs`, directory for `fs`. |
-| `MOTTE_TRUSTED_KEYS` | JSON list of `{"kid","key","scopes"}`. `key` is the standard base64 of an Ed25519 public key. `scopes` holds only `node`, `read`, `write`, `import` and `operator`. The service refuses to start on any other scope text. |
+| `MOTTE_TRUSTED_KEYS` | JSON list of `{"kid","key","scopes"}`. `key` is the standard base64 of an Ed25519 public key. `scopes` holds only `node`, `read`, `write`, `import`, `operator` and `merge`. The service refuses to start on any other scope text. |
+| `MOTTE_EVENT_RETENTION` | Optional. How long a ref event is kept, as a Go duration. Default `336h`. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Optional. Enables OTLP trace export. |
 
 The service refuses to start on a `MOTTE_META` or `MOTTE_BUCKET_KIND` value that it does not know. The service applies the embedded migrations of its metadata backend at start. The PostgreSQL backend applies them under an advisory lock, so replicas can start together. `GET /health` answers 200. `GET /ready` answers 200 while the metadata backend answers a ping. `GET /metrics` serves Prometheus metrics. These three routes need no grant. A request for a path or method that no route serves answers 404 `vcs_not_found` or 405 `method_not_allowed` in the error envelope.
@@ -89,17 +91,17 @@ A Go test starts the same composition with `testserver.StartLocal`, which needs 
 | `GET /v1/vcs/trees/{sha}` | `node`, `read` |
 | `GET /v1/vcs/objects/{sha}` | `node`, `read` |
 | `POST /v1/vcs/blobs/batch` | `node`, `read` |
-| `GET /v1/vcs/refs`, `GET /v1/vcs/refs/{name...}` | `node`, `read` |
+| `GET /v1/vcs/refs`, `GET /v1/vcs/refs/{name...}` | `node`, `read`, `merge` |
 | `POST /v1/vcs/objects/has` | `node`, `read`, `import` |
 | `POST /v1/vcs/objects` | `node` |
 | `PUT /v1/vcs/ops/{kind}/{id}` | `node` |
 | `GET /v1/vcs/ops/{kind}/{id}` | `node` |
 | `GET /v1/vcs/op-heads`, `PUT /v1/vcs/op-heads` | `node` |
 | `PUT /v1/vcs/workspace` | `node` |
-| `PUT /v1/vcs/refs/{name...}`, `DELETE /v1/vcs/refs/{name...}` | `node` |
+| `PUT /v1/vcs/refs/{name...}`, `DELETE /v1/vcs/refs/{name...}` | `node`, `merge` |
 | `PUT /v1/vcs/packs/{pack_id}` | `import` |
 
-A ref route serves any repository, whether or not it has a `repos` row.
+A ref route serves any repository, whether or not it has a `repos` row. See Protected refs for the ref write rules of the `node` and `merge` scopes.
 
 ### Git smart HTTP
 
@@ -107,10 +109,10 @@ Ordinary `git` clones, fetches and pushes a repository over HTTPS. The routes ne
 
 | Route | Scope |
 |---|---|
-| `GET /git/<prefix>/<path>.git/info/refs?service=git-upload-pack` | `read`, `write` |
-| `POST /git/<prefix>/<path>.git/git-upload-pack` | `read`, `write` |
-| `GET /git/<prefix>/<path>.git/info/refs?service=git-receive-pack` | `write` |
-| `POST /git/<prefix>/<path>.git/git-receive-pack` | `write` |
+| `GET /git/<prefix>/<path>.git/info/refs?service=git-upload-pack` | `read`, `write`, `merge` |
+| `POST /git/<prefix>/<path>.git/git-upload-pack` | `read`, `write`, `merge` |
+| `GET /git/<prefix>/<path>.git/info/refs?service=git-receive-pack` | `write`, `merge` |
+| `POST /git/<prefix>/<path>.git/git-receive-pack` | `write`, `merge` |
 
 - Repository: the URL names the repository as `<prefix>/<path>` where the grant names `<prefix>:<path>`, for example `/git/native/repo_X.git` for `native:repo_X`. The path may hold `/`. The part up to the last `.git/` is the repository. The repository of the URL must equal the `repo` claim of the grant, or the answer is 403 `vcs_repo_forbidden`. A repository that does not exist answers 404 `vcs_not_found`, so a push never creates one: the control plane creates repositories. A repository exists when it has a `repos` row (prefix `native`), or has at least one ref (any other prefix).
 - Grant: the client sends HTTP Basic with any user name and a grant as the password, or `Authorization: Bearer <grant>`. A missing or refused grant answers 401 with `WWW-Authenticate: Basic realm="motte"`, so git asks for credentials or runs its credential helper. A grant of another scope for the route (a `read` grant for receive-pack) answers 403.
@@ -118,9 +120,9 @@ Ordinary `git` clones, fetches and pushes a repository over HTTPS. The routes ne
 - Ref names: a stored ref named `main` is the git ref `refs/heads/main`. A stored name that starts with `refs/` other than `refs/heads/` has the same git name. HEAD names `refs/heads/main` when it exists. A push may write `refs/heads/<name>` and any other `refs/...` name that is valid, and `<name>` must not start with `refs/`. A stored ref named under `refs/heads/` has no git name and is not listed.
 - Fetch: a `want` may name any object of the repository. The service lists the commits that the wants reach and the `have` commits that it holds do not reach, walking by commit time. It adds the trees and blobs that those commits reach and that the trees of the edge commits (the held parents) do not hold. With `filter=blob:none` it adds no blob that a tree names, and it sends a blob that a `want` names. It never sends a delta: the pack holds whole objects, so `thin-pack`, `ofs-delta`, `include-tag` and `no-progress` have no effect. A client fetches an annotated tag that it needs with a second `want`. It answers `ready` as soon as one `have` is common, and the pack then leaves out what that commit holds. It streams the pack through side-band 1 with one object in memory at a time, and reads each pack through the cache of ranged reads.
 - Push: the service reads the whole request body, inflates a `Content-Encoding: gzip` body first, reads the ref commands, and unpacks the pack. A thin pack is complete: the service resolves each ref delta base from the repository. It stores the objects as one whole pack of the repository, with the SHA-256 of the stored pack as its id, and adds it to the pack listing. Every object is hashed, so the pack is checked as `PUT /v1/vcs/packs/{pack_id}` checks it. The service does not check that the objects of a new commit are connected. It checks only that the new value of a ref exists, is a commit (or a tag, outside `refs/heads/`).
-- Ref update: each ref command goes, in order, through the one function `updateRef` of `internal/server/git.go`, which calls `meta.Store.UpdateRef`. The update is a compare and swap on the commit: `old` is the commit that the client saw, a zero `old` creates the ref and a zero `new` deletes it. A ref that is not at `old` fails that command with `ng <ref> stale info` and the other commands go on. There is no atomic push. The service does not tell a force push from a plain one, because git sends no flag for it: the client refuses a non-fast-forward unless it is forced, and the service accepts any update that passes the compare and swap, as git does with `receive.denyNonFastForwards` unset. The reply is `report-status`: `unpack ok` or the refusal of the pack, then `ok <ref>` or `ng <ref> <reason>` for each command.
+- Ref update: each ref command goes, in order, through the one function `updateRef` of `internal/server/git.go`, which calls `writeRefAs` (see Protected refs) and so `meta.Store.UpdateRef`. The update is a compare and swap on the commit: `old` is the commit that the client saw, a zero `old` creates the ref and a zero `new` deletes it. A ref that is not at `old` fails that command with `ng <ref> stale info`. A protected ref, written with a `write` grant, fails it with `ng <ref> protected`. The other commands go on. There is no atomic push. The service does not tell a force push from a plain one, because git sends no flag for it: the client refuses a non-fast-forward unless it is forced, and the service accepts any update that passes the compare and swap, as git does with `receive.denyNonFastForwards` unset. The reply is `report-status`: `unpack ok` or the refusal of the pack, then `ok <ref>` or `ng <ref> <reason>` for each command.
 - Limits: a push body has at most 64 MiB plus 1 MiB of commands, after gzip. A pack has at most 100000 objects, 64 MiB of inflated entry data and 64 MiB of objects, and each object has at most 16 MiB (`gitpack.MaxObjectBytes`). A command list has at most 1000 commands. A fetch request body has at most 8 MiB, with at most 10000 wants and 100000 haves. A fetch holds at most 1000000 objects and commits in its sets, and a larger fetch answers 413 `vcs_object_too_large`. A fetch has no limit on the size of the pack that it streams. A push reserves its body, three times 64 MiB, 4 times 16 MiB and the verification work: B + 192 MiB + 64 MiB + 48 MiB. A fetch reserves 176 MiB. A push takes one of the 4 reader slots while it reads its body, as an upload does.
-- The git routes take no part in the epoch fence. A `write` grant moves a ref with no workspace, so a workspace that works on the same ref sees the new commit through the ref generation.
+- The git routes take no part in the epoch fence. A `write` or `merge` grant moves a ref with no workspace, so a workspace that works on the same ref sees the new commit through the ref generation.
 
 ### Control plane
 
@@ -132,6 +134,53 @@ Ordinary `git` clones, fetches and pushes a repository over HTTPS. The routes ne
 | `PUT /v1/workspaces/{id}/claim` with `{epoch, owner, repo}` returns `{epoch, op, snapshot}` | `operator` |
 | `POST /v1/workspaces/{id}/flush` with `{epoch, generation, prev, op, snapshot}` | `operator` |
 | `DELETE /v1/workspaces/{id}` | `operator` |
+| `PUT /v1/repos/{repo}/protected-refs` with `{patterns}` replaces the list and answers 200 with `{patterns}`. `GET` of the same path returns it. `{repo}` is the repository text, with `/` as `%2F`. | `operator` |
+| `GET /v1/events?cursor=<cursor>&limit=<n>` returns `{events, cursor}` | `operator` |
+| `POST /v1/subscriptions` with `{url, secret, repo}` answers 201 with the subscription | `operator` |
+| `GET /v1/subscriptions` lists the subscriptions, oldest first | `operator` |
+| `DELETE /v1/subscriptions/{id}` answers 204 | `operator` |
+
+### Protected refs
+
+Policy about which ref is special belongs to the caller. The store keeps one list of protected ref patterns for each repository text, and it applies one rule. A pattern is a ref name, or a prefix that ends in `*`: `release/*` matches every ref that starts with `release/`, and `*` matches every ref. A list has at most 100 patterns. A new repository has an empty list, so `main` is not protected.
+
+- A ref write is a create, a swap or a delete. It comes from `PUT` or `DELETE` of `/v1/vcs/refs/{name...}` or from a ref command of a git push. A single function of the server, `writeRefAs`, performs every ref write, and it wakes the delivery worker after a write that succeeds. Any other route that moves a ref must call it.
+- A `node` grant writes a ref on the store plane under its epoch fence, as before. It compares on the generation. When the ref name matches a pattern of the repository of the grant, the write answers 403 `vcs_ref_protected` and changes nothing. The check runs before the write.
+- A `write` grant writes a ref by git push with no workspace. It compares on the commit (`UpdateRef`). A push command on a protected ref fails with `ng <ref> protected`, the other commands go on, and the ref does not change. The store plane routes refuse a `write` grant. The pattern is matched against the stored ref name, which is the git name without `refs/heads/`.
+- A `merge` grant writes any ref of its repository, protected or not, with no workspace. On the store plane it compares on the generation: `PUT` with `{expect, commit}` where `expect` 0 creates the ref, and `DELETE` with `?expect=`. No epoch is read or checked. A lost swap answers 409 `vcs_generation_conflict` with the stored ref in `details.ref`, as for a `node` write. By git push it compares on the commit, as a `write` grant does. A `merge` grant also reads refs through the two `GET` ref routes.
+- `read`, `import` and `operator` grants move no ref.
+- `UpdateRef` and `MergeRef` differ only in the condition: `UpdateRef` needs the stored commit to be `old` (git has no generation), and `MergeRef` needs the stored generation to be `expect`. Both take no fence, take a new generation and append one event. The event kind is the writer: `write` or `merge` for `UpdateRef`, `merge` for `MergeRef`.
+- Setting the list is not ordered with a ref write that has already passed its check. A write that starts after the `PUT` of the list returns sees the new list.
+- The list names no workspace and needs no `repos` row. The pattern text is checked with the ref name rule. The check of `{repo}` is the repository text rule.
+
+### Ref events
+
+Every create, swap and delete of a ref appends one event in the same unit as the ref write, including the `main` that repository creation writes. See Contract of meta.Store. An event has these fields:
+
+| Field | Meaning |
+|---|---|
+| `partition` | 0 to 63: the hash of the repo and the ref name, modulo 64. |
+| `seq` | Positive. With `partition` it identifies the event. In a partition it has no gap and follows commit order, so a consumer that keeps the last `seq` of each partition loses none. |
+| `repo`, `ref` | Repository text and ref name. |
+| `old`, `new` | Commit before and after. `old` is empty for a create and `new` is empty for a delete. |
+| `generation` | Generation of the ref after the write. For a delete, the generation that the ref had. |
+| `kind` | `node`, `write`, `merge` or `operator`: the scope of the grant that wrote the ref. The event never holds a grant. |
+| `time` | RFC 3339 time of the write, from the clock of the backend. |
+
+`GET /v1/events?cursor=C&limit=M` returns up to `M` events and a new cursor. `limit` defaults to 100 and is at most 1000. The cursor is opaque: it holds the position in every partition. An empty or absent `cursor` starts at the first event of every partition. A consumer passes the `cursor` of an answer as the `cursor` of its next call, and the route returns the events after it. An answer with no events returns the same cursor. A cursor that the route did not return, or that is malformed, answers 400 `invalid_body`. The route is for a consumer that was down. The main path is delivery to a subscription.
+
+Ordering: the 64 partitions of a store are fixed (`meta.Partitions`). An event is identified by `(partition, seq)`. The events of one ref are in one partition and arrive in commit order with no gap. No order holds between two refs, and a consumer must not assume one. The route fills its answer from the lowest partition up, so a page can hold events of some partitions only, and later pages hold the rest.
+
+Retention: the store keeps an event for `MOTTE_EVENT_RETENTION`, 14 days by default. A server removes older events every hour and keeps the highest removed `seq` of each partition. A read from a position below that floor in any partition that the route reads answers 410 `vcs_events_pruned`, and the consumer must read the refs again. A subscription whose cursor in a partition falls below the floor stops delivering that partition and logs an error. The operator deletes the subscription and creates it again.
+
+Delivery is push, at least once:
+
+- An operator registers a subscription with `POST /v1/subscriptions`: a receiver `url` (http or https, with a host and no user information, at most 2048 bytes), a `secret` of 16 to 256 bytes, and an optional `repo` filter. Its cursors start at the newest event of every partition, so it gets no history. The answer carries `cursor`, the acknowledged positions in the form of an event cursor. The store keeps the secret and never returns it.
+- Every server replica runs the delivery worker. A subscription has one cursor and one lease for each partition. A worker delivers a partition of a subscription only while it holds that lease, so replicas deliver different partitions of one subscription in parallel, and the order holds in each partition. The lease is columns of the row of the partition, taken by one conditional write. It is 30 seconds, and the holder renews it before each event and while it waits. A replica that crashes loses its leases when they expire, and another replica takes over from the stored cursors. All waits and lease times use the injected `internal/clock`.
+- A worker reads the subscriptions and the newest `seq` of every partition, and starts a delivery for each partition that has events above its cursor. A delivery ends when the partition is caught up. A ref write that a replica commits, and the creation of a repository or a subscription, wakes the worker of that replica at once through a non-blocking signal, so a delivery starts with no wait. A delivery that is running when the signal comes reads its partition again before it ends. A write of another replica is found by the periodic pass, which runs every second (`Poll`). The worst-case latency from commit to the first delivery attempt is therefore about 0 on the replica that wrote and one poll, 1 second, on the others, plus the time of one pass. A retry after a refusal waits for the backoff.
+- A delivery reads the events of a partition above the cursor and sends them one at a time, in `seq` order. It skips an event that the `repo` filter excludes, and it moves the cursor past it. One request is `POST` of the JSON event to the `url`, with `Content-Type: application/json`. `X-Motte-Partition` and `X-Motte-Sequence` are the partition and the `seq`; the pair identifies the event. `X-Motte-Signature` is `sha256=` and the lowercase hex HMAC-SHA256 of the exact request body under the secret. The request has a limit of 10 seconds, and the worker follows no redirect.
+- A 2xx answer acknowledges the event, and the worker then raises the stored cursor. Any other answer, or no answer, makes the worker send the same event again after a wait of 1 second, doubled after each attempt, up to 5 minutes. The worker sends no later event first. A crash between the answer and the cursor write repeats one event, so a receiver must treat a repeated `(partition, seq)` as a repeat. A receiver gets the events of one ref in order, and the events of different partitions in no fixed order.
+- A log line of delivery names the subscription, the `seq`, the status and the type of an error. It never holds the URL, the secret or the body.
 
 ## Data model
 
@@ -143,6 +192,11 @@ packs(repo, pack_id, bytes, created_at, pk(repo, pack_id))
 refs(repo, name, commit_sha, generation, updated_at, pk(repo, name)); sequence ref_generation
 workspaces(id pk, repo, owner, epoch bigint, op, snapshot, report_generation, created_at, deleted_at)
 op_heads(workspace_id pk -> workspaces, epoch, generation, heads text[], updated_at)
+event_partitions(partition pk, seq, floor)   64 rows
+events(partition, seq, repo, ref, old_commit, new_commit, generation, kind, at, pk(partition, seq))
+protected_refs(repo pk, patterns text[])
+subscriptions(id pk, url, secret, repo, created_at)
+subscription_cursors(sub_id, partition, cursor, lease_owner, lease_until, pk(sub_id, partition))
 ```
 
 A repository text has the form `<prefix>:<path>`. The prefix `native` is reserved for the repositories that `POST /v1/repos` creates. The prefix matches `^[a-z0-9][a-z0-9-]{0,62}$`. The path has 1 to 512 bytes of UTF-8. Object keys are `repos/<prefix>/<base64url path>/...` and `ops/<workspace>/...`. A repository that the caller owns elsewhere has no `repos` row. The store keeps only the packs and refs of such a repository.
@@ -181,7 +235,7 @@ A caller of the service chooses where the service keeps its state. Two seams hol
 
 | Interface | Holds | Backends |
 |---|---|---|
-| `meta.Store` | Repositories, workspaces and their epoch fence, op heads, refs, the pack listing. | `meta/postgres`, `meta/sqlite` |
+| `meta.Store` | Repositories, workspaces and their epoch fence, op heads, refs, protected ref patterns, ref events, event subscriptions, the pack listing. | `meta/postgres`, `meta/sqlite` |
 | `bucket.Store` | Pack files, pack indexes and op objects. | `bucket/gcs`, `bucket/fs` |
 
 The suites `meta/metatest` and `bucket/buckettest` export `Run(t, newBackend)`. A backend passes its suite before a server uses it. The suite is the executable form of this section, and a difference between them is a defect.
@@ -196,11 +250,16 @@ Every method that writes is one atomic unit. The unit is one conditional stateme
 - Order: names, repositories, pack ids and workspace ids are opaque text. A list sorts them by byte value of their UTF-8 text.
 - Time: `Repo.CreatedAt` and the creation time of a pack come from the clock of the backend, with a resolution of 1 millisecond or finer.
 - Racers: of N concurrent calls that need the same free condition, exactly one wins and the others get the error of a lost condition.
+- Events: every write that creates, moves or deletes a ref appends one event in the same unit as the ref write, and a write that changes nothing appends none. The event holds the repo, the ref, the old and new commit (empty when absent), the generation (that of the deleted ref for a delete), the writer kind and the time. The kind is `node` for `SwapRef` and `DeleteRef`, `merge` for `MergeRef` and `MergeDeleteRef`, the `kind` argument for `UpdateRef`, and `operator` for the `main` that `CreateRepo` writes.
+- Partitions: a store has `meta.Partitions` = 64 event partitions. The partition of an event is `meta.Partition(repo, ref)`: the FNV-1a 32-bit hash of the repo, a zero byte and the ref name, modulo 64. The backend gets the partition as an argument, so no SQL computes it. All events of one ref are in one partition. Changing the number is a migration that renumbers the events.
+- Event order: each partition has its own counter, taken in the unit of the write. An event is identified by `(partition, seq)`. In a partition `seq` starts at 1, has no gap, and follows commit order: a reader that sees `seq` N sees every event of that partition below N, so a consumer that keeps the last `seq` of each partition loses no event. This gives the order of the events of one ref. There is no order across partitions. Writes to refs in different partitions share no counter and do not wait for each other.
+- Retention: retention removes events and keeps, for each partition, the highest removed `seq` as a floor. A read of a partition from a `seq` below its floor is `ErrEventsPruned`. The other partitions are not affected.
+- Lease: the lease of a partition of a subscription is columns of its row in `subscription_cursors`. A lease write is one conditional statement on that row, and `now` is an argument, so the clock of the caller decides expiry. The lease passes to a new owner only when `lease_until` is at or before `now`. Owners must have clocks that differ by much less than the lease time. A subscription has one lease and one cursor for each partition.
 - Visibility: a method that returns nil has committed durably. A read that starts after it sees the write, in every client of the store.
 
 | Method | Condition | Effect | Error on a failed condition |
 |---|---|---|---|
-| `CreateRepo(r, repoText, commit)` | No `repos` row has path `r.Path`, and no ref `main` exists in `repoText`. | Inserts the repo row and the ref `main` at `commit` with a new generation. | `ErrExists`. Neither row exists. |
+| `CreateRepo(r, repoText, commit)` | No `repos` row has path `r.Path`, and no ref `main` exists in `repoText`. | Inserts the repo row, the ref `main` at `commit` with a new generation, and one event of kind `operator`. | `ErrExists`. Neither row exists. |
 | `Repo(path)` | None. | Returns the row. | `ErrNotFound`. |
 | `Repos()` | None. | Lists newest first: `created_at` descending, then `path` descending. | None. |
 | `Claim(id, epoch, owner, repo)` | The workspace is absent, or it is not deleted and has the same owner and repo. | Inserts the row, or sets `epoch` to the higher of the stored one and `epoch`. Returns the stored epoch, op and snapshot. | `ErrGone` for a deleted workspace. Else `ErrWorkspaceConflict`. A lower `epoch` is not an error: the caller compares the returned epoch. |
@@ -213,10 +272,23 @@ Every method that writes is one atomic unit. The unit is one conditional stateme
 | `SwapOpHeads(ws, epoch, repo, expect, heads)` | The fence holds, the stored generation is `expect` and the stored epoch is at most `epoch`. | Sets `epoch` and `heads`. Adds 1 to the generation. | `ErrClaimLost` when the fence fails or the stored epoch is above `epoch`, else `*OpHeadsConflict` with `Current` nil when no row exists. |
 | `Ref(repo, name)` | None. | Returns the ref. | `ErrNotFound`. |
 | `Refs(repo)` | None. | Lists the refs of the repo by name. | None. |
-| `SwapRef(ws, epoch, repo, name, 0, sha)` | The fence holds and the ref is absent. | Inserts the ref with a new generation. | `ErrClaimLost`, else `*RefConflict` with the stored ref as `Current`. |
-| `SwapRef(ws, epoch, repo, name, expect, sha)` | The fence holds and the stored generation is `expect`. | Sets the commit and a new generation. | `ErrClaimLost`, else `*RefConflict` with `Current` nil when the ref is absent. |
-| `DeleteRef(ws, epoch, repo, name, expect)` | The fence holds and the stored generation is `expect`. | Deletes the ref. | As `SwapRef`. |
-| `UpdateRef(repo, name, old, new)` | No fence. The stored commit is `old`, or the ref is absent when `old` is empty. | Creates the ref when `old` is empty, deletes it when `new` is empty, else sets the commit. Every write takes a new generation. | `*RefConflict` with the stored ref as `Current`, nil when the ref is absent. |
+| `SwapRef(ws, epoch, repo, name, 0, sha)` | The fence holds and the ref is absent. | Inserts the ref with a new generation and one event of kind `node`. | `ErrClaimLost`, else `*RefConflict` with the stored ref as `Current`. |
+| `SwapRef(ws, epoch, repo, name, expect, sha)` | The fence holds and the stored generation is `expect`. | Sets the commit and a new generation, and appends one event. | `ErrClaimLost`, else `*RefConflict` with `Current` nil when the ref is absent. |
+| `DeleteRef(ws, epoch, repo, name, expect)` | The fence holds and the stored generation is `expect`. | Deletes the ref and appends one event. | As `SwapRef`. |
+| `UpdateRef(repo, name, old, new, kind)` | No fence. The stored commit is `old`, or the ref is absent when `old` is empty. | Creates the ref when `old` is empty, deletes it when `new` is empty, else sets the commit. Every write takes a new generation and appends one event of kind `kind` (`write` or `merge`). | `*RefConflict` with the stored ref as `Current`, nil when the ref is absent. |
+| `MergeRef(repo, name, 0, sha)` | The ref is absent. | Inserts the ref with a new generation and one event of kind `merge`. | `*RefConflict` with the stored ref as `Current`. |
+| `MergeRef(repo, name, expect, sha)` | The stored generation is `expect`. | Sets the commit and a new generation, and appends one event. | `*RefConflict` with `Current` nil when the ref is absent. |
+| `MergeDeleteRef(repo, name, expect)` | The stored generation is `expect`. | Deletes the ref and appends one event. | As `MergeRef`. |
+| `ProtectedRefs(repo)` | None. | Returns the patterns, in the order that `SetProtectedRefs` stored them. | None. A repo with none returns an empty list. |
+| `SetProtectedRefs(repo, patterns)` | None. | Replaces the whole list. | None. |
+| `Events(partition, after, limit)` | `after` is not below the floor of the partition. | Lists up to `limit` events of the partition with `seq` above `after`, by `seq`. | `ErrEventsPruned`. |
+| `EventHeads()` | None. | Returns the newest `seq` of each partition, 0 for none. | None. |
+| `PruneEvents(before)` | None. | Deletes the events with a time before `before` and raises the floor of each partition to its highest deleted `seq`. | None. |
+| `CreateSubscription(s)` | No subscription has the id. | Inserts the row and one cursor for each partition, at the newest `seq` that ever existed in it, and returns the row with its cursors and creation time. | `ErrExists`. |
+| `Subscriptions()` | None. | Lists by creation time, then id, each with its cursors. | None. |
+| `DeleteSubscription(id)` | The subscription exists. | Deletes it, its cursors and its leases. | `ErrNotFound`. |
+| `AcquireLease(id, partition, owner, now, until)` | The lease owner of that partition is `owner`, or its `lease_until` is at or before `now`. | Sets the owner and `lease_until` to `until`, and returns the subscription fields and the cursor of the partition. | `ErrNotFound`, else `ErrLeaseHeld`. |
+| `AdvanceCursor(id, partition, owner, cursor)` | The lease owner of that partition is `owner`. | Sets the cursor of the partition to the higher of the stored one and `cursor`. | `ErrNotFound`, else `ErrLeaseHeld`. |
 | `AddPack(repo, id, bytes)` | No pack row has the repo and id. | Inserts the row with the creation time. | None. A repeat changes nothing and keeps the first `bytes`. |
 | `Packs(repo)` | None. | Lists the packs of the repo, oldest first, then by id. | None. |
 
@@ -230,8 +302,8 @@ A `repo` argument of a fenced write is the repo of the grant. It must equal the 
 
 ### Provided backends
 
-- `meta/postgres` is the production backend. It keeps the schema in the section Data model, applies `meta/postgres/migrations` at start under an advisory lock, and meets each write with one statement. The fence of a ref or op-heads write is a `FOR SHARE` read of the workspace row inside the statement. A report is one `UPDATE` that locks the row itself. The generation comes from the sequence `ref_generation`. `CreateRepo` is one statement that inserts the repo row and, from its `RETURNING`, the ref.
-- `meta/sqlite` is for tests and for a service that runs with no other process. It keeps the same fields in the tables of `meta/sqlite/migrations`. It uses a pure Go driver, so the service builds with CGO disabled. It opens one connection, so its writes are ordered, and one process uses one database file. Each write is one transaction of statements in which no read feeds a write. The fence is an `EXISTS` condition of the statement. The generation comes from the row `ref_generation` of the table `counters`, which the same transaction increments. Times are integer microseconds, and the heads are JSON text.
+- `meta/postgres` is the production backend. It keeps the schema in the section Data model, applies `meta/postgres/migrations` at start under an advisory lock, and meets each write with one statement, except a ref write and `CreateRepo`. The fence of a ref or op-heads write is a `FOR SHARE` read of the workspace row inside the statement. A report is one `UPDATE` that locks the row itself. The generation comes from the sequence `ref_generation`. A ref write and `CreateRepo` are one transaction. It first takes the next event number of the partition with `UPDATE event_partitions SET seq = seq + 1 WHERE partition = $1 RETURNING seq`. The row lock lasts to the commit, so `seq` order is commit order in the partition, and the number comes before any workspace lock, so a claim is not starved by writes that wait for the counter. One statement then writes the ref and the event, and the transaction rolls back when no row changed, so a failed write leaves no gap. Only writes to refs of the same partition wait for each other.
+- `meta/sqlite` is for tests and for a service that runs with no other process. It keeps the same fields in the tables of `meta/sqlite/migrations`. It uses a pure Go driver, so the service builds with CGO disabled. It opens one connection, so its writes are ordered, and one process uses one database file. Each write is one transaction of statements in which no read feeds a write. The fence is an `EXISTS` condition of the statement. The generation comes from the row `ref_generation` of the table `counters`, which the same transaction increments. A ref write inserts its event first, with the condition of the ref write, and the number `event_partitions.seq + 1`. A second statement raises `event_partitions.seq` only when that event row exists. The ref write follows with its own condition. A write whose condition fails therefore leaves no event and no gap, in a batch that does not roll back too. Times are integer microseconds, and the heads are JSON text.
 - `bucket/gcs` and `bucket/fs` are the object backends. `gcs` writes with the precondition that the object does not exist. `fs` links a synced temporary file to its name.
 
 ### A new backend
@@ -311,7 +383,7 @@ A grant is `mg1.<base64url payload>.<base64url signature>`. The payload is JSON.
 | Claim | Meaning |
 |---|---|
 | `kid` | Key identifier. The verifier selects the public key by `kid`. |
-| `scope` | One of `node`, `read`, `write`, `import`, `operator`. |
+| `scope` | One of `node`, `read`, `write`, `import`, `operator`, `merge`. |
 | `ws` | Workspace identifier. |
 | `epoch` | Claim epoch of the workspace when the grant was minted. |
 | `repo` | Repository text. |
@@ -319,7 +391,7 @@ A grant is `mg1.<base64url payload>.<base64url signature>`. The payload is JSON.
 | `subject` | The creator, for traces only. It grants nothing. |
 | `exp` | Expiry as Unix seconds. A grant is valid while `now < exp`. |
 
-Required claims by scope: `node` needs `ws`, `epoch` and `repo`. `read`, `write` and `import` need `repo`. `operator` needs none.
+Required claims by scope: `node` needs `ws`, `epoch` and `repo`. `read`, `write`, `import` and `merge` need `repo`. `operator` needs none.
 
 The verifier holds only public keys. Each key has a `kid` and a set of allowed scopes. The verifier rejects a grant whose scope is not allowed for its key. Every rejection answers 401 with the same error, and the response never carries the grant.
 
@@ -328,13 +400,13 @@ The verifier holds only public keys. Each key has a `kid` and a set of allowed s
 The caller owns the private keys. Two signers exist:
 
 - The control-plane key may sign all scopes. A `write` grant lets the bearer move any ref of its repository without a workspace: only the control plane or a trusted pipeline holds one.
-- The node key lives on the node daemon and may sign only `node`. A compromised node cannot mint `import` or `operator` grants. The plugin mints a `node` grant only for a pod of an allowed namespace (see Node plugin). It can mint `node` grants, bounded by the repository and epoch of the workspace row.
+- The node key lives on the node daemon and may sign only `node`. A compromised node cannot mint `import`, `operator` or `merge` grants. The plugin mints a `node` grant only for a pod of an allowed namespace (see Node plugin). It can mint `node` grants, bounded by the repository and epoch of the workspace row.
 
 ### Rotation
 
 1. Add the new public key to the store.
 2. Switch the signer to the new key.
-3. Remove the old key after the longest grant life: 1 hour for `node`, 60 seconds for `operator`, `read`, `write` and `import`.
+3. Remove the old key after the longest grant life: 1 hour for `node`, 60 seconds for `operator`, `read`, `write`, `import` and `merge`.
 
 Both keys are valid between step 1 and step 3.
 
@@ -346,7 +418,7 @@ Authorization happens at claim time. For a repository that the store keeps (it h
 
 The path prefix `/v1` is additive. New fields and new routes are allowed, and clients ignore unknown fields. A breaking change gets `/v2`, served beside `/v1`. The module is tagged with semantic versions.
 
-Wire error codes keep their `vcs_` text: `vcs_claim_lost`, `vcs_generation_conflict`, `vcs_not_found`, `vcs_object_invalid`, `vcs_object_too_large`, `vcs_repo_forbidden`, `vcs_workspace_conflict`, `vcs_workspace_deleted`. Three codes have no prefix: `unauthorized` (401), `invalid_body` (400) and `internal_error` (500). `method_not_allowed` (405) answers a method that its path does not serve. A panic in a handler is logged with its stack and answers 500 `internal_error` when the handler sent no status yet. The error body is `{"error":{"code","message","details"}}`. A conflict on a ref carries the stored ref in `details.ref`.
+Wire error codes keep their `vcs_` text: `vcs_claim_lost`, `vcs_events_pruned` (410), `vcs_generation_conflict`, `vcs_not_found`, `vcs_object_invalid`, `vcs_object_too_large`, `vcs_ref_protected` (403), `vcs_repo_forbidden`, `vcs_workspace_conflict`, `vcs_workspace_deleted`. Three codes have no prefix: `unauthorized` (401), `invalid_body` (400) and `internal_error` (500). `method_not_allowed` (405) answers a method that its path does not serve. A panic in a handler is logged with its stack and answers 500 `internal_error` when the handler sent no status yet. The error body is `{"error":{"code","message","details"}}`. A conflict on a ref carries the stored ref in `details.ref`.
 
 ## Client
 
@@ -355,10 +427,11 @@ Package `client` has one typed method for each route of both planes. A `Client` 
 - Each call has a time budget of 2 seconds, which `WithBudget` changes. A deadline on the call context that is earlier than the budget wins.
 - The client injects the W3C trace context of the call context into the request headers.
 - The client follows no redirect. A 3xx answer is the error `ErrRedirect`, and the grant goes to no other host.
-- A failure answer is an `*Error` with the HTTP status, the wire code, the message and the details. `errors.Is` matches the sentinel of the code: `ErrNotFound`, `ErrGenerationConflict`, `ErrClaimLost`, `ErrObjectInvalid`, `ErrObjectTooLarge`, `ErrRepoForbidden`, `ErrWorkspaceConflict`, `ErrWorkspaceDeleted`, `ErrUnauthorized`, `ErrInvalidBody` and `ErrInternal`. A failure answer with no wire error body is `ErrUnexpected`.
+- A failure answer is an `*Error` with the HTTP status, the wire code, the message and the details. `errors.Is` matches the sentinel of the code: `ErrNotFound`, `ErrGenerationConflict`, `ErrClaimLost`, `ErrObjectInvalid`, `ErrObjectTooLarge`, `ErrRefProtected`, `ErrEventsPruned`, `ErrRepoForbidden`, `ErrWorkspaceConflict`, `ErrWorkspaceDeleted`, `ErrUnauthorized`, `ErrInvalidBody` and `ErrInternal`. A failure answer with no wire error body is `ErrUnexpected`.
 - `CurrentRef` returns the stored ref that a ref generation conflict carries.
+- `SwapRef` and `DeleteRef` serve a `node` client and a `merge` client. `SetProtectedRefs`, `ProtectedRefs`, `Events`, `CreateSubscription`, `Subscriptions` and `DeleteSubscription` serve an `operator` client.
 
-Package `testserver` runs the real server in the process of a test, on a fresh schema of the PostgreSQL database that the caller names (or `MOTTE_TEST_DATABASE_URL`) and a temporary filesystem bucket. It skips the test when no DSN is set. It returns the base URL, the pool of its schema (for a test that sets up a state no route can make), the control-plane and node signers, and helpers that mint operator, node, read, write and import grants.
+Package `testserver` runs the real server in the process of a test, on a fresh schema of the PostgreSQL database that the caller names (or `MOTTE_TEST_DATABASE_URL`) and a temporary filesystem bucket. It skips the test when no DSN is set. It returns the base URL, the pool of its schema (for a test that sets up a state no route can make), the control-plane and node signers, and helpers that mint operator, node, read, write, import and merge grants. It does not run the delivery worker.
 
 ## Observability
 

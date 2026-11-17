@@ -17,6 +17,8 @@ var (
 	ErrRepoForbidden      = errors.New("motte: repository forbidden")
 	ErrWorkspaceConflict  = errors.New("motte: workspace conflict")
 	ErrWorkspaceDeleted   = errors.New("motte: workspace deleted")
+	ErrRefProtected       = errors.New("motte: ref protected")
+	ErrEventsPruned       = errors.New("motte: events pruned")
 	ErrUnauthorized       = errors.New("motte: unauthorized")
 	ErrInvalidBody        = errors.New("motte: invalid body")
 	ErrInternal           = errors.New("motte: internal error")
@@ -35,6 +37,8 @@ var sentinels = map[api.Code]error{
 	api.CodeRepoForbidden:      ErrRepoForbidden,
 	api.CodeWorkspaceConflict:  ErrWorkspaceConflict,
 	api.CodeWorkspaceDeleted:   ErrWorkspaceDeleted,
+	api.CodeRefProtected:       ErrRefProtected,
+	api.CodeEventsPruned:       ErrEventsPruned,
 	api.CodeUnauthorized:       ErrUnauthorized,
 	api.CodeInvalidBody:        ErrInvalidBody,
 	api.CodeInternal:           ErrInternal,

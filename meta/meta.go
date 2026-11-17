@@ -9,6 +9,7 @@ package meta
 import (
 	"context"
 	"errors"
+	"hash/fnv"
 	"time"
 )
 
@@ -25,6 +26,19 @@ var (
 	ErrWorkspaceConflict = errors.New("meta: workspace owner or repo differs")
 	// ErrWrongRepo is a grant whose repo is not the repo of the workspace.
 	ErrWrongRepo = errors.New("meta: workspace is on another repo")
+	// ErrEventsPruned is a read of events from a sequence that retention removed.
+	ErrEventsPruned = errors.New("meta: events pruned")
+	// ErrLeaseHeld is a lease or cursor write by an owner that does not hold the lease.
+	ErrLeaseHeld = errors.New("meta: lease held by another owner")
+)
+
+// The kinds of writer that an Event records. Each is the scope of the grant
+// that wrote the ref.
+const (
+	WriterNode     = "node"
+	WriterMerge    = "merge"
+	WriterWrite    = "write"
+	WriterOperator = "operator"
 )
 
 // RefConflict is a lost ref compare-and-swap. Current is nil when the ref is absent.
@@ -62,6 +76,50 @@ type OpHeads struct {
 	Epoch      uint64
 	Generation int64
 	Heads      []string
+}
+
+// Partitions is the number of event partitions of a store. The partition of a
+// ref is fixed by its repo and name, so every event of one ref is in one
+// partition and in order. Changing the number is a migration.
+const Partitions = 64
+
+// Partition returns the event partition of a ref: the FNV-1a hash of the repo,
+// a zero byte and the name, modulo Partitions.
+func Partition(repo, ref string) int {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(repo + "\x00" + ref))
+	return int(h.Sum32() % Partitions)
+}
+
+// Event is one change of a ref. Its identity is Partition and Seq. Seq starts
+// at 1 in each partition and has no gap there, and it follows commit order
+// within the partition. No order holds across partitions. Old is empty for a
+// create, and New is empty for a delete. For a delete Generation is the
+// generation that the ref had. Kind is a Writer constant.
+type Event struct {
+	Partition  int
+	Seq        int64
+	Repo, Ref  string
+	Old, New   string
+	Generation int64
+	Kind       string
+	At         time.Time
+}
+
+// Subscription is a registered receiver. Cursors holds one cursor for each
+// partition: the Seq of the last event of that partition that the receiver
+// acknowledged. Repo is empty for every repo.
+type Subscription struct {
+	ID, URL, Secret, Repo string
+	CreatedAt             time.Time
+	Cursors               []int64
+}
+
+// Lease is the right to deliver one partition of a subscription, with the cursor of that partition.
+type Lease struct {
+	ID, URL, Secret, Repo string
+	Partition             int
+	Cursor                int64
 }
 
 // Pack is a pack that a repository holds.
@@ -129,8 +187,47 @@ type Store interface {
 	// UpdateRef is the ref write of a direct push, with no workspace and no
 	// fence. It moves ref name from commit old to commit new. An empty old
 	// creates the ref and an empty new deletes it. A ref whose commit is not
-	// old is *RefConflict. Every write takes a new generation.
-	UpdateRef(ctx context.Context, repo, name, old, new string) (Ref, error)
+	// old is *RefConflict. Every write takes a new generation and appends one
+	// event of the writer kind, WriterWrite or WriterMerge.
+	UpdateRef(ctx context.Context, repo, name, old, new, kind string) (Ref, error)
+
+	// MergeRef is SwapRef without a workspace fence: it needs only the
+	// stored generation to be expect. The event kind is WriterMerge.
+	MergeRef(ctx context.Context, repo, name string, expect int64, sha string) (Ref, error)
+	// MergeDeleteRef is DeleteRef without a workspace fence.
+	MergeDeleteRef(ctx context.Context, repo, name string, expect int64) error
+
+	// ProtectedRefs returns the protected ref patterns of repo, empty when none.
+	ProtectedRefs(ctx context.Context, repo string) ([]string, error)
+	// SetProtectedRefs replaces the protected ref patterns of repo.
+	SetProtectedRefs(ctx context.Context, repo string, patterns []string) error
+
+	// Events lists at most limit events of one partition with Seq above
+	// after, oldest first. ErrEventsPruned when after is below the last
+	// pruned Seq of the partition.
+	Events(ctx context.Context, partition int, after int64, limit int) ([]Event, error)
+	// EventHeads returns the newest Seq of each partition, 0 for none.
+	EventHeads(ctx context.Context) ([]int64, error)
+	// PruneEvents removes the events written before the time and records the
+	// highest removed Seq of each partition.
+	PruneEvents(ctx context.Context, before time.Time) error
+
+	// CreateSubscription stores s with each cursor at the newest Seq of its
+	// partition. ErrExists when the id exists. The returned value has
+	// Cursors and CreatedAt.
+	CreateSubscription(ctx context.Context, s Subscription) (Subscription, error)
+	// Subscriptions lists every subscription, oldest first, ties by id.
+	Subscriptions(ctx context.Context) ([]Subscription, error)
+	// DeleteSubscription removes a subscription and its cursors. ErrNotFound when it is absent.
+	DeleteSubscription(ctx context.Context, id string) error
+	// AcquireLease gives owner the lease of one partition of subscription id
+	// until the time until, when no owner holds it at now or owner holds
+	// it. It returns the lease with the cursor. ErrNotFound, ErrLeaseHeld.
+	AcquireLease(ctx context.Context, id string, partition int, owner string, now, until time.Time) (Lease, error)
+	// AdvanceCursor raises the cursor of one partition of subscription id to
+	// cursor while owner holds its lease. A lower cursor changes nothing.
+	// ErrNotFound, ErrLeaseHeld.
+	AdvanceCursor(ctx context.Context, id string, partition int, owner string, cursor int64) error
 
 	// AddPack records a pack once. A repeat is a no-op.
 	AddPack(ctx context.Context, repo, packID string, bytes int64) error

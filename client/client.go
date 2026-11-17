@@ -259,7 +259,8 @@ func (c *Client) Ref(ctx context.Context, name string) (api.Ref, error) {
 }
 
 // SwapRef points the ref at commit when its stored generation is expect. Use 0 to create the ref. A conflict
-// is ErrGenerationConflict, and CurrentRef returns the stored ref.
+// is ErrGenerationConflict, and CurrentRef returns the stored ref. A client with a merge grant writes any ref of its
+// repository with no workspace. A client with a node grant gets ErrRefProtected for a protected ref.
 func (c *Client) SwapRef(ctx context.Context, name string, expect int64, commit string) (api.Ref, error) {
 	var out api.Ref
 	err := c.do(ctx, http.MethodPut, refPath(name), api.SwapRefRequest{Expect: expect, Commit: commit}, &out)
@@ -307,4 +308,52 @@ func (c *Client) Flush(ctx context.Context, workspace string, req api.FlushReque
 // DeleteWorkspace deletes a workspace. It is idempotent.
 func (c *Client) DeleteWorkspace(ctx context.Context, workspace string) error {
 	return c.do(ctx, http.MethodDelete, "/v1/workspaces"+segs(workspace), nil, nil)
+}
+
+// SetProtectedRefs replaces the protected ref patterns of repo, the repository text. A pattern is a ref name, or a
+// prefix that ends in "*". An empty list protects nothing.
+func (c *Client) SetProtectedRefs(ctx context.Context, repo string, patterns []string) error {
+	return c.do(ctx, http.MethodPut, "/v1/repos"+segs(repo, "protected-refs"), api.ProtectedRefs{Patterns: patterns}, nil)
+}
+
+// ProtectedRefs returns the protected ref patterns of repo, the repository text.
+func (c *Client) ProtectedRefs(ctx context.Context, repo string) ([]string, error) {
+	var out api.ProtectedRefs
+	err := c.do(ctx, http.MethodGet, "/v1/repos"+segs(repo, "protected-refs"), nil, &out)
+	return out.Patterns, err
+}
+
+// Events returns up to limit ref events after cursor, and the cursor to pass next. An empty cursor starts at the
+// first event. Zero limit takes the server default. Events of one ref arrive in order. ErrEventsPruned means
+// retention removed events after the cursor, and the caller must read the refs again.
+func (c *Client) Events(ctx context.Context, cursor string, limit int) ([]api.Event, string, error) {
+	q := url.Values{}
+	if cursor != "" {
+		q.Set("cursor", cursor)
+	}
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	var out api.Events
+	err := c.do(ctx, http.MethodGet, "/v1/events?"+q.Encode(), nil, &out)
+	return out.Events, out.Cursor, err
+}
+
+// CreateSubscription registers a receiver of ref events. Its cursor starts at the newest event.
+func (c *Client) CreateSubscription(ctx context.Context, req api.CreateSubscriptionRequest) (api.Subscription, error) {
+	var out api.Subscription
+	err := c.do(ctx, http.MethodPost, "/v1/subscriptions", req, &out)
+	return out, err
+}
+
+// Subscriptions lists the registered receivers.
+func (c *Client) Subscriptions(ctx context.Context) ([]api.Subscription, error) {
+	var out api.Subscriptions
+	err := c.do(ctx, http.MethodGet, "/v1/subscriptions", nil, &out)
+	return out.Subscriptions, err
+}
+
+// DeleteSubscription removes a receiver. An unknown id is ErrNotFound.
+func (c *Client) DeleteSubscription(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/subscriptions"+segs(id), nil, nil)
 }

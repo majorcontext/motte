@@ -18,6 +18,8 @@ func (s *Server) registerControlPlane(mux *http.ServeMux) {
 	s.handle(mux, "PUT /v1/workspaces/{id}/claim", s.claim, grant.ScopeOperator)
 	s.handle(mux, "POST /v1/workspaces/{id}/flush", s.flush, grant.ScopeOperator)
 	s.handle(mux, "DELETE /v1/workspaces/{id}", s.deleteWorkspace, grant.ScopeOperator)
+	s.registerRefPolicy(mux)
+	s.registerEvents(mux)
 }
 
 func repoView(r meta.Repo) api.Repo {
@@ -41,6 +43,7 @@ func (s *Server) createRepo(w http.ResponseWriter, r *http.Request, _ call) erro
 	if err := s.index.CreateRepo(r.Context(), meta.Repo{Path: path, Name: name, Owner: req.Owner}, repos.Text(path), names[1].String()); err != nil {
 		return err
 	}
+	s.notify()
 	s.writeJSON(w, http.StatusCreated, api.CreateRepoResponse{Path: path})
 	return nil
 }

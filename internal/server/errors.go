@@ -40,6 +40,10 @@ func (s *Server) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 		s.writeError(w, api.CodeRepoForbidden, "the repository is not readable", nil)
 	case errors.Is(err, errNotWritable):
 		s.writeError(w, api.CodeRepoForbidden, "the grant does not allow writes", nil)
+	case errors.Is(err, errProtected):
+		s.writeError(w, api.CodeRefProtected, "the ref is protected", nil)
+	case errors.Is(err, meta.ErrEventsPruned):
+		s.writeError(w, api.CodeEventsPruned, "retention removed events after that sequence", nil)
 	case errors.Is(err, errUnauthorized):
 		s.writeError(w, api.CodeUnauthorized, "grant not accepted", nil)
 	case errors.As(err, &badRequest):
@@ -65,6 +69,7 @@ var (
 	errBody         = errors.New("server: invalid body")
 	errUnauthorized = errors.New("server: grant not accepted")
 	errNotWritable  = errors.New("server: grant cannot write")
+	errProtected    = errors.New("server: ref protected")
 )
 
 // logSafe names an error by its type chain and its innermost cause, which a log line may hold. The message of a

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/majorcontext/motte/grant"
 )
@@ -20,6 +21,7 @@ type config struct {
 	bucket      string
 	keys        []grant.Key
 	otlp        bool
+	retention   time.Duration
 }
 
 // loadConfig reads the configuration from the environment.
@@ -31,6 +33,7 @@ type config struct {
 //	MOTTE_BUCKET_KIND   gcs or fs
 //	MOTTE_BUCKET        bucket name for gcs, directory for fs
 //	MOTTE_TRUSTED_KEYS  JSON list of {"kid","key","scopes"}; key is the base64 Ed25519 public key
+//	MOTTE_EVENT_RETENTION  how long a ref event is kept, a Go duration, default 336h
 //	OTEL_EXPORTER_OTLP_ENDPOINT  optional; enables trace export
 func loadConfig(getenv func(string) string) (config, error) {
 	c := config{
@@ -60,6 +63,13 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 	if c.bucketKind != "gcs" && c.bucketKind != "fs" {
 		return config{}, errors.New("MOTTE_BUCKET_KIND must be gcs or fs")
+	}
+	if text := getenv("MOTTE_EVENT_RETENTION"); text != "" {
+		d, err := time.ParseDuration(text)
+		if err != nil || d <= 0 {
+			return config{}, errors.New("MOTTE_EVENT_RETENTION must be a positive duration")
+		}
+		c.retention = d
 	}
 	keys, err := parseKeys(getenv("MOTTE_TRUSTED_KEYS"))
 	if err != nil {

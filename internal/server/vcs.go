@@ -27,13 +27,15 @@ const (
 
 func (s *Server) registerStorePlane(mux *http.ServeMux) {
 	reader := []grant.Scope{grant.ScopeNode, grant.ScopeRead}
+	refs := []grant.Scope{grant.ScopeNode, grant.ScopeRead, grant.ScopeMerge}
+	refWriter := []grant.Scope{grant.ScopeNode, grant.ScopeMerge}
 	node := []grant.Scope{grant.ScopeNode}
 	s.handle(mux, "GET /v1/vcs/commits/{sha}", s.getCommit, reader...)
 	s.handle(mux, "GET /v1/vcs/trees/{sha}", s.getTrees, reader...)
 	s.handle(mux, "GET /v1/vcs/objects/{sha}", s.getObject, reader...)
 	s.handle(mux, "POST /v1/vcs/blobs/batch", s.getBlobs, reader...)
-	s.handle(mux, "GET /v1/vcs/refs", s.listRefs, reader...)
-	s.handle(mux, "GET /v1/vcs/refs/{name...}", s.getRef, reader...)
+	s.handle(mux, "GET /v1/vcs/refs", s.listRefs, refs...)
+	s.handle(mux, "GET /v1/vcs/refs/{name...}", s.getRef, refs...)
 	s.handle(mux, "POST /v1/vcs/objects/has", s.hasObjects, grant.ScopeNode, grant.ScopeRead, grant.ScopeImport)
 	s.handle(mux, "POST /v1/vcs/objects", s.putObjects, node...)
 	s.handle(mux, "PUT /v1/vcs/ops/{kind}/{id}", s.putOp, node...)
@@ -41,8 +43,8 @@ func (s *Server) registerStorePlane(mux *http.ServeMux) {
 	s.handle(mux, "GET /v1/vcs/op-heads", s.getOpHeads, node...)
 	s.handle(mux, "PUT /v1/vcs/op-heads", s.swapOpHeads, node...)
 	s.handle(mux, "PUT /v1/vcs/workspace", s.setWorkspace, node...)
-	s.handle(mux, "PUT /v1/vcs/refs/{name...}", s.swapRef, node...)
-	s.handle(mux, "DELETE /v1/vcs/refs/{name...}", s.deleteRef, node...)
+	s.handle(mux, "PUT /v1/vcs/refs/{name...}", s.swapRef, refWriter...)
+	s.handle(mux, "DELETE /v1/vcs/refs/{name...}", s.deleteRef, refWriter...)
 	s.handle(mux, "PUT /v1/vcs/packs/{pack_id}", s.importPack, grant.ScopeImport)
 }
 
@@ -118,11 +120,11 @@ func (s *Server) getCommit(w http.ResponseWriter, r *http.Request, c call) error
 }
 
 func (s *Server) getTrees(w http.ResponseWriter, r *http.Request, c call) error {
-	release, err := s.reserve(r, reserveTrees)
+	release, err := s.reserve(r, treeReserve)
 	if err != nil {
 		return err
 	}
-	held := int64(reserveTrees)
+	held := treeReserve
 	defer func() { release() }()
 	// grow swaps the reservation for a larger one. It never holds the old one while it waits for the new one.
 	grow := func(treeBytes int64) error {
@@ -278,6 +280,9 @@ func decodeObjects(body []byte) ([]gitpack.Object, error) {
 			data, err := unb64(o.Data)
 			if err != nil {
 				return nil, err
+			}
+			if len(data) > objectLimit {
+				return nil, store.ErrTooLarge
 			}
 			objs = append(objs, gitpack.Object{Type: gitpack.ParseType(o.Type), Data: data})
 		}
@@ -472,7 +477,7 @@ func (s *Server) swapRef(w http.ResponseWriter, r *http.Request, c call) error {
 	if req.Expect < 0 || !lowerHex(req.Commit, 40, 40) {
 		return store.ErrInvalid
 	}
-	ref, err := s.index.SwapRef(r.Context(), c.claims.WS, c.claims.Epoch, c.claims.Repo, name, req.Expect, req.Commit)
+	ref, err := s.writeRefAs(r.Context(), c, refWrite{Name: name, Expect: req.Expect, SHA: req.Commit})
 	if err != nil {
 		return err
 	}
@@ -489,7 +494,7 @@ func (s *Server) deleteRef(w http.ResponseWriter, r *http.Request, c call) error
 	if err != nil || expect < 1 {
 		return store.ErrInvalid
 	}
-	if err := s.index.DeleteRef(r.Context(), c.claims.WS, c.claims.Epoch, c.claims.Repo, name, expect); err != nil {
+	if _, err := s.writeRefAs(r.Context(), c, refWrite{Name: name, Expect: expect, Remove: true}); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)

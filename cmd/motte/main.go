@@ -93,7 +93,11 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	srv := server.New(server.Config{Meta: db, Bucket: bucket, Verifier: grant.NewVerifier(cfg.keys...), Logger: log})
+	srv := server.New(server.Config{Meta: db, Bucket: bucket, Verifier: grant.NewVerifier(cfg.keys...), Logger: log, Events: server.EventsConfig{Retention: cfg.retention}})
+	workCtx, stopWork := context.WithCancel(ctx)
+	workers := make(chan struct{})
+	go func() { _ = srv.Run(workCtx); close(workers) }()
+	defer func() { stopWork(); <-workers }()
 	hs := &http.Server{Addr: cfg.listen, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 1)
 	go func() { errc <- hs.ListenAndServe() }()

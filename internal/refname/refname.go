@@ -28,3 +28,20 @@ func Valid(name string) bool {
 	}
 	return true
 }
+
+// ValidPattern reports whether p is a ref name, or a prefix that ends in "*".
+func ValidPattern(p string) bool {
+	prefix, star := strings.CutSuffix(p, "*")
+	if !star {
+		return Valid(p)
+	}
+	return prefix == "" || Valid(prefix+"x")
+}
+
+// Match reports whether name is p, or starts with the prefix of a pattern that ends in "*".
+func Match(p, name string) bool {
+	if prefix, star := strings.CutSuffix(p, "*"); star {
+		return strings.HasPrefix(name, prefix)
+	}
+	return p == name
+}

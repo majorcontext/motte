@@ -9,9 +9,5 @@ leaf 10
 package default 10
 
 
-# The limit tests move a 16 MiB object, a 16 MiB + 1 body and a 5 MiB tree through
-# JSON under the race detector, at the real limits of the service.
-package internal/server 30
-test internal/server TestLargestObjectIsStored 15
-test internal/server TestLargeTreeIsRead 15
-test internal/server TestBodyOverTheLimitAnswersTooLarge 15
+# The git tests run the real git binary, and the contract tests start a PostgreSQL schema each.
+package internal/server 20
