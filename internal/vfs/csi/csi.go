@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -47,19 +48,24 @@ type NodePlugin struct {
 	Grant  func(volattr.Publication) (string, error)
 	UID    uint32
 	GID    uint32
-	HTTP   *http.Client
-	Clock  clock.Clock
+	// AllowedNamespaces lists the namespaces whose pods may publish a volume. The plugin refuses every other pod.
+	AllowedNamespaces []string
+	HTTP              *http.Client
+	Clock             clock.Clock
 	// Logger receives the vfs.stats, vfs.health and error records. SlowOp and StatsEvery tune them; zero is the default.
 	Logger     *slog.Logger
 	SlowOp     time.Duration
 	StatsEvery time.Duration
 
-	mnt  mounter
-	mu   sync.Mutex
-	vols map[string]*volume
+	mnt mounter
+	// mu guards vols and ctlOwners. It is never held across a mount, a scan of mountinfo or a delete.
+	mu        sync.Mutex
+	vols      map[string]*volume
+	ctlOwners map[string]string
 }
 
 type volume struct {
+	// ready is false while one publish or unpublish of the volume runs; a second call then answers Aborted.
 	ready bool
 	tel   telemetry.Telemetry
 	// lay is the lower layer of a workspace volume; a control socket volume has none.
@@ -103,16 +109,19 @@ func (p *NodePlugin) SeedCacheSize(dir string) {
 
 func (p *NodePlugin) volDir(id string) string { return filepath.Join(p.StateDir, "vol", id) }
 
-const podUIDFile = "pod-uid"
+const ctlDirFile = "ctl-dir"
 
-// ctlDir is the control socket directory of a pod. The kubelet names the pod, so a pod cannot name the
-// directory of another one.
-func (p *NodePlugin) ctlDir(attrs map[string]string) (string, error) {
+// ctlDir is the control socket directory of one workspace of a pod. The kubelet names the pod, so a pod cannot name
+// the directory of another one, and a pod with two workspace volumes has two directories.
+func (p *NodePlugin) ctlDir(attrs map[string]string, workspace string) (string, error) {
 	uid := attrs[volattr.PodUIDAttr]
 	if uid == "" || strings.Trim(uid, "0123456789abcdefABCDEF-") != "" {
 		return "", status.Errorf(codes.InvalidArgument, "the publish request names no pod UID (%s); the CSIDriver needs podInfoOnMount", volattr.PodUIDAttr)
 	}
-	dir := filepath.Join(p.StateDir, "ctl", uid)
+	if !volattr.ValidWorkspace(workspace) {
+		return "", status.Error(codes.InvalidArgument, "the volume attributes name no valid workspace")
+	}
+	dir := filepath.Join(p.StateDir, "ctl", uid, workspace)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", status.Error(codes.Internal, err.Error())
 	}
@@ -125,6 +134,33 @@ func (p *NodePlugin) ctlDir(attrs map[string]string) (string, error) {
 	return dir, nil
 }
 
+// checkNamespace refuses a pod whose namespace the plugin does not list. The attributes of a volume come from the
+// pod spec, so the namespace that the kubelet reports is the only part of the request that the pod cannot choose.
+func (p *NodePlugin) checkNamespace(attrs map[string]string) error {
+	ns := attrs[volattr.PodNamespaceAttr]
+	if ns == "" {
+		return status.Errorf(codes.InvalidArgument, "the publish request names no pod namespace (%s); the CSIDriver needs podInfoOnMount", volattr.PodNamespaceAttr)
+	}
+	if !slices.Contains(p.AllowedNamespaces, ns) {
+		return status.Errorf(codes.PermissionDenied, "pods of the namespace %q may not publish a workspace volume", ns)
+	}
+	return nil
+}
+
+// removeCtlDir deletes the control directory that the volume directory names, and its pod directory when that is empty.
+func (p *NodePlugin) removeCtlDir(volDir string) error {
+	rel, err := os.ReadFile(filepath.Join(volDir, ctlDirFile))
+	if err != nil || !filepath.IsLocal(string(rel)) {
+		return nil
+	}
+	dir := filepath.Join(p.StateDir, "ctl", string(rel))
+	if err := os.RemoveAll(dir); err != nil {
+		return status.Error(codes.Internal, err.Error())
+	}
+	_ = os.Remove(filepath.Dir(dir))
+	return nil
+}
+
 // Serve answers CSI calls on the unix socket until ctx ends.
 func (p *NodePlugin) Serve(ctx context.Context, socket string) error {
 	if err := os.Remove(socket); err != nil && !os.IsNotExist(err) {
@@ -134,7 +170,7 @@ func (p *NodePlugin) Serve(ctx context.Context, socket string) error {
 	if err != nil {
 		return err
 	}
-	p.vols = map[string]*volume{}
+	p.vols, p.ctlOwners = map[string]*volume{}, map[string]string{}
 	s := grpc.NewServer()
 	csi.RegisterIdentityServer(s, p)
 	csi.RegisterNodeServer(s, p)
@@ -163,17 +199,20 @@ func (p *NodePlugin) NodeGetInfo(context.Context, *csi.NodeGetInfoRequest) (*csi
 }
 
 // NodePublishVolume mounts the workspace of the workspace named by the volume attributes at the target path, or binds
-// the control socket directory of the pod for a control socket volume.
+// the control socket directory of the workspace for a control socket volume.
 func (p *NodePlugin) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
+	if err := p.checkNamespace(req.VolumeContext); err != nil {
+		return nil, err
+	}
+	if req.VolumeId == "" || req.TargetPath == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume id and target path are required")
+	}
 	if volattr.IsCtl(req.VolumeContext) {
 		return p.publishCtl(req)
 	}
 	pub, err := volattr.ParsePublication(req.VolumeContext)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
-	if req.VolumeId == "" || req.TargetPath == "" {
-		return nil, status.Error(codes.InvalidArgument, "volume id and target path are required")
 	}
 	tel := p.telemetry(req.VolumeId, pub)
 	ctx, span := tel.Start(ctx, "NodePublishVolume", attribute.String("component", "csi"))
@@ -184,88 +223,145 @@ func (p *NodePlugin) NodePublishVolume(ctx context.Context, req *csi.NodePublish
 		}
 		telemetry.Finish(span, perr)
 	}()
-	p.mu.Lock()
-	if cur, ok := p.vols[req.VolumeId]; ok {
-		p.mu.Unlock()
-		if !cur.ready {
-			return nil, status.Error(codes.Aborted, "the volume is still being published")
+	done, err := p.reservePublish(req.VolumeId)
+	if err != nil || done {
+		perr = err
+		if err != nil {
+			return nil, err
 		}
 		return &csi.NodePublishVolumeResponse{}, nil
 	}
-	p.vols[req.VolumeId] = &volume{}
-	p.mu.Unlock()
 	vol, err := p.publishOverlay(ctx, req, pub, tel)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if err != nil {
 		perr = err
 		delete(p.vols, req.VolumeId)
+		p.dropCtlOwner(req.VolumeId)
 		return nil, err
 	}
 	p.vols[req.VolumeId] = vol
 	return &csi.NodePublishVolumeResponse{}, nil
 }
 
-// publishCtl binds the control socket directory of the pod at the target path. The workspace volume of the pod
-// creates the socket in it, in whichever order the kubelet publishes the two.
-func (p *NodePlugin) publishCtl(req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
-	if req.VolumeId == "" || req.TargetPath == "" {
-		return nil, status.Error(codes.InvalidArgument, "volume id and target path are required")
+// reservePublish marks the volume as being published. It reports done when the volume is already served, and fails
+// with Aborted when another call works on it.
+func (p *NodePlugin) reservePublish(id string) (done bool, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if cur, ok := p.vols[id]; ok {
+		if !cur.ready {
+			return false, status.Error(codes.Aborted, "the volume is still being published")
+		}
+		return true, nil
 	}
-	dir, err := p.ctlDir(req.VolumeContext)
+	p.vols[id] = &volume{}
+	return false, nil
+}
+
+// claimCtlDir records that the volume serves its workspace socket in dir. A second volume of the same workspace in
+// the same pod would rebind the socket of the first, so it fails.
+func (p *NodePlugin) claimCtlDir(dir, id string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if owner, ok := p.ctlOwners[dir]; ok && owner != id {
+		return status.Errorf(codes.FailedPrecondition, "the volume %s already serves the control socket in %s", owner, dir)
+	}
+	if p.ctlOwners == nil {
+		p.ctlOwners = map[string]string{}
+	}
+	p.ctlOwners[dir] = id
+	return nil
+}
+
+func (p *NodePlugin) dropCtlOwner(id string) {
+	for dir, owner := range p.ctlOwners {
+		if owner == id {
+			delete(p.ctlOwners, dir)
+		}
+	}
+}
+
+// publishCtl binds the control socket directory of the workspace at the target path. The workspace volume creates the
+// socket in it, in whichever order the kubelet publishes the two.
+func (p *NodePlugin) publishCtl(req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
+	dir, err := p.ctlDir(req.VolumeContext, req.VolumeContext["workspace"])
 	if err != nil {
 		return nil, err
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if _, ok := p.vols[req.VolumeId]; ok {
+	done, err := p.reservePublish(req.VolumeId)
+	if err != nil {
+		return nil, err
+	}
+	if done {
 		return &csi.NodePublishVolumeResponse{}, nil
 	}
+	fail := func(err error) (*csi.NodePublishVolumeResponse, error) {
+		p.mu.Lock()
+		delete(p.vols, req.VolumeId)
+		p.mu.Unlock()
+		return nil, err
+	}
 	if err := os.MkdirAll(req.TargetPath, 0o700); err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		return fail(status.Error(codes.Internal, err.Error()))
 	}
 	if err := syscall.Mount(dir, req.TargetPath, "", syscall.MS_BIND, ""); err != nil {
-		return nil, status.Errorf(codes.Internal, "bind %s: %v", dir, err)
+		return fail(status.Errorf(codes.Internal, "bind %s: %v", dir, err))
 	}
+	p.mu.Lock()
 	p.vols[req.VolumeId] = &volume{ready: true, tel: telemetry.Telemetry{Logger: p.Logger, Corr: telemetry.Correlation{MountID: req.VolumeId, Mode: "ctl", Node: p.NodeID}}}
+	p.mu.Unlock()
 	return &csi.NodePublishVolumeResponse{}, nil
 }
 
 // NodeUnpublishVolume unmounts the workspace and deletes its volume directory. A volume this process does not know,
-// for example after a restart, still loses its mount and its volume directory.
+// for example after a restart, still loses its mount and its volume directory. It holds no lock of the plugin while it
+// unmounts, scans mountinfo or deletes, so a slow volume blocks only itself.
 func (p *NodePlugin) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	tel := telemetry.Telemetry{Logger: p.Logger, Corr: telemetry.Correlation{MountID: req.VolumeId, Mode: "mount", Node: p.NodeID}}
-	if cur, ok := p.vols[req.VolumeId]; ok {
-		tel = cur.tel
+	p.mu.Lock()
+	cur, known := p.vols[req.VolumeId]
+	if known && !cur.ready {
+		p.mu.Unlock()
+		return nil, status.Error(codes.Aborted, "the volume is still being published")
 	}
+	if known {
+		tel = cur.tel
+		cur.ready = false
+	} else {
+		p.vols[req.VolumeId] = &volume{}
+	}
+	p.mu.Unlock()
 	ctx, span := tel.Start(ctx, "NodeUnpublishVolume", attribute.String("component", "csi"))
-	resp, err := p.unpublish(ctx, req, tel)
+	resp, err := p.unpublish(ctx, req, cur, tel)
 	if err != nil {
 		tel.LogError(ctx, "NodeUnpublishVolume failed", err)
 	}
 	telemetry.Finish(span, err)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	switch {
+	case err == nil:
+		delete(p.vols, req.VolumeId)
+		p.dropCtlOwner(req.VolumeId)
+	case known:
+		cur.ready = true
+	default:
+		delete(p.vols, req.VolumeId)
+	}
 	return resp, err
 }
 
-func (p *NodePlugin) unpublish(ctx context.Context, req *csi.NodeUnpublishVolumeRequest, tel telemetry.Telemetry) (*csi.NodeUnpublishVolumeResponse, error) {
-	vol, ok := p.vols[req.VolumeId]
-	if ok && !vol.ready {
-		return nil, status.Error(codes.Aborted, "the volume is still being published")
-	}
-	if ok && vol.lay != nil || !ok && p.isOverlayVolume(req.VolumeId) {
+func (p *NodePlugin) unpublish(ctx context.Context, req *csi.NodeUnpublishVolumeRequest, vol *volume, tel telemetry.Telemetry) (*csi.NodeUnpublishVolumeResponse, error) {
+	if vol != nil && vol.lay != nil || vol == nil && p.isOverlayVolume(req.VolumeId) {
 		return p.unpublishOverlay(ctx, req, vol, tel)
 	}
 	// A control socket volume, or the state of a volume that this process does not serve.
 	if err := syscall.Unmount(req.TargetPath, syscall.MNT_DETACH); err != nil && !errors.Is(err, syscall.EINVAL) && !errors.Is(err, syscall.ENOENT) {
 		return nil, status.Errorf(codes.Internal, "unmount: %v", err)
 	}
-	delete(p.vols, req.VolumeId)
-	if uid, err := os.ReadFile(filepath.Join(p.volDir(req.VolumeId), podUIDFile)); err == nil {
-		if err := os.RemoveAll(filepath.Join(p.StateDir, "ctl", string(uid))); err != nil {
-			return nil, status.Error(codes.Internal, err.Error())
-		}
+	if err := p.removeCtlDir(p.volDir(req.VolumeId)); err != nil {
+		return nil, err
 	}
 	if err := os.RemoveAll(p.volDir(req.VolumeId)); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())

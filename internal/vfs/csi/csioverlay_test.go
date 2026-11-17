@@ -13,8 +13,10 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
@@ -31,6 +33,8 @@ const (
 
 // fakeMnt records every privileged step of the plugin and keeps a mountinfo that follows the mounts it made.
 type fakeMnt struct {
+	mu         sync.Mutex
+	gate       func(path string)
 	t          *testing.T
 	state, tgt string
 	calls      []string
@@ -41,6 +45,8 @@ type fakeMnt struct {
 }
 
 func (f *fakeMnt) rec(format string, a ...any) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	s := strings.NewReplacer(f.tgt, "T", f.state, "S").Replace(fmt.Sprintf(format, a...))
 	f.calls = append(f.calls, s)
 	if err, ok := f.fail[s]; ok {
@@ -51,7 +57,10 @@ func (f *fakeMnt) rec(format string, a ...any) error {
 
 func (f *fakeMnt) probe(string) error { return f.rec("probe") }
 func (f *fakeMnt) mounts() ([]mountEntry, error) {
-	return slices.Clone(f.ents), f.rec("mounts")
+	err := f.rec("mounts")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.ents), err
 }
 func (f *fakeMnt) openLower(_ context.Context, cfg lower.Config) (lowerLayer, error) {
 	f.cfg = cfg
@@ -61,15 +70,22 @@ func (f *fakeMnt) mountOverlay(target, opts string) error {
 	b, _ := os.ReadFile(filepath.Join(filepath.Dir(f.cfg.UpperDir), "base"))
 	f.baseAtMnt = string(b)
 	err := f.rec("mountOverlay %s %s", target, opts)
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err == nil {
 		f.ents = append(f.ents, mountEntry{Mountpoint: target, FSType: "overlay", Opts: map[string]string{"upperdir": f.cfg.UpperDir}})
 	}
 	return err
 }
 func (f *fakeMnt) unmount(path string, flags int) error {
+	if f.gate != nil {
+		f.gate(path)
+	}
 	if err := f.rec("unmount %s %d", path, flags); err != nil {
 		return err
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	n := len(f.ents)
 	f.ents = slices.DeleteFunc(f.ents, func(e mountEntry) bool { return e.Mountpoint == path })
 	if len(f.ents) == n {
@@ -82,6 +98,8 @@ type fakeLower struct{ *fakeMnt }
 
 func (l fakeLower) mount(_ context.Context, dir string) error {
 	err := l.rec("lower.mount")
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if err == nil {
 		l.ents = append(l.ents, mountEntry{Mountpoint: dir, FSType: "fuse.motte-vfs"})
 	}
@@ -97,6 +115,8 @@ func (l fakeLower) unmount() error {
 	if err := l.rec("lower.unmount"); err != nil {
 		return err
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.ents = slices.DeleteFunc(l.ents, func(e mountEntry) bool { return e.FSType == "fuse.motte-vfs" })
 	return nil
 }
@@ -110,16 +130,23 @@ func newOverlayPlugin(t *testing.T) (*NodePlugin, *fakeMnt) {
 	t.Cleanup(func() { _ = os.RemoveAll(state) })
 	f := &fakeMnt{t: t, state: state, tgt: filepath.Join(state, "target"), fail: map[string]error{}}
 	p := &NodePlugin{StateDir: state, UID: uint32(os.Getuid()), GID: uint32(os.Getgid()), mnt: f,
-		Grant: func(volattr.Publication) (string, error) { return "", nil }, vols: map[string]*volume{}}
+		Grant: func(volattr.Publication) (string, error) { return "", nil }, vols: map[string]*volume{}, AllowedNamespaces: []string{"ws"}}
 	return p, f
 }
 
 func (f *fakeMnt) volDir() string { return filepath.Join(f.state, "vol", "v1") }
 
 func publish(p *NodePlugin, f *fakeMnt, commit string) error {
-	attrs := volattr.Publication{Workspace: "b", Epoch: 1, Repo: "gh:o/r", Commit: commit}.Attributes()
+	return publishVol(p, "v1", "b", f.tgt, commit, "ws")
+}
+
+func publishVol(p *NodePlugin, id, workspace, target, commit, namespace string) error {
+	attrs := volattr.Publication{Workspace: workspace, Epoch: 1, Repo: "gh:o/r", Commit: commit}.Attributes()
 	attrs[volattr.PodUIDAttr] = "abc-123"
-	_, err := p.NodePublishVolume(context.Background(), &csi.NodePublishVolumeRequest{VolumeId: "v1", TargetPath: f.tgt, VolumeContext: attrs})
+	if namespace != "" {
+		attrs[volattr.PodNamespaceAttr] = namespace
+	}
+	_, err := p.NodePublishVolume(context.Background(), &csi.NodePublishVolumeRequest{VolumeId: id, TargetPath: target, VolumeContext: attrs})
 	return err
 }
 
@@ -163,7 +190,7 @@ func TestOverlayPublishAndUnpublishOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantCalls(t, f, "unmount T 0", "mounts", "lower.unmount", "lower.stop", "lower.close")
-	if exists(f.volDir()) || exists(filepath.Join(f.state, "ctl", "abc-123")) {
+	if exists(f.volDir()) || exists(filepath.Join(f.state, "ctl", "abc-123", "b")) {
 		t.Fatal("unpublish left the volume or the control directory")
 	}
 }
@@ -198,7 +225,7 @@ func TestOverlayPublishFailureUndoesInReverse(t *testing.T) {
 			if !reflect.DeepEqual(undo, c.undo) {
 				t.Fatalf("undo = %q, want %q", undo, c.undo)
 			}
-			if kept := exists(f.volDir()); kept != c.edits || !exists(filepath.Join(f.state, "ctl", "abc-123")) {
+			if kept := exists(f.volDir()); kept != c.edits || !exists(filepath.Join(f.state, "ctl", "abc-123", "b")) {
 				t.Fatalf("volume kept = %v, want %v, or the control directory went", kept, c.edits)
 			}
 		})
@@ -448,4 +475,75 @@ func TestHostMountsFailsClosed(t *testing.T) {
 	if _, err = hostMounts(proc); err == nil {
 		t.Fatal("an unreadable mountinfo must fail the scan")
 	}
+}
+
+// TestPublishRefusesAPodOutsideTheAllowedNamespaces: the volume attributes come from the pod spec, so the namespace
+// of the pod decides who may name a workspace. A pod of another namespace, or a request without pod info, mounts
+// nothing, and an empty list allows no pod.
+func TestPublishRefusesAPodOutsideTheAllowedNamespaces(t *testing.T) {
+	p, f := newOverlayPlugin(t)
+	wantCode(t, publishVol(p, "v1", "b", f.tgt, testCommit, "other"), codes.PermissionDenied)
+	wantCode(t, publishVol(p, "v1", "b", f.tgt, testCommit, ""), codes.InvalidArgument)
+	ctl := volattr.CtlAttributes("b")
+	ctl[volattr.PodUIDAttr], ctl[volattr.PodNamespaceAttr] = "abc-123", "other"
+	_, err := p.NodePublishVolume(context.Background(), &csi.NodePublishVolumeRequest{VolumeId: "c1", TargetPath: f.tgt, VolumeContext: ctl})
+	wantCode(t, err, codes.PermissionDenied)
+	p.AllowedNamespaces = nil
+	wantCode(t, publishVol(p, "v1", "b", f.tgt, testCommit, "ws"), codes.PermissionDenied)
+	wantCalls(t, f)
+	p.AllowedNamespaces = []string{"ws"}
+	must(t, publishVol(p, "v1", "b", f.tgt, testCommit, "ws"))
+}
+
+// TestWorkspaceVolumesOfOnePodKeepSeparateControlDirectories: two workspace volumes in one pod must not share a
+// socket, and unpublishing one must not delete the socket of the other.
+func TestWorkspaceVolumesOfOnePodKeepSeparateControlDirectories(t *testing.T) {
+	p, f := newOverlayPlugin(t)
+	t1, t2 := filepath.Join(f.state, "t1"), filepath.Join(f.state, "t2")
+	must(t, publishVol(p, "v1", "b", t1, testCommit, "ws"))
+	must(t, publishVol(p, "v2", "c", t2, testCommit, "ws"))
+	wantCode(t, publishVol(p, "v3", "b", filepath.Join(f.state, "t3"), testCommit, "ws"), codes.FailedPrecondition)
+	ctlB, ctlC := filepath.Join(f.state, "ctl", "abc-123", "b"), filepath.Join(f.state, "ctl", "abc-123", "c")
+	if !exists(ctlB) || !exists(ctlC) {
+		t.Fatal("a workspace volume has no control directory of its own")
+	}
+	_, err := p.NodeUnpublishVolume(context.Background(), &csi.NodeUnpublishVolumeRequest{VolumeId: "v1", TargetPath: t1})
+	must(t, err)
+	if exists(ctlB) || !exists(ctlC) {
+		t.Fatalf("after the unpublish of v1: control directory of b exists = %v, of c = %v", exists(ctlB), exists(ctlC))
+	}
+}
+
+// TestUnpublishOfOneVolumeDoesNotBlockAnother: an unmount that hangs holds only its own volume.
+func TestUnpublishOfOneVolumeDoesNotBlockAnother(t *testing.T) {
+	p, f := newOverlayPlugin(t)
+	t1, t2 := filepath.Join(f.state, "t1"), filepath.Join(f.state, "t2")
+	must(t, publishVol(p, "v1", "b", t1, testCommit, "ws"))
+	must(t, publishVol(p, "v2", "c", t2, testCommit, "ws"))
+	entered, release := make(chan struct{}), make(chan struct{})
+	f.gate = func(path string) {
+		if path == t2 {
+			close(entered)
+			<-release
+		}
+	}
+	slow := make(chan error, 1)
+	go func() {
+		_, err := p.NodeUnpublishVolume(context.Background(), &csi.NodeUnpublishVolumeRequest{VolumeId: "v2", TargetPath: t2})
+		slow <- err
+	}()
+	<-entered
+	fast := make(chan error, 1)
+	go func() {
+		_, err := p.NodeUnpublishVolume(context.Background(), &csi.NodeUnpublishVolumeRequest{VolumeId: "v1", TargetPath: t1})
+		fast <- err
+	}()
+	select {
+	case err := <-fast:
+		must(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the unpublish of v1 waits on the unmount of v2")
+	}
+	close(release)
+	must(t, <-slow)
 }

@@ -7,6 +7,7 @@
 {{- $ref = printf "%s:%s" $image (required "image.digest or image.tag is required" .Values.image.tag) -}}
 {{- end -}}
 {{- $api := required "apiURL is required" .Values.apiURL -}}
+{{- if not .Values.allowedNamespaces }}{{ fail "allowedNamespaces is required: list the namespaces whose pods may publish a workspace volume" }}{{ end -}}
 {{- $plugins := printf "%s/plugins/%s" .Values.kubeletDir .Values.driverName -}}
 apiVersion: storage.k8s.io/v1
 kind: CSIDriver
@@ -14,7 +15,8 @@ metadata:
   name: {{ .Values.driverName }}
 spec:
   attachRequired: false
-  # The plugin keys the control socket directory of a workspace by the pod UID that this adds to a publish request.
+  # The plugin keys the control socket directory of a workspace by the pod UID, and checks the pod namespace, that this
+  # adds to a publish request.
   podInfoOnMount: true
   volumeLifecycleModes: [Ephemeral]
   fsGroupPolicy: None
@@ -65,6 +67,7 @@ spec:
             - --node-id=$(NODE_NAME)
             - --state={{ .Values.stateDir }}
             - --api={{ $api }}
+            - --allowed-namespaces={{ join "," .Values.allowedNamespaces }}
             - --grant-key-file=/etc/motte-vfsd/grant-key
           env:
             - name: NODE_NAME

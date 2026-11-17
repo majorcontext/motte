@@ -220,7 +220,7 @@ The verifier holds only public keys. Each key has a `kid` and a set of allowed s
 The caller owns the private keys. Two signers exist:
 
 - The control-plane key may sign all scopes.
-- The node key lives on the node daemon and may sign only `node`. A compromised node cannot mint `import` or `operator` grants. It can mint `node` grants, bounded by the repository and epoch of the workspace row.
+- The node key lives on the node daemon and may sign only `node`. A compromised node cannot mint `import` or `operator` grants. The plugin mints a `node` grant only for a pod of an allowed namespace (see Node plugin). It can mint `node` grants, bounded by the repository and epoch of the workspace row.
 
 ### Rotation
 
@@ -299,7 +299,7 @@ The packages under `internal/vfs` are the node daemon of the virtual workspace. 
 | Command | Meaning |
 |---|---|
 | `motte-vfsd mount` | Standalone, for a host that has `fusermount`; `csi` mounts with `mount(2)`. Serves the tree of one commit as the read-only lower layer of a kernel overlay. Needs `-api`, `-commit`, `-mnt`, `-upper` and `-ctl-sock`, and `MOTTE_VFS_GRANT` in the environment. It does not refresh the grant. |
-| `motte-vfsd csi` | The CSI node plugin. Needs `-api` and `-grant-key-file`. Flags `-driver` (default `vfs.motte.dev`), `-endpoint`, `-node-id`, `-state`, `-uid` and `-gid`. |
+| `motte-vfsd csi` | The CSI node plugin. Needs `-api`, `-grant-key-file` and `-allowed-namespaces` (comma-separated, no wildcard). Flags `-driver` (default `vfs.motte.dev`), `-endpoint`, `-node-id`, `-state`, `-uid` and `-gid`. |
 | `motte-vfsd materialize` | Writes the checkout of a commit to `-dest`. A marker file records a finished checkout, and a later run changes nothing, whatever commit it names. |
 | `motte-vfsd import` | Fetches a repository with `git`, packs it and uploads it with an `import` grant (`PUT /v1/vcs/packs/{pack_id}`). `-depth 0` imports the whole history as packs of about 48 MiB and skips the ranges that the store holds. |
 
@@ -315,7 +315,9 @@ The control socket lies in a directory that no other workspace can reach. The da
 
 ### Node plugin
 
-The plugin implements the identity and node services of the CSI spec on a unix socket. The chart runs it as a privileged DaemonSet with `hostPID`, and its kubelet pods directory propagates to the host. `csi` refuses to start unless it shares the PID namespace of the node and has another mount namespace. The `CSIDriver` sets `attachRequired: false`, `podInfoOnMount: true` and the lifecycle mode `Ephemeral`. A restart of the plugin ends the mounts that it serves, so the DaemonSet updates with `OnDelete`.
+The plugin implements the identity and node services of the CSI spec on a unix socket.
+
+Trust boundary: the volume attributes of a workspace volume come from the pod spec, so a pod names its own workspace, epoch and repository. The plugin signs a `node` grant for whatever those name. It therefore serves only the pods of the namespaces in `-allowed-namespaces`, which the kubelet reports as `csi.storage.k8s.io/pod.namespace`. `NodePublishVolume` refuses a request whose pod namespace is missing (`InvalidArgument`) or not listed (`PermissionDenied`), for a workspace volume and a control socket volume alike, and an empty list refuses every pod. The control plane that creates the pods and the namespaces in the list are trusted to name the right workspace; the plugin does not check a claim against the store. The chart runs it as a privileged DaemonSet with `hostPID`, and its kubelet pods directory propagates to the host. `csi` refuses to start unless it shares the PID namespace of the node and has another mount namespace. The `CSIDriver` sets `attachRequired: false`, `podInfoOnMount: true` and the lifecycle mode `Ephemeral`. A restart of the plugin ends the mounts that it serves, so the DaemonSet updates with `OnDelete`.
 
 `NodePublishVolume` of a workspace volume runs these steps in order:
 
@@ -325,13 +327,13 @@ The plugin implements the identity and node services of the CSI spec on a unix s
 4. Discard `upper` when it has entries and `<vol>/base` is missing or names another commit. Recreate `work`, create `upper`, and write `<vol>/base` (write `base.new`, `fsync`, rename, `fsync` of `<vol>`).
 5. Open the VFS, bind the control socket, mount the lower at `<vol>/lower`, serve the socket, and mount overlayfs at the target with `lowerdir=<vol>/lower,upperdir=<vol>/upper,workdir=<vol>/work,redirect_dir=on,metacopy=on,index=off,xino=off,nfs_export=off`.
 
-A failure in step 5 undoes the earlier steps in reverse order. A publish for a volume that the plugin serves returns OK and changes nothing. The control socket of a pod lies in `ctl/<pod UID>` of the state directory, mode 0700, owned by the uid and gid of the mount. The pod UID comes from the kubelet, so a pod cannot name the directory of another pod, and a publish without it fails. A volume with the attributes `volume=ctl` binds that directory at its target, in either publish order.
+A failure in step 5 undoes the earlier steps in reverse order. A publish for a volume that the plugin serves returns OK and changes nothing. The control socket of a workspace lies in `ctl/<pod UID>/<workspace>` of the state directory, mode 0700, owned by the uid and gid of the mount, so a pod with two workspace volumes has two sockets. The pod UID comes from the kubelet, so a pod cannot name the directory of another pod, and a publish without it fails. A second volume for the same workspace in the same pod fails with `FailedPrecondition`. A volume with the attributes `volume=ctl` and `workspace` binds that directory at its target, in either publish order.
 
-`NodeUnpublishVolume` unmounts the overlay, reads the `mountinfo` again, and fails with `Unavailable` while an overlay still references `<vol>/upper`. Only then it unmounts the lower (lazily only when the plain unmount fails), stops the socket, closes the VFS, and deletes the control directory of the pod and `<vol>`. It never runs `stat` on `<vol>/lower`, because a dead FUSE answers `ENOTCONN`. The directories `upper` and `work` live on the disk of the node with the lifetime of the volume. Only `NodeUnpublishVolume` deletes them.
+`NodeUnpublishVolume` unmounts the overlay, reads the `mountinfo` again, and fails with `Unavailable` while an overlay still references `<vol>/upper`. Only then it unmounts the lower (lazily only when the plain unmount fails), stops the socket and closes its connections, closes the VFS, and deletes the control directory of the workspace (and the pod directory when it is empty) and `<vol>`. The plugin holds no lock across an unmount, a `mountinfo` read or a delete: a call for a volume that another call works on fails with `Aborted`, and no volume waits on another. It never runs `stat` on `<vol>/lower`, because a dead FUSE answers `ENOTCONN`. The directories `upper` and `work` live on the disk of the node with the lifetime of the volume. Only `NodeUnpublishVolume` deletes them.
 
 ### Volume attributes
 
-Package `volume` is the public contract between a caller and the plugin. A workspace volume has the attributes `workspace`, `epoch`, `repo`, `commit` and `runtime`. `runtime` only labels telemetry. `ParsePublication` rejects a missing workspace or repository and a commit that is not a SHA-1. The control socket volume has `volume=ctl`. The workspace sees the socket at `volume.CtlDir/volume.CtlSocket` (`/run/motte-vfs/ctl.sock`), and `MOTTE_VFS_SOCK` names it. The CSI driver name is a flag of `csi` and the chart value `driverName`.
+Package `volume` is the public contract between a caller and the plugin. A workspace volume has the attributes `workspace`, `epoch`, `repo`, `commit` and `runtime`. A workspace is 1 to 64 characters of `A-Za-z0-9_-`, because it names a directory. `runtime` only labels telemetry. `ParsePublication` rejects a missing workspace or repository and a commit that is not a SHA-1. The control socket volume has `volume=ctl` and the `workspace` of the volume whose socket it binds. The workspace sees the socket at `volume.CtlDir/volume.CtlSocket` (`/run/motte-vfs/ctl.sock`), and `MOTTE_VFS_SOCK` names it. The CSI driver name is a flag of `csi` and the chart value `driverName`.
 
 ### Control protocol
 
@@ -397,7 +399,7 @@ A directory that merges a base directory at another path lists every base leaf b
 
 ### Chart and image
 
-`charts/motte-vfsd` installs the `CSIDriver` and the DaemonSet with the plugin container and the kubelet registrar. Values set the image (digest or tag), the store URL `apiURL`, the Secret of the grant key, `driverName`, `kubeletDir`, `stateDir`, `runtimeClassName`, node selector, node affinity expressions, tolerations, resources and extra environment. The release namespace needs the privileged Pod Security level. The chart creates no Secret and no namespace. `images/motte-vfsd/Dockerfile` builds the image for `linux/amd64` and `linux/arm64`. It holds the daemon and `git`. The workflow `image.yml` builds both on a pull request. On a tag `v*` it publishes `ghcr.io/majorcontext/motte-vfsd` with the tag version and with provenance and SBOM attestations.
+`charts/motte-vfsd` installs the `CSIDriver` and the DaemonSet with the plugin container and the kubelet registrar. Values set the image (digest or tag), the store URL `apiURL`, the Secret of the grant key, `allowedNamespaces` (required, no default), `driverName`, `kubeletDir`, `stateDir`, `runtimeClassName`, node selector, node affinity expressions, tolerations, resources and extra environment. The release namespace needs the privileged Pod Security level. The chart creates no Secret and no namespace. `images/motte-vfsd/Dockerfile` builds the image for `linux/amd64` and `linux/arm64`. It holds the daemon and `git`. The workflow `image.yml` builds both on a pull request. On a tag `v*` it publishes `ghcr.io/majorcontext/motte-vfsd` with the tag version and with provenance and SBOM attestations.
 
 ### Tests
 

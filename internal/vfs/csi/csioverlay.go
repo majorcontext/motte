@@ -112,8 +112,11 @@ func (p *NodePlugin) publishOverlay(ctx context.Context, req *csi.NodePublishVol
 	if err != nil {
 		return nil, err
 	}
-	ctlDir, err := p.ctlDir(req.VolumeContext)
+	ctlDir, err := p.ctlDir(req.VolumeContext, pub.Workspace)
 	if err != nil {
+		return nil, err
+	}
+	if err = p.claimCtlDir(ctlDir, req.VolumeId); err != nil {
 		return nil, err
 	}
 	m := p.mountOps()
@@ -139,7 +142,7 @@ func (p *NodePlugin) publishOverlay(ctx context.Context, req *csi.NodePublishVol
 	if err = releaseStale(m, ents, o, req.TargetPath); err != nil {
 		return nil, err
 	}
-	if err = p.prepareVolume(ctx, o, pub.Commit, filepath.Base(ctlDir), tel); err != nil {
+	if err = p.prepareVolume(ctx, o, pub.Commit, ctlDir, tel); err != nil {
 		return nil, err
 	}
 	return p.mountVolume(ctx, req, pub, tel, o, base, ctlDir)
@@ -258,9 +261,13 @@ func unmountLower(m mounter, dir string) error {
 // prepareVolume decides what survives of an earlier upper directory, then writes the base file. A non-empty upper
 // directory whose base file is missing or names another commit is discarded: the control plane holds everything
 // that the workspace reported. The base file is durable before any mount.
-func (p *NodePlugin) prepareVolume(ctx context.Context, o overlayPaths, commit, podUID string, tel telemetry.Telemetry) error {
+func (p *NodePlugin) prepareVolume(ctx context.Context, o overlayPaths, commit, ctlDir string, tel telemetry.Telemetry) error {
 	fail := func(err error) error { return status.Error(codes.Internal, err.Error()) }
-	if err := os.WriteFile(filepath.Join(o.vol, podUIDFile), []byte(podUID), 0o600); err != nil {
+	rel, err := filepath.Rel(filepath.Join(p.StateDir, "ctl"), ctlDir)
+	if err != nil {
+		return fail(err)
+	}
+	if err := os.WriteFile(filepath.Join(o.vol, ctlDirFile), []byte(rel), 0o600); err != nil {
 		return fail(err)
 	}
 	if _, err := os.Lstat(filepath.Join(o.vol, legacyOverlayDir)); err == nil {
@@ -418,14 +425,11 @@ func (p *NodePlugin) unpublishOverlay(ctx context.Context, req *csi.NodeUnpublis
 	} else if err := unmountLower(m, o.lower); err != nil {
 		return nil, err
 	}
-	if uid, err := os.ReadFile(filepath.Join(o.vol, podUIDFile)); err == nil {
-		if err := os.RemoveAll(filepath.Join(p.StateDir, "ctl", string(uid))); err != nil {
-			return nil, status.Error(codes.Internal, err.Error())
-		}
+	if err := p.removeCtlDir(o.vol); err != nil {
+		return nil, err
 	}
 	if err := removeVolume(ctx, o, tel); err != nil {
 		return nil, err
 	}
-	delete(p.vols, req.VolumeId)
 	return &csi.NodeUnpublishVolumeResponse{}, nil
 }

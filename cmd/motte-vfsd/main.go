@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -160,13 +161,20 @@ func runCSI(ctx context.Context, args []string) error {
 	state := fl.String("state", "/var/lib/motte-vfsd", "directory of the blob cache and the overlays")
 	api := fl.String("api", "", "store base URL")
 	keyFile := fl.String("grant-key-file", "", `file with the JSON {"kid","key"} of the key that signs node grants; key is the standard base64 of an Ed25519 private key or its 32-byte seed`)
+	namespaces := fl.String("allowed-namespaces", "", "comma-separated namespaces whose pods may publish a volume; the plugin refuses every other pod")
 	uid := fl.Uint("uid", 1000, "owner of base files")
 	gid := fl.Uint("gid", 1000, "group of base files")
 	if err := fl.Parse(args); err != nil {
 		return err
 	}
-	if *api == "" || *keyFile == "" {
-		return errors.New("-api and -grant-key-file are required")
+	var allowed []string
+	for _, ns := range strings.Split(*namespaces, ",") {
+		if ns = strings.TrimSpace(ns); ns != "" {
+			allowed = append(allowed, ns)
+		}
+	}
+	if *api == "" || *keyFile == "" || len(allowed) == 0 {
+		return errors.New("-api, -grant-key-file and -allowed-namespaces are required")
 	}
 	if err := csi.CheckHostPID(os.Readlink); err != nil {
 		return err
@@ -177,8 +185,8 @@ func runCSI(ctx context.Context, args []string) error {
 	}
 	p := &csi.NodePlugin{
 		DriverName: *driver, NodeID: *node, StateDir: *state, APIURL: *api,
-		Grant: minter.Mint,
-		UID:   uint32(*uid), GID: uint32(*gid), HTTP: &http.Client{Timeout: 2 * time.Minute}, Logger: logger,
+		Grant: minter.Mint, AllowedNamespaces: allowed,
+		UID: uint32(*uid), GID: uint32(*gid), HTTP: &http.Client{Timeout: 2 * time.Minute}, Logger: logger,
 	}
 	go (&tel.Health{Logger: logger, Node: *node, Mounts: p.Mounts, Tier2: store.Tier2Bytes}).Run(ctx)
 	go p.SeedCacheSize(*state + "/cache")

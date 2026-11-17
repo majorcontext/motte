@@ -14,6 +14,11 @@ driverName: vfs.motte.dev
 # apiURL is the base URL of the motte store that a node reaches. The daemon reads and writes the store there with a node grant.
 apiURL: ""
 
+# allowedNamespaces lists the namespaces whose pods may publish a workspace volume. The volume attributes of a pod name
+# its workspace, so the plugin refuses a pod of any other namespace. The chart has no default and no wildcard; it fails
+# to render without at least one namespace.
+allowedNamespaces: []
+
 # grantKeySecret names the Secret that holds the node signing key: a JSON
 # document {"kid": "...", "key": "<base64 Ed25519 private key or 32-byte seed>"}.
 # The store must trust the public key for the scope "node". The daemon signs a
