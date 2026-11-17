@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/majorcontext/motte/client"
 	"github.com/majorcontext/motte/grant"
 	"github.com/majorcontext/motte/internal/objstore/fs"
@@ -21,6 +23,8 @@ const DSNEnv = pgtest.DSNEnv
 // Server is a running store. Its control-plane key signs every scope. Its node key signs only node grants.
 type Server struct {
 	URL string
+	// Pool reaches the schema of the server, for a test that sets up a state no route can make.
+	Pool *pgxpool.Pool
 	// Operator is the control-plane signer.
 	Operator grant.Signer
 	// Node is the node signer.
@@ -50,7 +54,7 @@ func Start(t testing.TB, dsn string) *Server {
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return &Server{
-		URL: ts.URL, Operator: grant.Signer{Kid: "cp", Key: cpKey}, Node: grant.Signer{Kid: "node", Key: nodeKey},
+		URL: ts.URL, Pool: pool, Operator: grant.Signer{Kid: "cp", Key: cpKey}, Node: grant.Signer{Kid: "node", Key: nodeKey},
 		Expire: time.Now().Add(time.Hour),
 	}
 }
