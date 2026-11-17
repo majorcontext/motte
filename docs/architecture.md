@@ -8,7 +8,7 @@ Goal: motte stores the repositories of coding agents and the state of their virt
 
 Non-goals:
 
-- No git smart-HTTP, web UI, review or pull-request model, access lists, or users.
+- No git dumb HTTP, web UI, review or pull-request model, access lists, or users.
 - No multi-region store. One store serves all callers.
 - No compaction or deletion of packs, and no purge of deleted workspaces.
 
@@ -19,7 +19,8 @@ Non-goals:
 | `grant` | Claims, Ed25519 signer, verifier. Public package. | M1 |
 | `api` | Wire types and error codes. Public package. | M1 |
 | `bucket` | Object store seam with Cloud Storage (`bucket/gcs`) and filesystem (`bucket/fs`) buckets, and its conformance suite `bucket/buckettest`. Public package. | M1 |
-| `internal/gitpack` | Reader and writer of git pack files and v2 indexes. | M1 |
+| `internal/gitpack` | Reader and writer of git pack files and v2 indexes, and the reader of a pushed pack. | M1 |
+| `internal/pktline`, `internal/gitproto` | The pkt-line framing, and the git smart HTTP protocol over an object reader: advertisement, v2 fetch and ls-refs, receive-pack. | M6 |
 | `meta` | Metadata seam: repositories, workspaces and the epoch fence, op heads, refs, pack listing. Backends `meta/postgres` and `meta/sqlite`, and the suite `meta/metatest`. Public package. | M2 |
 | Store service | HTTP service over a `meta` store and a `bucket` store, and the epoch fence. | M2 |
 | `client` | Typed Go client for callers. Public package. | M3 |
@@ -29,7 +30,7 @@ Non-goals:
 
 ## Planes
 
-The store plane serves the node daemon and the jj backend. The control plane serves the caller. Every route needs a grant in the `Authorization: Bearer` header. A grant names the repository and the workspace. No route takes either from the request.
+The store plane serves the node daemon and the jj backend. The control plane serves the caller. Every route needs a grant in the `Authorization: Bearer` header. The git routes also take it as the password of HTTP Basic. A grant names the repository and the workspace. No route takes either from the request.
 
 ### Service
 
@@ -99,6 +100,27 @@ A Go test starts the same composition with `testserver.StartLocal`, which needs 
 | `PUT /v1/vcs/packs/{pack_id}` | `import` |
 
 A ref route serves any repository, whether or not it has a `repos` row.
+
+### Git smart HTTP
+
+Ordinary `git` clones, fetches and pushes a repository over HTTPS. The routes need no `/v1` grant header, and the grant goes in the way that git sends credentials.
+
+| Route | Scope |
+|---|---|
+| `GET /git/<prefix>/<path>.git/info/refs?service=git-upload-pack` | `read`, `write` |
+| `POST /git/<prefix>/<path>.git/git-upload-pack` | `read`, `write` |
+| `GET /git/<prefix>/<path>.git/info/refs?service=git-receive-pack` | `write` |
+| `POST /git/<prefix>/<path>.git/git-receive-pack` | `write` |
+
+- Repository: the URL names the repository as `<prefix>/<path>` where the grant names `<prefix>:<path>`, for example `/git/native/repo_X.git` for `native:repo_X`. The path may hold `/`. The part up to the last `.git/` is the repository. The repository of the URL must equal the `repo` claim of the grant, or the answer is 403 `vcs_repo_forbidden`. A repository that does not exist answers 404 `vcs_not_found`, so a push never creates one: the control plane creates repositories. A repository exists when it has a `repos` row (prefix `native`), or has at least one ref (any other prefix).
+- Grant: the client sends HTTP Basic with any user name and a grant as the password, or `Authorization: Bearer <grant>`. A missing or refused grant answers 401 with `WWW-Authenticate: Basic realm="motte"`, so git asks for credentials or runs its credential helper. A grant of another scope for the route (a `read` grant for receive-pack) answers 403.
+- Protocols: fetch speaks protocol v2 only (`Git-Protocol: version=2`, git 2.26 and later). The advertisement lists `ls-refs`, `fetch=filter` and `object-format=sha1`. A request for upload-pack without v2 answers 400. Push speaks v0 and v1 receive-pack with the capabilities `report-status`, `delete-refs`, `ofs-delta` and `object-format=sha1`. The dumb protocol, `shallow` and `deepen` requests, `want-ref`, `packfile-uris`, `atomic`, `push-options`, signed pushes and `side-band` on receive-pack are not offered. A filter other than `blob:none` is refused with 400.
+- Ref names: a stored ref named `main` is the git ref `refs/heads/main`. A stored name that starts with `refs/` other than `refs/heads/` has the same git name. HEAD names `refs/heads/main` when it exists. A push may write `refs/heads/<name>` and any other `refs/...` name that is valid, and `<name>` must not start with `refs/`. A stored ref named under `refs/heads/` has no git name and is not listed.
+- Fetch: a `want` may name any object of the repository. The service lists the commits that the wants reach and the `have` commits that it holds do not reach, walking by commit time. It adds the trees and blobs that those commits reach and that the trees of the edge commits (the held parents) do not hold. With `filter=blob:none` it adds no blob that a tree names, and it sends a blob that a `want` names. It never sends a delta: the pack holds whole objects, so `thin-pack`, `ofs-delta`, `include-tag` and `no-progress` have no effect. A client fetches an annotated tag that it needs with a second `want`. It answers `ready` as soon as one `have` is common, and the pack then leaves out what that commit holds. It streams the pack through side-band 1 with one object in memory at a time, and reads each pack through the cache of ranged reads.
+- Push: the service reads the whole request body, inflates a `Content-Encoding: gzip` body first, reads the ref commands, and unpacks the pack. A thin pack is complete: the service resolves each ref delta base from the repository. It stores the objects as one whole pack of the repository, with the SHA-256 of the stored pack as its id, and adds it to the pack listing. Every object is hashed, so the pack is checked as `PUT /v1/vcs/packs/{pack_id}` checks it. The service does not check that the objects of a new commit are connected. It checks only that the new value of a ref exists, is a commit (or a tag, outside `refs/heads/`).
+- Ref update: each ref command goes, in order, through the one function `updateRef` of `internal/server/git.go`, which calls `meta.Store.UpdateRef`. The update is a compare and swap on the commit: `old` is the commit that the client saw, a zero `old` creates the ref and a zero `new` deletes it. A ref that is not at `old` fails that command with `ng <ref> stale info` and the other commands go on. There is no atomic push. The service does not tell a force push from a plain one, because git sends no flag for it: the client refuses a non-fast-forward unless it is forced, and the service accepts any update that passes the compare and swap, as git does with `receive.denyNonFastForwards` unset. The reply is `report-status`: `unpack ok` or the refusal of the pack, then `ok <ref>` or `ng <ref> <reason>` for each command.
+- Limits: a push body has at most 64 MiB plus 1 MiB of commands, after gzip. A pack has at most 100000 objects, 64 MiB of inflated entry data and 64 MiB of objects, and each object has at most 16 MiB (`gitpack.MaxObjectBytes`). A command list has at most 1000 commands. A fetch request body has at most 8 MiB, with at most 10000 wants and 100000 haves. A fetch holds at most 1000000 objects and commits in its sets, and a larger fetch answers 413 `vcs_object_too_large`. A fetch has no limit on the size of the pack that it streams. A push reserves its body, three times 64 MiB, 4 times 16 MiB and the verification work: B + 192 MiB + 64 MiB + 48 MiB. A fetch reserves 176 MiB. A push takes one of the 4 reader slots while it reads its body, as an upload does.
+- The git routes take no part in the epoch fence. A `write` grant moves a ref with no workspace, so a workspace that works on the same ref sees the new commit through the ref generation.
 
 ### Control plane
 

@@ -62,6 +62,7 @@ func New(cfg Config) *Server {
 	s.mux = http.NewServeMux()
 	s.registerStorePlane(s.mux)
 	s.registerControlPlane(s.mux)
+	s.registerGit(s.mux)
 	s.mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	s.mux.HandleFunc("GET /ready", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)

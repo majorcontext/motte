@@ -1,0 +1,221 @@
+package server_test
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/majorcontext/motte/api"
+	"github.com/majorcontext/motte/internal/gitpack"
+	"github.com/majorcontext/motte/testserver"
+)
+
+type gitEnv struct {
+	*env
+	path, text string
+}
+
+func newGitEnv(t *testing.T) *gitEnv {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("the git binary is not installed")
+	}
+	t.Parallel()
+	e := newEnv(t)
+	path, err := e.Client(e.operator()).CreateRepo(context.Background(), "widgets", "o1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &gitEnv{env: e, path: path, text: "native:" + path}
+}
+
+func (g *gitEnv) remote(repoPath, token string) string {
+	return strings.Replace(g.url, "http://", "http://git:"+token+"@", 1) + "/git/native/" + repoPath + ".git"
+}
+
+// git runs git in dir and returns its output. It fails the test unless the command ends as wantOK says.
+func (g *gitEnv) git(dir string, wantOK bool, args ...string) string {
+	g.t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "HOME="+dir, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0",
+		"GIT_AUTHOR_NAME=a", "GIT_AUTHOR_EMAIL=a@example.com", "GIT_COMMITTER_NAME=a", "GIT_COMMITTER_EMAIL=a@example.com")
+	out, err := cmd.CombinedOutput()
+	if (err == nil) != wantOK {
+		g.t.Fatalf("git %s: err = %v, want ok = %v\n%s", strings.Join(args, " "), err, wantOK, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func (g *gitEnv) clone(token string, extra ...string) string {
+	g.t.Helper()
+	dir := g.t.TempDir()
+	g.git(filepath.Dir(dir), true, append(append([]string{"clone", "-q"}, extra...), g.remote(g.path, token), dir)...)
+	return dir
+}
+
+func (g *gitEnv) commit(dir, file, content string) {
+	g.t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, file), []byte(content), 0o644); err != nil {
+		g.t.Fatal(err)
+	}
+	g.git(dir, true, "add", file)
+	g.git(dir, true, "commit", "-q", "-m", "edit "+file)
+}
+
+func bigText(n int, tail string) string {
+	return strings.Repeat("line of filler text for deltas\n", n) + tail
+}
+
+func TestGitCloneFetchAndPush(t *testing.T) {
+	g := newGitEnv(t)
+	read, write := g.readGrant(g.text), g.WriteGrant(t, g.text)
+	reader, writer := g.clone(read), g.clone(write)
+	if out := g.git(reader, true, "log", "--format=%s"); out != "Initial commit" {
+		t.Fatalf("clone log = %q", out)
+	}
+	g.commit(writer, "big.txt", bigText(2000, "one\n"))
+	g.git(writer, true, "push", "-q", "origin", "HEAD:main")
+	g.git(reader, true, "pull", "-q", "--ff-only")
+	g.commit(writer, "big.txt", bigText(2000, "two\n"))
+	g.git(writer, true, "push", "-q", "origin", "HEAD:refs/heads/feature/x")
+	g.git(reader, true, "fetch", "-q", "origin")
+	if got := g.git(reader, true, "show", "origin/feature/x:big.txt"); !strings.HasSuffix(got, "two") {
+		t.Errorf("fetched branch content ends %q", got[len(got)-10:])
+	}
+	g.git(reader, true, "fsck", "--strict")
+	g.git(writer, true, "tag", "-a", "-m", "release", "v1")
+	g.git(writer, true, "push", "-q", "origin", "v1")
+	g.git(reader, true, "fetch", "-q", "--tags", "origin")
+	if got := g.git(reader, true, "rev-parse", "v1^{commit}"); got != g.git(writer, true, "rev-parse", "HEAD") {
+		t.Errorf("tag v1 peels to %s", got)
+	}
+	g.git(reader, true, "fsck", "--strict")
+}
+
+func TestGitPushRules(t *testing.T) {
+	g := newGitEnv(t)
+	write := g.WriteGrant(t, g.text)
+	a, b := g.clone(write), g.clone(write)
+	g.commit(a, "a.txt", "a")
+	g.git(a, true, "push", "-q", "origin", "HEAD:main")
+	g.commit(b, "b.txt", "b")
+	g.git(b, false, "push", "-q", "origin", "HEAD:main")
+	g.git(b, true, "push", "-q", "--force", "origin", "HEAD:main")
+	head := g.git(b, true, "rev-parse", "HEAD")
+	if got := g.git(a, true, "ls-remote", "origin", "refs/heads/main"); !strings.HasPrefix(got, head) {
+		t.Errorf("after the force push main = %q, want %s", got, head)
+	}
+	g.git(b, true, "push", "-q", "origin", "HEAD:refs/heads/gone")
+	g.git(b, true, "push", "-q", "origin", ":gone")
+	if got := g.git(a, true, "ls-remote", "origin", "refs/heads/gone"); got != "" {
+		t.Errorf("deleted branch is listed: %q", got)
+	}
+	line := fmt.Sprintf("%s %s refs/heads/main\x00report-status\n", strings.Repeat("1", 40), head)
+	sum := sha1.Sum([]byte("PACK\x00\x00\x00\x02\x00\x00\x00\x00"))
+	body := fmt.Sprintf("%04x%s0000PACK\x00\x00\x00\x02\x00\x00\x00\x00%s", len(line)+4, line, sum[:])
+	req, _ := http.NewRequest("POST", g.remote(g.path, write)+"/git-receive-pack", strings.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reply bytes.Buffer
+	_, _ = reply.ReadFrom(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(reply.String(), "ng refs/heads/main stale info") {
+		t.Errorf("stale old value reply = %q", reply.String())
+	}
+}
+
+func TestGitAuthorization(t *testing.T) {
+	g := newGitEnv(t)
+	refs := g.url + "/git/native/" + g.path + ".git/info/refs?service=git-upload-pack"
+	resp, err := http.Get(refs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 401 || !strings.HasPrefix(resp.Header.Get("WWW-Authenticate"), "Basic") {
+		t.Errorf("no grant: %d %q, want 401 with a Basic challenge", resp.StatusCode, resp.Header.Get("WWW-Authenticate"))
+	}
+	scratch := t.TempDir()
+	g.git(scratch, false, "clone", "-q", g.url+"/git/native/"+g.path+".git", filepath.Join(scratch, "x"))
+	reader := g.clone(g.readGrant(g.text))
+	g.commit(reader, "r.txt", "r")
+	g.git(reader, false, "push", "-q", "origin", "HEAD:main")
+	g.git(scratch, false, "clone", "-q", g.remote(g.path, g.readGrant("native:repo_other")), filepath.Join(scratch, "y"))
+	bearer := g.clone("", "-c", "http.extraHeader=Authorization: Bearer "+g.readGrant(g.text))
+	g.git(bearer, true, "log", "-1")
+	g.git(scratch, false, "ls-remote", g.remote("repo_missing", g.WriteGrant(t, "native:repo_missing")))
+}
+
+func TestGitPartialClone(t *testing.T) {
+	g := newGitEnv(t)
+	write := g.WriteGrant(t, g.text)
+	w := g.clone(write)
+	g.commit(w, "doc.txt", "lazy content\n")
+	g.git(w, true, "push", "-q", "origin", "HEAD:main")
+	p := g.clone(write, "--filter=blob:none", "--no-checkout")
+	if missing := g.git(p, true, "rev-list", "--objects", "--missing=print", "HEAD"); !strings.Contains(missing, "?") {
+		t.Errorf("a blob:none clone holds every blob: %q", missing)
+	}
+	if got := g.git(p, true, "show", "HEAD:doc.txt"); got != "lazy content" {
+		t.Errorf("lazy blob = %q", got)
+	}
+	scratch := t.TempDir()
+	g.git(scratch, false, "clone", "-q", "--filter=tree:0", g.remote(g.path, write), filepath.Join(scratch, "x"))
+}
+
+func TestGitServesAnImportedPack(t *testing.T) {
+	g := newGitEnv(t)
+	ctx := context.Background()
+	blob := []byte("imported\n")
+	blobSHA := gitpack.Hash(gitpack.Blob, blob)
+	tree := append([]byte("100644 imp.txt\x00"), blobSHA[:]...)
+	treeSHA := gitpack.Hash(gitpack.Tree, tree)
+	who := "a <a@example.com> 1 +0000"
+	commit := []byte(fmt.Sprintf("tree %s\nauthor %s\ncommitter %s\n\nimported\n", treeSHA, who, who))
+	main, err := g.Client(g.readGrant(g.text)).Ref(ctx, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pack, idx, _ := gitpack.Build([]gitpack.Object{{Type: gitpack.Blob, Data: blob}, {Type: gitpack.Tree, Data: tree}, {Type: gitpack.Commit, Data: commit}})
+	sum := sha256.Sum256(pack)
+	if err := g.Client(g.importGrant(g.text)).ImportPack(ctx, hex.EncodeToString(sum[:]), idx, pack); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Client(g.operator()).Claim(ctx, "ws1", api.ClaimRequest{Epoch: 1, Owner: "o1", Repo: g.text}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Client(g.NodeGrant(t, "ws1", 1, g.text)).SwapRef(ctx, "main", main.Generation, gitpack.Hash(gitpack.Commit, commit).String()); err != nil {
+		t.Fatal(err)
+	}
+	dir := g.clone(g.readGrant(g.text))
+	if got, err := os.ReadFile(filepath.Join(dir, "imp.txt")); err != nil || string(got) != "imported\n" {
+		t.Errorf("imported file = %q, %v", got, err)
+	}
+}
+
+func TestGitOnTheLocalBackend(t *testing.T) {
+	prev := startServer
+	startServer = func(t *testing.T) *testserver.Server { return testserver.StartLocal(t) }
+	t.Cleanup(func() { startServer = prev })
+	for name, fn := range map[string]func(*testing.T){
+		"clone fetch push": TestGitCloneFetchAndPush,
+		"push rules":       TestGitPushRules,
+		"authorization":    TestGitAuthorization,
+		"partial clone":    TestGitPartialClone,
+		"imported pack":    TestGitServesAnImportedPack,
+	} {
+		t.Run(name, fn)
+	}
+}
