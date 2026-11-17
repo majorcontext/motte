@@ -17,6 +17,9 @@ const MaxUnpackObjects = 100000
 // returns, each.
 const MaxUnpackBytes = 64 << 20
 
+// unpackLimit is MaxUnpackBytes. A test lowers it.
+var unpackLimit int64 = MaxUnpackBytes
+
 type unpacked struct {
 	off      int64
 	t        Type
@@ -104,7 +107,7 @@ func readEntry(r *bytes.Reader, off int64, declared *int64) (*unpacked, error) {
 			return nil, ErrCorrupt
 		}
 	}
-	if *declared += size; size > MaxObjectBytes || *declared > MaxUnpackBytes {
+	if *declared += size; size > MaxObjectBytes || *declared > unpackLimit {
 		return nil, ErrTooLarge
 	}
 	zr, err := zlib.NewReader(r)
@@ -146,7 +149,7 @@ func resolveEntries(ctx context.Context, entries []*unpacked, byOff map[int64]*u
 			waitOff[e.baseOff] = append(waitOff[e.baseOff], e)
 		}
 	}
-	if total > MaxUnpackBytes {
+	if total > unpackLimit {
 		return nil, ErrTooLarge
 	}
 	settle := func(base *unpacked) error {
@@ -158,7 +161,7 @@ func resolveEntries(ctx context.Context, entries []*unpacked, byOff map[int64]*u
 			if err != nil {
 				return err
 			}
-			if total += int64(len(out)); total > MaxUnpackBytes {
+			if total += int64(len(out)); total > unpackLimit {
 				return ErrTooLarge
 			}
 			e.t, e.data, e.done = base.t, out, true

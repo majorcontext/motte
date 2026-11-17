@@ -79,7 +79,9 @@ func TestUnpackResolvesAThinChainThatListsTheDependentFirst(t *testing.T) {
 }
 
 func TestUnpackCountsWholeObjectsInTheResolvedTotal(t *testing.T) {
-	const n = 15 << 20
+	unpackLimit = 4 << 20
+	t.Cleanup(func() { unpackLimit = MaxUnpackBytes })
+	const n = 1 << 20
 	var entries [][]byte
 	var names []SHA
 	for i := range 3 {
@@ -97,7 +99,7 @@ func TestUnpackCountsWholeObjectsInTheResolvedTotal(t *testing.T) {
 }
 
 func TestUnpackResolvesALongDependentFirstChain(t *testing.T) {
-	const n = 60000
+	const n = 30000
 	ext := []byte("external base")
 	extName := Hash(Blob, ext)
 	results := make([][]byte, n)

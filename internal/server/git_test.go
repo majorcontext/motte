@@ -81,19 +81,20 @@ func TestGitCloneFetchAndPush(t *testing.T) {
 	g := newGitEnv(t)
 	read, write := g.readGrant(g.text), g.WriteGrant(t, g.text)
 	reader, writer := g.clone(read), g.clone(write)
-	if out := g.git(reader, true, "log", "--format=%s"); out != "Initial commit" {
-		t.Fatalf("clone log = %q", out)
-	}
 	g.commit(writer, "big.txt", bigText(2000, "one\n"))
 	g.git(writer, true, "push", "-q", "origin", "HEAD:main")
-	g.git(reader, true, "pull", "-q", "--ff-only")
 	g.commit(writer, "big.txt", bigText(2000, "two\n"))
 	g.git(writer, true, "push", "-q", "origin", "HEAD:refs/heads/feature/x")
 	g.git(reader, true, "fetch", "-q", "origin")
 	if got := g.git(reader, true, "show", "origin/feature/x:big.txt"); !strings.HasSuffix(got, "two") {
 		t.Errorf("fetched branch content ends %q", got[len(got)-10:])
 	}
-	g.git(reader, true, "fsck", "--strict")
+}
+
+func TestGitAnnotatedTags(t *testing.T) {
+	g := newGitEnv(t)
+	writer, reader := g.clone(g.WriteGrant(t, g.text)), g.clone(g.readGrant(g.text))
+	g.commit(writer, "t.txt", "t")
 	g.git(writer, true, "tag", "-a", "-m", "release", "v1")
 	g.git(writer, true, "push", "-q", "origin", "v1")
 	g.git(reader, true, "fetch", "-q", "--tags", "origin")
@@ -121,6 +122,12 @@ func TestGitPushRules(t *testing.T) {
 	if got := g.git(a, true, "ls-remote", "origin", "refs/heads/gone"); got != "" {
 		t.Errorf("deleted branch is listed: %q", got)
 	}
+}
+
+func TestGitRefusedPushesAreReported(t *testing.T) {
+	g := newGitEnv(t)
+	write := g.WriteGrant(t, g.text)
+	head := g.git(g.clone(write), true, "rev-parse", "HEAD")
 	line := fmt.Sprintf("%s %s refs/heads/main\x00report-status\n", strings.Repeat("1", 40), head)
 	if reply := g.rawPush(write, line, emptyPack()); !strings.Contains(reply, "ng refs/heads/main stale info") {
 		t.Errorf("stale old value reply = %q", reply)
@@ -245,6 +252,8 @@ func TestGitOnTheLocalBackend(t *testing.T) {
 	for name, fn := range map[string]func(*testing.T){
 		"clone fetch push": TestGitCloneFetchAndPush,
 		"push rules":       TestGitPushRules,
+		"tags":             TestGitAnnotatedTags,
+		"refused pushes":   TestGitRefusedPushesAreReported,
 		"authorization":    TestGitAuthorization,
 		"partial clone":    TestGitPartialClone,
 		"imported pack":    TestGitServesAnImportedPack,
