@@ -88,6 +88,7 @@ func (s *Server) createSubscription(w http.ResponseWriter, r *http.Request, _ ca
 	if err != nil {
 		return err
 	}
+	s.notify()
 	s.writeJSON(w, http.StatusCreated, subscriptionView(sub))
 	return nil
 }

@@ -221,3 +221,29 @@ func TestOldEventsArePrunedAndAnOlderCursorIsRefused(t *testing.T) {
 		}
 	})
 }
+
+func TestAnEventOfThisReplicaIsDeliveredBeforeThePoll(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		b := newBubble(t)
+		stop, handler := b.replica("a", server.EventsConfig{Poll: time.Hour})
+		defer stop()
+		op, merge := b.client(handler, grant.Claims{Scope: grant.ScopeOperator}), b.client(handler, grant.Claims{Scope: grant.ScopeMerge, Repo: repoText})
+		ctx := context.Background()
+		if _, err := op.CreateSubscription(ctx, api.CreateSubscriptionRequest{URL: "https://recv.invalid/all", Secret: secret}); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		start := time.Now()
+		ref, err := merge.SwapRef(ctx, "a", 0, commitA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := merge.SwapRef(ctx, "a", ref.Generation, commitB); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		if got, waited := b.rcv.got("/all"), time.Since(start); got != "[a a]" || waited != 0 {
+			t.Errorf("deliveries = %s after %v of fake time, want both at once, with no wait for the hourly poll", got, waited)
+		}
+	})
+}

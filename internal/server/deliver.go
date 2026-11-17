@@ -72,7 +72,8 @@ func (c EventsConfig) withDefaults() EventsConfig {
 	return c
 }
 
-// Run delivers ref events to the subscriptions and prunes old events until ctx ends. A worker sends one partition of
+// Run delivers ref events to the subscriptions and prunes old events until ctx ends. A ref write of this replica wakes
+// it at once; the poll finds the writes of other replicas. A worker sends one partition of
 // one subscription while it holds that lease, so replicas deliver different partitions of a subscription in parallel.
 // Run waits for its workers before it returns.
 func (s *Server) Run(ctx context.Context) error {
@@ -103,23 +104,50 @@ func (s *Server) Run(ctx context.Context) error {
 		for _, sub := range subs {
 			for p, cursor := range sub.Cursors {
 				key := sub.ID + "/" + strconv.Itoa(p)
-				if running[key] || heads[p] <= cursor {
+				if heads[p] <= cursor {
 					continue
 				}
-				running[key] = true
+				if _, busy := running[key]; busy {
+					running[key] = true
+					continue
+				}
+				running[key] = false
 				wg.Go(func() {
-					s.deliverTo(ctx, sub.ID, p)
-					mu.Lock()
-					delete(running, key)
-					mu.Unlock()
+					for {
+						s.deliverTo(ctx, sub.ID, p)
+						mu.Lock()
+						again := running[key] && ctx.Err() == nil
+						running[key] = false
+						if !again {
+							delete(running, key)
+						}
+						mu.Unlock()
+						if !again {
+							return
+						}
+					}
 				})
 			}
 		}
 		mu.Unlock()
-		if clock.Wait(ctx, s.events.Clock, s.events.Poll) != nil {
+		if s.idle(ctx) != nil {
 			return nil
 		}
 	}
+}
+
+// idle waits for the next poll, or for a wake of this replica. A delivery that is already running when a wake comes
+// is marked, and it reads the partition again before it ends.
+func (s *Server) idle(ctx context.Context) error {
+	t := s.events.Clock.NewTimer(s.events.Poll)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+	case <-s.wake:
+	}
+	return nil
 }
 
 // deliverTo takes the lease of one partition of a subscription and sends what is pending. It returns when the

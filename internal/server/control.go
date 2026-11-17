@@ -43,6 +43,7 @@ func (s *Server) createRepo(w http.ResponseWriter, r *http.Request, _ call) erro
 	if err := s.index.CreateRepo(r.Context(), meta.Repo{Path: path, Name: name, Owner: req.Owner}, repos.Text(path), names[1].String()); err != nil {
 		return err
 	}
+	s.notify()
 	s.writeJSON(w, http.StatusCreated, api.CreateRepoResponse{Path: path})
 	return nil
 }

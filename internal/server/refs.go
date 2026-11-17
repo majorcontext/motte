@@ -17,6 +17,14 @@ const maxProtectedPatterns = 100
 // writeRefAs is the one path that moves a ref, for every route. A merge grant writes with no workspace fence. A node
 // grant writes under its epoch fence and may not write a protected ref. Any other grant moves no ref.
 func (s *Server) writeRefAs(ctx context.Context, c call, name string, expect int64, sha string, remove bool) (meta.Ref, error) {
+	ref, err := s.moveRef(ctx, c, name, expect, sha, remove)
+	if err == nil {
+		s.notify()
+	}
+	return ref, err
+}
+
+func (s *Server) moveRef(ctx context.Context, c call, name string, expect int64, sha string, remove bool) (meta.Ref, error) {
 	switch c.claims.Scope {
 	case grant.ScopeMerge:
 		if remove {

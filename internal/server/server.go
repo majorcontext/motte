@@ -40,6 +40,7 @@ type Server struct {
 	logger   *slog.Logger
 	now      func() time.Time
 	events   EventsConfig
+	wake     chan struct{}
 
 	requests *prometheus.CounterVec
 	latency  *prometheus.HistogramVec
@@ -50,7 +51,7 @@ type Server struct {
 
 // New returns a Server over the metadata of cfg.Meta and the object store cfg.Bucket.
 func New(cfg Config) *Server {
-	s := &Server{index: cfg.Meta, objects: store.New(cfg.Bucket, cfg.Meta), verifier: cfg.Verifier, logger: cfg.Logger, now: cfg.Now, readers: make(chan struct{}, uploadReaders)}
+	s := &Server{index: cfg.Meta, objects: store.New(cfg.Bucket, cfg.Meta), verifier: cfg.Verifier, logger: cfg.Logger, now: cfg.Now, readers: make(chan struct{}, uploadReaders), wake: make(chan struct{}, 1)}
 	if s.now == nil {
 		s.now = time.Now
 	}
@@ -79,6 +80,14 @@ func New(cfg Config) *Server {
 	})
 	s.mux.Handle("GET /metrics", promhttp.HandlerFor(s.registry, promhttp.HandlerOpts{}))
 	return s
+}
+
+// notify wakes the delivery worker of this replica. It never blocks, and a wake that is already pending covers this one.
+func (s *Server) notify() {
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
 }
 
 // Handler returns the handler of every route. An unknown path or method answers with the error envelope.
