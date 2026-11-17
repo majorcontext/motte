@@ -1,0 +1,11 @@
+image:
+  tag: v0.0.0
+database:
+  dsnSecret:
+    name: motte-db
+bucket:
+  url: example-bucket
+trustedKeys:
+  - kid: control
+    key: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+    scopes: [operator, read, import]

@@ -1,0 +1,108 @@
+{{- $dsn := required "database.dsnSecret.name is required" .Values.database.dsnSecret.name -}}
+{{- $bucket := required "bucket.url is required" .Values.bucket.url -}}
+{{- if not (has .Values.bucket.kind (list "gcs" "fs")) }}{{ fail "bucket.kind must be gcs or fs" }}{{ end -}}
+{{- if not (or .Values.trustedKeys .Values.trustedKeysConfigMap.name) }}{{ fail "trustedKeys or trustedKeysConfigMap.name is required" }}{{ end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "motte.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      {{- include "motte.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "motte.labels" . | nindent 8 }}
+      annotations:
+        {{- if .Values.prometheusAnnotations }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.listenPort | quote }}
+        prometheus.io/path: /metrics
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "motte.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: motte
+          image: {{ include "motte.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: http
+              containerPort: {{ .Values.listenPort }}
+          env:
+            - name: MOTTE_LISTEN
+              value: {{ printf ":%v" .Values.listenPort | quote }}
+            - name: MOTTE_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $dsn }}
+                  key: {{ .Values.database.dsnSecret.key }}
+            - name: MOTTE_BUCKET_KIND
+              value: {{ .Values.bucket.kind | quote }}
+            - name: MOTTE_BUCKET
+              value: {{ $bucket | quote }}
+            - name: MOTTE_TRUSTED_KEYS
+              {{- if .Values.trustedKeysConfigMap.name }}
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Values.trustedKeysConfigMap.name }}
+                  key: {{ .Values.trustedKeysConfigMap.key }}
+              {{- else }}
+              value: {{ toJson .Values.trustedKeys | quote }}
+              {{- end }}
+            {{- with .Values.otlpEndpoint }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- if eq .Values.bucket.kind "fs" }}
+          volumeMounts:
+            - name: bucket
+              mountPath: {{ $bucket | quote }}
+          {{- end }}
+      {{- if eq .Values.bucket.kind "fs" }}
+      volumes:
+        - name: bucket
+          emptyDir: {}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

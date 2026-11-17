@@ -253,6 +253,22 @@ Package `testserver` runs the real server in the process of a test, on a fresh s
 - Logs: JSON. A log line of the service never holds a grant, a path or an object body. A log line of the node daemon never holds a grant, and it carries the error text of its own process, which can name a node path.
 - Instrumentation is additive. It never changes behavior or errors.
 
+## Deployment
+
+`images/motte/Dockerfile` builds the service image for `linux/amd64` and `linux/arm64`. It holds a static `cmd/motte` binary on a distroless non-root base. The workflow `image.yml` builds it, and the `motte-vfsd` image, on a pull request. On a tag `v*` it publishes `ghcr.io/majorcontext/motte` with the same tag scheme as `motte-vfsd` and with provenance and SBOM attestations.
+
+`charts/motte` installs a `Deployment` (2 replicas by default), a `ServiceAccount` and a `Service`. The pod runs as non-root with a read-only root file system. The probes use `/health` and `/ready`, and `/metrics` is on the service port. Values set:
+
+- The image (digest or tag), `replicas`, `resources` (default request 512Mi of memory), node selector, tolerations and affinity.
+- `serviceAccount.name` and `serviceAccount.annotations`, for workload identity.
+- `service.type` (default `ClusterIP`), `service.loadBalancerIP` and `service.annotations`, so a caller can ask for an internal load balancer.
+- `database.dsnSecret`, the name and key of an existing Secret that holds the PostgreSQL DSN.
+- `bucket.kind` and `bucket.url`. An `fs` bucket is an `emptyDir` volume, for tests only.
+- `trustedKeys`, a list of `{kid, key, scopes}`, or `trustedKeysConfigMap`, an existing ConfigMap that holds the JSON list.
+- `otlpEndpoint`, optional, and `extraEnv`.
+
+The chart creates no Secret and no namespace. A release needs `database.dsnSecret.name`, `bucket.url` and one source of trusted keys. CI runs `helm lint` and `helm template` over the files in `charts/motte/ci`.
+
 ## Virtual workspace daemon
 
 `internal/vfs` is the node daemon of the virtual workspace. `cmd/motte-vfsd` runs it. It reads and writes the store plane with a `node` grant, so a workspace holds no store credential. The FUSE server and the overlay build on Linux only. On other systems `motte-vfsd` prints a message and exits 1. The daemon writes JSON logs, and `OTEL_EXPORTER_OTLP_ENDPOINT` enables trace export. A client span name is `vcs.client.` and the route, such as `vcs.client.ref.swap`.
