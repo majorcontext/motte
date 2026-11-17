@@ -6,4 +6,4 @@ Status: early. The repository holds milestone M1: the specification, the grant f
 
 Read `docs/architecture.md` for the design. Read `AGENTS.md` before you change the repository.
 
-License: Apache-2.0.
+License: MIT. The `jj/` crate is Apache-2.0, because it adapts code from jj-lib.
