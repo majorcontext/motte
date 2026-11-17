@@ -1,6 +1,7 @@
 package client
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -71,6 +72,7 @@ func CurrentRef(err error) (api.Ref, bool) {
 	}
 	name, _ := m["name"].(string)
 	commit, _ := m["commit"].(string)
-	gen, _ := m["generation"].(float64)
-	return api.Ref{Name: name, Commit: commit, Generation: int64(gen)}, true
+	gen, _ := m["generation"].(json.Number)
+	n, err := gen.Int64()
+	return api.Ref{Name: name, Commit: commit, Generation: n}, err == nil
 }

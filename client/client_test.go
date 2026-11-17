@@ -95,3 +95,16 @@ func TestCallCarriesGrantAndTraceContext(t *testing.T) {
 		t.Errorf("authorization = %q, traceparent = %q", auth, parent)
 	}
 }
+
+func TestConflictKeepsALargeGeneration(t *testing.T) {
+	const gen = 9007199254740993
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":{"code":"vcs_generation_conflict","message":"m","details":{"ref":{"name":"x","commit":"c","generation":9007199254740993}}}}`))
+	}))
+	defer ts.Close()
+	_, err := client.New(ts.URL, client.StaticGrant("g")).SwapRef(context.Background(), "x", 1, "c")
+	if ref, ok := client.CurrentRef(err); !ok || ref.Generation != gen {
+		t.Fatalf("CurrentRef = %v, %v; want generation %d", ref, ok, gen)
+	}
+}

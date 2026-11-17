@@ -111,7 +111,9 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 
 func decodeError(status int, raw []byte) error {
 	var body api.ErrorBody
-	if json.Unmarshal(raw, &body) != nil || body.Error.Code == "" {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if dec.Decode(&body) != nil || body.Error.Code == "" {
 		return &Error{Status: status, cause: ErrUnexpected}
 	}
 	cause, ok := sentinels[body.Error.Code]
