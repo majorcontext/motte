@@ -46,18 +46,26 @@ const uploadReaders = 4
 const (
 	reserveHas    = 1 << 20
 	reserveCommit = 3 * gitpack.MaxObjectBytes
-	reserveTrees  = 48 << 20
 	reserveOp     = 5 * store.MaxOpBytes
 	reserveObject = 5 * gitpack.MaxObjectBytes
-	// decodeWindow bounds the JSON text that the decoder of decodeObjects holds for one object: 16 MiB in base64 and
-	// some slack.
-	decodeWindow = 24 << 20
 	// decodeSlack is the decoder buffer (twice the window and one read), the text of one object and the pack index.
 	decodeSlack = 80 << 20
 )
 
+// The size limits that the limit tests lower through LowerLimits. Each starts at the value of the spec.
+var (
+	// objectLimit is the largest object that a put accepts.
+	objectLimit = gitpack.MaxObjectBytes
+	// decodeWindow bounds the JSON text that the decoder of decodeObjects holds for one object: 16 MiB in base64 and
+	// some slack.
+	decodeWindow int64 = 24 << 20
+	// treeReserve is the first reservation of a tree read, and treeSlack the fixed part of every later one.
+	treeReserve int64 = 48 << 20
+	treeSlack   int64 = 16 << 20
+)
+
 // treeCost is the reservation of a tree read that holds treeBytes of tree data.
-func treeCost(treeBytes int64) int64 { return 8*treeBytes + 16<<20 }
+func treeCost(treeBytes int64) int64 { return 8*treeBytes + treeSlack }
 
 func objectsCost(n int64) int64 { return n + 5*n/2 + decodeSlack }
 

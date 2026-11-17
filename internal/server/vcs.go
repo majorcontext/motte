@@ -120,11 +120,11 @@ func (s *Server) getCommit(w http.ResponseWriter, r *http.Request, c call) error
 }
 
 func (s *Server) getTrees(w http.ResponseWriter, r *http.Request, c call) error {
-	release, err := s.reserve(r, reserveTrees)
+	release, err := s.reserve(r, treeReserve)
 	if err != nil {
 		return err
 	}
-	held := int64(reserveTrees)
+	held := treeReserve
 	defer func() { release() }()
 	// grow swaps the reservation for a larger one. It never holds the old one while it waits for the new one.
 	grow := func(treeBytes int64) error {
@@ -280,6 +280,9 @@ func decodeObjects(body []byte) ([]gitpack.Object, error) {
 			data, err := unb64(o.Data)
 			if err != nil {
 				return nil, err
+			}
+			if len(data) > objectLimit {
+				return nil, store.ErrTooLarge
 			}
 			objs = append(objs, gitpack.Object{Type: gitpack.ParseType(o.Type), Data: data})
 		}

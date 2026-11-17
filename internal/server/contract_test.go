@@ -19,13 +19,17 @@ import (
 	"github.com/majorcontext/motte/client"
 	"github.com/majorcontext/motte/grant"
 	"github.com/majorcontext/motte/internal/gitpack"
+	"github.com/majorcontext/motte/internal/server"
 	"github.com/majorcontext/motte/testserver"
 )
 
 const (
-	repoText = "gh:acme/widgets"
-	commitA  = "1111111111111111111111111111111111111111"
-	commitB  = "2222222222222222222222222222222222222222"
+	// lowObject and lowWindow replace the object limit and the decoder window in the limit tests.
+	lowObject = 256 << 10
+	lowWindow = 384 << 10
+	repoText  = "gh:acme/widgets"
+	commitA   = "1111111111111111111111111111111111111111"
+	commitB   = "2222222222222222222222222222222222222222"
 )
 
 type env struct {
@@ -356,7 +360,8 @@ func TestBodyOverTheLimitAnswersTooLarge(t *testing.T) {
 	e.want(e.claim("ws1", 1, repoText), 200, "")
 	r := e.call("POST", "/v1/vcs/objects/has", e.readGrant(repoText), map[string]any{"shas": []string{strings.Repeat("a", 1<<20)}})
 	e.want(r, 413, "vcs_object_too_large")
-	_, err := e.Client(e.nodeGrant("ws1", 1), client.WithBudget(30*time.Second)).PutObjects(context.Background(), []client.Object{{Type: "blob", Data: make([]byte, gitpack.MaxObjectBytes+1)}})
+	server.LowerLimits(t, lowObject, 0, 0, 0)
+	_, err := e.Client(e.nodeGrant("ws1", 1)).PutObjects(context.Background(), []client.Object{{Type: "blob", Data: make([]byte, lowObject+1)}})
 	refuses(t, err, client.ErrObjectTooLarge, 413)
 }
 
@@ -394,8 +399,9 @@ func TestUnknownRouteAndMethodUseTheErrorEnvelope(t *testing.T) {
 func TestLargestObjectIsStored(t *testing.T) {
 	e := newEnv(t)
 	e.want(e.claim("ws1", 1, repoText), 200, "")
-	node := e.Client(e.nodeGrant("ws1", 1), client.WithBudget(30*time.Second))
-	if _, err := node.PutObjects(context.Background(), []client.Object{{Type: "blob", Data: make([]byte, gitpack.MaxObjectBytes)}}); err != nil {
+	server.LowerLimits(t, lowObject, 0, 0, 0)
+	node := e.Client(e.nodeGrant("ws1", 1))
+	if _, err := node.PutObjects(context.Background(), []client.Object{{Type: "blob", Data: make([]byte, lowObject)}}); err != nil {
 		t.Fatalf("object at the limit: %v", err)
 	}
 }
@@ -405,23 +411,25 @@ func TestLargeTreeIsRead(t *testing.T) {
 	e.want(e.claim("ws1", 1, repoText), 200, "")
 	ctx := context.Background()
 	var tree bytes.Buffer
-	for i := 0; tree.Len() < 5<<20; i++ {
+	server.LowerLimits(t, 0, 0, 1<<20, 0)
+	for i := 0; tree.Len() < 300<<10; i++ {
 		fmt.Fprintf(&tree, "160000 e%07d\x00%s", i, strings.Repeat("a", 20))
 	}
-	shas, err := e.Client(e.nodeGrant("ws1", 1), client.WithBudget(30*time.Second)).PutObjects(ctx, []client.Object{{Type: "tree", Data: tree.Bytes()}})
+	shas, err := e.Client(e.nodeGrant("ws1", 1)).PutObjects(ctx, []client.Object{{Type: "tree", Data: tree.Bytes()}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	trees, err := e.Client(e.readGrant(repoText), client.WithBudget(30*time.Second)).Trees(ctx, shas[0], 100000)
-	if err != nil || len(trees.Trees) != 1 || len(trees.Trees[0].Entries) < 100000 {
-		t.Fatalf("tree over 4 MiB: %v %v", len(trees.Trees), err)
+	trees, err := e.Client(e.readGrant(repoText)).Trees(ctx, shas[0], 100000)
+	if err != nil || len(trees.Trees) != 1 || len(trees.Trees[0].Entries) < 8000 {
+		t.Fatalf("tree over its first reservation: %v %v", len(trees.Trees), err)
 	}
 }
 
 func TestObjectsBodyStartingWithAHugeTokenAnswersTooLarge(t *testing.T) {
 	e := newEnv(t)
 	e.want(e.claim("ws1", 1, repoText), 200, "")
-	req, _ := http.NewRequest("POST", e.url+"/v1/vcs/objects", strings.NewReader(`"`+strings.Repeat("a", 25<<20)+`"`))
+	server.LowerLimits(t, 0, lowWindow, 0, 0)
+	req, _ := http.NewRequest("POST", e.url+"/v1/vcs/objects", strings.NewReader(`"`+strings.Repeat("a", lowWindow+1<<10)+`"`))
 	req.Header.Set("Authorization", "Bearer "+e.nodeGrant("ws1", 1))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
