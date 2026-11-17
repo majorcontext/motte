@@ -146,9 +146,15 @@ fn cgi(conn: TcpStream, root: &Path) {
         let value = value.trim();
         match name.to_ascii_lowercase().as_str() {
             "content-length" => length = value.parse().unwrap(),
-            "content-type" => drop(cmd.env("CONTENT_TYPE", value)),
-            "content-encoding" => drop(cmd.env("HTTP_CONTENT_ENCODING", value)),
-            "git-protocol" => drop(cmd.env("GIT_PROTOCOL", value)),
+            "content-type" => {
+                cmd.env("CONTENT_TYPE", value);
+            }
+            "content-encoding" => {
+                cmd.env("HTTP_CONTENT_ENCODING", value);
+            }
+            "git-protocol" => {
+                cmd.env("GIT_PROTOCOL", value);
+            }
             _ => {}
         }
     }
