@@ -29,6 +29,21 @@ Non-goals:
 
 The store plane serves the node daemon and the jj backend. The control plane serves the caller. Every route needs a grant in the `Authorization: Bearer` header. A grant names the repository and the workspace. No route takes either from the request.
 
+### Service
+
+`cmd/motte` reads its configuration from the environment:
+
+| Variable | Meaning |
+|---|---|
+| `MOTTE_LISTEN` | Listen address. Default `:8080`. |
+| `MOTTE_DATABASE_URL` | PostgreSQL DSN. |
+| `MOTTE_BUCKET_KIND` | `gcs` or `fs`. |
+| `MOTTE_BUCKET` | Bucket name for `gcs`, directory for `fs`. |
+| `MOTTE_TRUSTED_KEYS` | JSON list of `{"kid","key","scopes"}`. `key` is the standard base64 of an Ed25519 public key. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Optional. Enables OTLP trace export. |
+
+The service applies its embedded migrations at start, under a PostgreSQL advisory lock, so replicas can start together. `GET /health` answers 200. `GET /ready` answers 200 while the database answers a ping. `GET /metrics` serves Prometheus metrics. These three routes need no grant.
+
 ### Store plane
 
 | Route | Scopes |
@@ -47,11 +62,13 @@ The store plane serves the node daemon and the jj backend. The control plane ser
 | `PUT /v1/vcs/refs/{name...}`, `DELETE /v1/vcs/refs/{name...}` | `node` |
 | `PUT /v1/vcs/packs/{pack_id}` | `import` |
 
+A ref route serves any repository, whether or not it has a `repos` row.
+
 ### Control plane
 
 | Route | Scope |
 |---|---|
-| `POST /v1/repos` with `{name, owner}` returns `{path}` | `operator` |
+| `POST /v1/repos` with `{name, owner}` answers 201 with `{path}` | `operator` |
 | `GET /v1/repos` lists repositories, newest first | `operator` |
 | `GET /v1/repos/{path}` | `operator` |
 | `PUT /v1/workspaces/{id}/claim` with `{epoch, owner, repo}` returns `{epoch, op, snapshot}` | `operator` |
@@ -68,7 +85,7 @@ workspaces(id pk, repo, owner, epoch bigint, op, snapshot, report_generation, cr
 op_heads(workspace_id pk -> workspaces, epoch, generation, heads text[], updated_at)
 ```
 
-A repository text has the form `<prefix>:<path>`. Object keys are `repos/<prefix>/<base64url path>/...` and `ops/<workspace>/...`. A repository that the caller owns elsewhere has no `repos` row. The store keeps only the packs and refs of such a repository.
+A repository text has the form `<prefix>:<path>`. The prefix `native` is reserved for the repositories that `POST /v1/repos` creates. The prefix matches `^[a-z0-9][a-z0-9-]{0,62}$`. The path has 1 to 512 bytes of UTF-8. Object keys are `repos/<prefix>/<base64url path>/...` and `ops/<workspace>/...`. A repository that the caller owns elsewhere has no `repos` row. The store keeps only the packs and refs of such a repository.
 
 A ref generation comes from the sequence `ref_generation`. It is never reused, including when a ref is deleted and created again. A swap with `expect` 0 creates the ref.
 
@@ -77,9 +94,10 @@ A ref generation comes from the sequence `ref_generation`. It is never reused, i
 `workspaces.epoch` is the highest epoch that the caller claimed.
 
 - Claim: `INSERT ... ON CONFLICT (id) DO UPDATE SET epoch = GREATEST(workspaces.epoch, EXCLUDED.epoch) WHERE deleted_at IS NULL RETURNING epoch, op, snapshot`. A claim below the stored epoch answers 409 `vcs_claim_lost`. A claim on a deleted workspace answers 410. `owner` and `repo` are set once. A different value answers 409.
-- Write: every ref swap, ref delete, op-heads swap and workspace report is one statement. It starts with `WITH guard AS (SELECT id FROM workspaces WHERE id = $ws AND epoch = $epoch AND deleted_at IS NULL FOR SHARE)`. The write applies only when the guard row exists.
+- A claim needs `epoch` of 1 or more. A claim on a `native` repository that has no row, or whose `repos.owner` differs from `owner`, answers 403 `vcs_repo_forbidden`. A claim whose `owner` or `repo` differs from the stored value answers 409 `vcs_workspace_conflict`. A claim on a deleted workspace answers 410 `vcs_workspace_deleted`.
+- Write: every ref swap, ref delete and op-heads swap is one statement. It starts with `WITH guard AS (SELECT id FROM workspaces WHERE id = $ws AND epoch = $epoch AND deleted_at IS NULL FOR SHARE)`. The write applies only when the guard row exists. A workspace report is one `UPDATE` of the workspace row with the same epoch, repository and `deleted_at` conditions in its `WHERE`. It takes the row lock itself, because two reports that hold `FOR SHARE` and then update the row can deadlock.
 - The claim `UPDATE` takes the row lock that `FOR SHARE` conflicts with. A write in flight finishes first, and every later write of the old epoch fails. `vcs_claim_lost` wins over `vcs_generation_conflict`. An op-heads write also needs `op_heads.epoch <= $epoch`.
-- A read route compares the grant epoch with `workspaces.epoch`. The grant repository must equal `workspaces.repo`.
+- A `node` route compares the grant epoch with `workspaces.epoch` before it runs, for reads and writes. A missing or deleted workspace answers 401. A repository that differs from `workspaces.repo` answers 403 `vcs_repo_forbidden`. A different epoch answers 409 `vcs_claim_lost`. Every write statement also needs `workspaces.repo` to equal the grant repository.
 
 ### Raise before commit
 
@@ -87,15 +105,15 @@ The caller raises the epoch before it commits its own increment. The caller call
 
 ### Workspace state
 
-`op`, `snapshot` and `report_generation` live on `workspaces`. A node report and a flush write one row with one ordering rule: the higher `report_generation` wins. A flush with generation 0 writes only while the stored `op` equals `prev`.
+`op`, `snapshot` and `report_generation` live on `workspaces`. A node report and a flush write one row with one ordering rule: the higher `report_generation` wins, and an equal one writes again, because a flush at the generation of a report carries a newer `snapshot`. A flush with generation 0 writes only while the stored `op` equals `prev`. A write that loses on this ordering rule answers success and changes nothing. A flush runs under the same epoch fence as a node write: a stale `epoch` answers 409 `vcs_claim_lost`, a deleted workspace 410, and an unknown workspace 404. A flush answers 204.
 
 ### Delete
 
-`DELETE /v1/workspaces/{id}` sets `deleted_at`. Every later read and write of that workspace fails. The call is idempotent. The store removes no op-head row and no object.
+`DELETE /v1/workspaces/{id}` sets `deleted_at`. Every later read and write of that workspace fails. The call is idempotent, answers 204, and does nothing for an unknown workspace. The store removes no op-head row and no object.
 
 ### Repository creation
 
-`POST /v1/repos` creates the repository with one root commit under the ref `main`. The root commit has the empty tree, the fixed author `motte` and the creation time as its time. A workspace can start on `main` at once.
+`POST /v1/repos` creates the repository with one root commit under the ref `main`. The root commit has the empty tree, the author and committer `motte <motte@motte.invalid>` and the creation time as its time. The store writes the root objects first, then the `repos` row and the ref in one transaction, so a failed create leaves no repository without `main`. The path is `repo_` and random base32 text. The name is trimmed and has 1 to 100 bytes with no control character, else 400 `invalid_body`. A workspace can start on `main` at once.
 
 ## Grant
 
@@ -139,11 +157,11 @@ Authorization happens at claim time. For a repository that the store keeps (it h
 
 The path prefix `/v1` is additive. New fields and new routes are allowed, and clients ignore unknown fields. A breaking change gets `/v2`, served beside `/v1`. The module is tagged with semantic versions.
 
-Wire error codes keep their `vcs_` text: `vcs_claim_lost`, `vcs_generation_conflict`, `vcs_not_found`, `vcs_object_invalid`, `vcs_object_too_large`, `vcs_repo_forbidden`, `vcs_not_configured`. The error body is `{"error":{"code","message","details"}}`. A conflict on a ref carries the stored ref in `details.ref`.
+Wire error codes keep their `vcs_` text: `vcs_claim_lost`, `vcs_generation_conflict`, `vcs_not_found`, `vcs_object_invalid`, `vcs_object_too_large`, `vcs_repo_forbidden`, `vcs_workspace_conflict`, `vcs_workspace_deleted`, `vcs_not_configured`. The error body is `{"error":{"code","message","details"}}`. A conflict on a ref carries the stored ref in `details.ref`.
 
 ## Observability
 
-- Traces: OTLP, with the endpoint from the environment and no vendor in the code. Span names start with `vcs.`. Requests accept W3C trace headers.
-- Metrics: Prometheus at `/metrics`, with names that start with `motte_`.
+- Traces: OTLP, with the endpoint from the environment and no vendor in the code. Span names start with `vcs.serve.` and end with the route, such as `vcs.serve.put.refs`. Requests accept W3C trace headers.
+- Metrics: Prometheus at `/metrics`, with names that start with `motte_`: `motte_http_requests_total` and `motte_http_request_duration_seconds`, by route.
 - Logs: JSON. A log line never holds a grant, a path or an object body.
 - Instrumentation is additive. It never changes behavior or errors.

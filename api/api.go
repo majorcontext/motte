@@ -14,6 +14,8 @@ const (
 	CodeObjectInvalid      Code = "vcs_object_invalid"
 	CodeObjectTooLarge     Code = "vcs_object_too_large"
 	CodeRepoForbidden      Code = "vcs_repo_forbidden"
+	CodeWorkspaceConflict  Code = "vcs_workspace_conflict"
+	CodeWorkspaceDeleted   Code = "vcs_workspace_deleted"
 	CodeUnauthorized       Code = "unauthorized"
 	CodeInvalidBody        Code = "invalid_body"
 	CodeInternal           Code = "internal_error"
@@ -27,6 +29,8 @@ var statuses = map[Code]int{
 	CodeObjectInvalid:      http.StatusBadRequest,
 	CodeObjectTooLarge:     http.StatusRequestEntityTooLarge,
 	CodeRepoForbidden:      http.StatusForbidden,
+	CodeWorkspaceConflict:  http.StatusConflict,
+	CodeWorkspaceDeleted:   http.StatusGone,
 	CodeUnauthorized:       http.StatusUnauthorized,
 	CodeInvalidBody:        http.StatusBadRequest,
 	CodeInternal:           http.StatusInternalServerError,
