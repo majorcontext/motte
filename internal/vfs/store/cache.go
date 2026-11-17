@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -234,6 +235,9 @@ func (c *Cache) fetchBlobs(ctx context.Context, batch []gitpack.SHA) (int, error
 }
 
 func (c *Cache) writeBlob(s gitpack.SHA, b []byte) error {
+	if got := gitpack.Hash(gitpack.Blob, b); got != s {
+		return fmt.Errorf("store: the blob answered for %s hashes to %s", s, got)
+	}
 	p := c.BlobPath(s)
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
