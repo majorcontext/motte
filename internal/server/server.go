@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -113,7 +114,7 @@ func (s *Server) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.As(err, &opConflict):
 		s.writeError(w, api.CodeGenerationConflict, "op heads generation conflict", nil)
 	default:
-		s.Logger.ErrorContext(r.Context(), "request failed", "route", r.Pattern, "error", err)
+		s.Logger.ErrorContext(r.Context(), "request failed", "route", r.Pattern, "error", logSafe(err))
 		s.writeError(w, api.CodeInternal, "internal error", nil)
 	}
 }
@@ -130,4 +131,13 @@ func decodeBody(r *http.Request, limit int, out any) error {
 		return errBody
 	}
 	return nil
+}
+
+// logSafe drops the path of a filesystem error, which a log line must not hold.
+func logSafe(err error) string {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Op + ": " + pe.Err.Error()
+	}
+	return err.Error()
 }

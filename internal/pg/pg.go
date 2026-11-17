@@ -167,16 +167,15 @@ func (d *DB) Delete(ctx context.Context, id string) error {
 const guard = `SELECT id FROM workspaces WHERE id = $%d AND epoch = $%d AND repo = $%d AND deleted_at IS NULL FOR SHARE`
 
 // Report stores the op and snapshot of a workspace report or flush. generation 0 writes only while the stored op is
-// prev. A lower generation than the stored one is dropped without an error.
+// prev. A lower generation than the stored one is dropped without an error; an equal one writes again. The UPDATE
+// takes the row lock itself: a FOR SHARE guard here would deadlock two concurrent reports.
 func (d *DB) Report(ctx context.Context, ws string, epoch uint64, repo string, generation int64, prev, op, snapshot string) error {
-	tag, err := d.Pool.Exec(ctx, fmt.Sprintf(`
-		WITH guard AS (`+guard+`)
-		UPDATE workspaces w SET op = $4, snapshot = $5,
-			report_generation = COALESCE(NULLIF($6::bigint, 0), w.report_generation)
-		FROM guard
-		WHERE w.id = guard.id AND CASE WHEN $6::bigint > 0
-			THEN (w.report_generation IS NULL OR w.report_generation <= $6::bigint)
-			ELSE w.op = $7 END`, 1, 2, 3), ws, int64(epoch), repo, op, snapshot, generation, prev)
+	tag, err := d.Pool.Exec(ctx, `
+		UPDATE workspaces SET op = $4, snapshot = $5,
+			report_generation = COALESCE(NULLIF($6::bigint, 0), report_generation)
+		WHERE id = $1 AND epoch = $2 AND repo = $3 AND deleted_at IS NULL AND CASE WHEN $6::bigint > 0
+			THEN (report_generation IS NULL OR report_generation <= $6::bigint)
+			ELSE op = $7 END`, ws, int64(epoch), repo, op, snapshot, generation, prev)
 	if err != nil {
 		return fmt.Errorf("pg: report workspace: %w", err)
 	}
