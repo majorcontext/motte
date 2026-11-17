@@ -3,11 +3,13 @@
 package ctl_test
 
 import (
+	"errors"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -32,8 +34,8 @@ func TestServeClosesConnectionsWhenItStops(t *testing.T) {
 	d := startDaemon(t, 0)
 	d.stop()
 	d.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	if _, err := d.rd.ReadByte(); err != io.EOF {
-		t.Errorf("read after stop = %v, want EOF", err)
+	if _, err := d.rd.ReadByte(); err != io.EOF && !errors.Is(err, syscall.ECONNRESET) {
+		t.Errorf("read after stop = %v, want a closed connection", err)
 	}
 }
 
