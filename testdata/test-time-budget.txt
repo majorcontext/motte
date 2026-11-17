@@ -1,0 +1,17 @@
+# Time budgets for go test, read by internal/testtime.
+#   leaf SECONDS                  a test that has no subtests
+#   package PATH|default SECONDS  wall time of one package; PATH@JOB sets it for one job
+#   test PATH NAME SECONDS        tests of PATH whose name starts with NAME
+# A test with subtests is not checked, because a parallel parent reports the time of the whole package.
+# A change that makes a test or package slower raises its number in the same diff and states why.
+
+leaf 10
+package default 10
+
+
+# The limit tests move a 16 MiB object, a 16 MiB + 1 body and a 5 MiB tree through
+# JSON under the race detector, at the real limits of the service.
+package internal/server 30
+test internal/server TestLargestObjectIsStored 15
+test internal/server TestLargeTreeIsRead 15
+test internal/server TestBodyOverTheLimitAnswersTooLarge 15

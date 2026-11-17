@@ -389,19 +389,24 @@ func TestUnknownRouteAndMethodUseTheErrorEnvelope(t *testing.T) {
 	e.want(e.call("DELETE", "/v1/repos", e.operator(), nil), 405, "method_not_allowed")
 }
 
-func TestLargestObjectIsStoredAndALargeTreeIsRead(t *testing.T) {
+func TestLargestObjectIsStored(t *testing.T) {
+	e := newEnv(t)
+	e.want(e.claim("ws1", 1, repoText), 200, "")
+	node := e.Client(e.nodeGrant("ws1", 1), client.WithBudget(30*time.Second))
+	if _, err := node.PutObjects(context.Background(), []client.Object{{Type: "blob", Data: make([]byte, gitpack.MaxObjectBytes)}}); err != nil {
+		t.Fatalf("object at the limit: %v", err)
+	}
+}
+
+func TestLargeTreeIsRead(t *testing.T) {
 	e := newEnv(t)
 	e.want(e.claim("ws1", 1, repoText), 200, "")
 	ctx := context.Background()
-	node := e.Client(e.nodeGrant("ws1", 1), client.WithBudget(30*time.Second))
-	if _, err := node.PutObjects(ctx, []client.Object{{Type: "blob", Data: make([]byte, gitpack.MaxObjectBytes)}}); err != nil {
-		t.Fatalf("object at the limit: %v", err)
-	}
 	var tree bytes.Buffer
 	for i := 0; tree.Len() < 5<<20; i++ {
 		fmt.Fprintf(&tree, "160000 e%07d\x00%s", i, strings.Repeat("a", 20))
 	}
-	shas, err := node.PutObjects(ctx, []client.Object{{Type: "tree", Data: tree.Bytes()}})
+	shas, err := e.Client(e.nodeGrant("ws1", 1), client.WithBudget(30*time.Second)).PutObjects(ctx, []client.Object{{Type: "tree", Data: tree.Bytes()}})
 	if err != nil {
 		t.Fatal(err)
 	}

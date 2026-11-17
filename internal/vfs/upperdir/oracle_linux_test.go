@@ -4,6 +4,7 @@ package upperdir
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"maps"
@@ -96,6 +97,10 @@ func editMerged(t *testing.T, m func(string) string) {
 			err = os.Link(p, m(s[2]))
 		case "fifo":
 			err = unix.Mkfifo(p, 0o644)
+		}
+		// overlayfs may refuse a directory rename onto an empty directory; Scan must match the merged view either way.
+		if s[0] == "mv" && errors.Is(err, unix.EEXIST) {
+			continue
 		}
 		if err != nil {
 			t.Fatalf("%v: %v", s, err)
