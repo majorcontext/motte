@@ -4,6 +4,8 @@ package csi
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"net"
@@ -111,8 +113,17 @@ func (p *NodePlugin) volDir(id string) string { return filepath.Join(p.StateDir,
 
 const ctlDirFile = "ctl-dir"
 
+// maxSocketPath is the longest unix socket path that Linux binds, without the terminating NUL.
+const maxSocketPath = 107
+
+func (p *NodePlugin) ctlPath(uid, workspace string) string {
+	sum := sha256.Sum256([]byte(uid + "/" + workspace))
+	return filepath.Join(p.StateDir, "ctl", hex.EncodeToString(sum[:16]))
+}
+
 // ctlDir is the control socket directory of one workspace of a pod. The kubelet names the pod, so a pod cannot name
-// the directory of another one, and a pod with two workspace volumes has two directories.
+// the directory of another one, and a pod with two workspace volumes has two directories. The name is a fixed-length
+// hash of both, so the socket path stays short for any pod UID and workspace.
 func (p *NodePlugin) ctlDir(attrs map[string]string, workspace string) (string, error) {
 	uid := attrs[volattr.PodUIDAttr]
 	if uid == "" || strings.Trim(uid, "0123456789abcdefABCDEF-") != "" {
@@ -121,7 +132,10 @@ func (p *NodePlugin) ctlDir(attrs map[string]string, workspace string) (string, 
 	if !volattr.ValidWorkspace(workspace) {
 		return "", status.Error(codes.InvalidArgument, "the volume attributes name no valid workspace")
 	}
-	dir := filepath.Join(p.StateDir, "ctl", uid, workspace)
+	dir := p.ctlPath(uid, workspace)
+	if sock := filepath.Join(dir, volattr.CtlSocket); len(sock) > maxSocketPath {
+		return "", status.Errorf(codes.InvalidArgument, "the socket path %s is %d bytes and a unix socket path holds %d; use a shorter state directory", sock, len(sock), maxSocketPath)
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", status.Error(codes.Internal, err.Error())
 	}
@@ -147,7 +161,7 @@ func (p *NodePlugin) checkNamespace(attrs map[string]string) error {
 	return nil
 }
 
-// removeCtlDir deletes the control directory that the volume directory names, and its pod directory when that is empty.
+// removeCtlDir deletes the control directory that the volume directory names.
 func (p *NodePlugin) removeCtlDir(volDir string) error {
 	rel, err := os.ReadFile(filepath.Join(volDir, ctlDirFile))
 	if err != nil || !filepath.IsLocal(string(rel)) {
@@ -157,7 +171,6 @@ func (p *NodePlugin) removeCtlDir(volDir string) error {
 	if err := os.RemoveAll(dir); err != nil {
 		return status.Error(codes.Internal, err.Error())
 	}
-	_ = os.Remove(filepath.Dir(dir))
 	return nil
 }
 

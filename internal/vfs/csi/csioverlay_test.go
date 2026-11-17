@@ -190,7 +190,7 @@ func TestOverlayPublishAndUnpublishOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantCalls(t, f, "unmount T 0", "mounts", "lower.unmount", "lower.stop", "lower.close")
-	if exists(f.volDir()) || exists(filepath.Join(f.state, "ctl", "abc-123", "b")) {
+	if exists(f.volDir()) || exists(p.ctlPath("abc-123", "b")) {
 		t.Fatal("unpublish left the volume or the control directory")
 	}
 }
@@ -225,7 +225,7 @@ func TestOverlayPublishFailureUndoesInReverse(t *testing.T) {
 			if !reflect.DeepEqual(undo, c.undo) {
 				t.Fatalf("undo = %q, want %q", undo, c.undo)
 			}
-			if kept := exists(f.volDir()); kept != c.edits || !exists(filepath.Join(f.state, "ctl", "abc-123", "b")) {
+			if kept := exists(f.volDir()); kept != c.edits || !exists(p.ctlPath("abc-123", "b")) {
 				t.Fatalf("volume kept = %v, want %v, or the control directory went", kept, c.edits)
 			}
 		})
@@ -503,7 +503,7 @@ func TestWorkspaceVolumesOfOnePodKeepSeparateControlDirectories(t *testing.T) {
 	must(t, publishVol(p, "v1", "b", t1, testCommit, "ws"))
 	must(t, publishVol(p, "v2", "c", t2, testCommit, "ws"))
 	wantCode(t, publishVol(p, "v3", "b", filepath.Join(f.state, "t3"), testCommit, "ws"), codes.FailedPrecondition)
-	ctlB, ctlC := filepath.Join(f.state, "ctl", "abc-123", "b"), filepath.Join(f.state, "ctl", "abc-123", "c")
+	ctlB, ctlC := p.ctlPath("abc-123", "b"), p.ctlPath("abc-123", "c")
 	if !exists(ctlB) || !exists(ctlC) {
 		t.Fatal("a workspace volume has no control directory of its own")
 	}
@@ -546,4 +546,27 @@ func TestUnpublishOfOneVolumeDoesNotBlockAnother(t *testing.T) {
 	}
 	close(release)
 	must(t, <-slow)
+}
+
+// TestControlSocketPathStaysUnderTheLimit: a unix socket path holds at most 107 bytes, and a 36-byte pod UID with a
+// 64-byte workspace would pass it under any layout that names them. A state directory that is too long fails the
+// publish with a message that names the path.
+func TestControlSocketPathStaysUnderTheLimit(t *testing.T) {
+	p, f := newOverlayPlugin(t)
+	uid, ws := "01234567-89ab-cdef-0123-456789abcdef", strings.Repeat("w", 64)
+	pub := func(id string) error {
+		attrs := volattr.Publication{Workspace: ws, Epoch: 1, Repo: "gh:o/r", Commit: testCommit}.Attributes()
+		attrs[volattr.PodUIDAttr], attrs[volattr.PodNamespaceAttr] = uid, "ws"
+		_, err := p.NodePublishVolume(context.Background(), &csi.NodePublishVolumeRequest{VolumeId: id, TargetPath: f.tgt, VolumeContext: attrs})
+		return err
+	}
+	must(t, pub("v1"))
+	long := filepath.Join(f.state, strings.Repeat("d", 100))
+	must(t, os.MkdirAll(long, 0o755))
+	p.StateDir = long
+	err := pub("v2")
+	wantCode(t, err, codes.InvalidArgument)
+	if !strings.Contains(err.Error(), "socket path") {
+		t.Errorf("err = %v, want it to name the socket path", err)
+	}
 }

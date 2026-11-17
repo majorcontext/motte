@@ -23,8 +23,8 @@ const (
 	PodUIDAttr = "csi.storage.k8s.io/pod.uid"
 	// PodNamespaceAttr is the namespace of the pod. The kubelet sets it when the CSIDriver has podInfoOnMount.
 	PodNamespaceAttr = "csi.storage.k8s.io/pod.namespace"
-	kindAttr   = "volume"
-	kindCtl    = "ctl"
+	kindAttr         = "volume"
+	kindCtl          = "ctl"
 )
 
 // CtlAttributes returns the attributes of the volume that binds the control socket of one workspace into a pod. A pod
