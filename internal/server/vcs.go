@@ -218,13 +218,19 @@ type aheadReader struct {
 	r   io.Reader
 	dec *json.Decoder
 	n   int64
+	// failed makes the refusal stick, because the decoder can read again after an error.
+	failed bool
 }
 
 func (a *aheadReader) Read(p []byte) (int, error) {
+	if a.failed {
+		return 0, store.ErrTooLarge
+	}
 	n, err := a.r.Read(p[:min(len(p), 64<<10)])
 	a.n += int64(n)
 	if a.n-a.dec.InputOffset() > decodeWindow {
-		return n, store.ErrTooLarge
+		a.failed = true
+		return 0, store.ErrTooLarge
 	}
 	return n, err
 }
@@ -244,7 +250,7 @@ func decodeObjects(body []byte) ([]gitpack.Object, error) {
 	ahead.dec = dec
 	var objs []gitpack.Object
 	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
-		return nil, store.ErrInvalid
+		return nil, decodeFailure(err)
 	}
 	for dec.More() {
 		key, err := dec.Token()
@@ -259,7 +265,7 @@ func decodeObjects(body []byte) ([]gitpack.Object, error) {
 			continue
 		}
 		if t, err := dec.Token(); err != nil || t != json.Delim('[') {
-			return nil, store.ErrInvalid
+			return nil, decodeFailure(err)
 		}
 		for dec.More() {
 			if len(objs) >= store.MaxBatch {
@@ -276,14 +282,14 @@ func decodeObjects(body []byte) ([]gitpack.Object, error) {
 			objs = append(objs, gitpack.Object{Type: gitpack.ParseType(o.Type), Data: data})
 		}
 		if _, err := dec.Token(); err != nil {
-			return nil, store.ErrInvalid
+			return nil, decodeFailure(err)
 		}
 	}
 	if t, err := dec.Token(); err != nil || t != json.Delim('}') {
-		return nil, store.ErrInvalid
+		return nil, decodeFailure(err)
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return nil, store.ErrInvalid
+		return nil, decodeFailure(err)
 	}
 	return objs, nil
 }

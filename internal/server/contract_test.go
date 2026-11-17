@@ -410,3 +410,18 @@ func TestLargestObjectIsStoredAndALargeTreeIsRead(t *testing.T) {
 		t.Fatalf("tree over 4 MiB: %v %v", len(trees.Trees), err)
 	}
 }
+
+func TestObjectsBodyStartingWithAHugeTokenAnswersTooLarge(t *testing.T) {
+	e := newEnv(t)
+	e.want(e.claim("ws1", 1, repoText), 200, "")
+	req, _ := http.NewRequest("POST", e.url+"/v1/vcs/objects", strings.NewReader(`"`+strings.Repeat("a", 25<<20)+`"`))
+	req.Header.Set("Authorization", "Bearer "+e.nodeGrant("ws1", 1))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 413 {
+		t.Errorf("status = %d, want 413", resp.StatusCode)
+	}
+}
