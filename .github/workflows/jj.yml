@@ -1,0 +1,44 @@
+name: jj
+
+on:
+  pull_request:
+    paths:
+      - jj/**
+      - .github/workflows/jj.yml
+  push:
+    branches: [main]
+    paths:
+      - jj/**
+      - .github/workflows/jj.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jj-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Format, clippy, test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: jj
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install --profile minimal
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            jj/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('jj/Cargo.lock', 'jj/rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
