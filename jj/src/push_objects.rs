@@ -5,9 +5,9 @@ use gix::objs::{Kind, Write as _};
 use gix::odb::pack::Find as _;
 use jj_lib::backend::CommitId;
 use jj_lib::index::Index;
-use motte_jj::ctl::{CtlClient, HASH_KIND, ObjectStore as _, StoreError};
+use motte_jj::ctl::{CtlClient, HASH_KIND, ObjectStore as _};
 
-use crate::push::{Fail, Outcome};
+use crate::push::{Fail, Outcome, store_fail};
 
 /// Largest blob that one `getbatch` may carry; a larger blob is read alone.
 const BATCH_MAX: u64 = 1 << 30;
@@ -23,18 +23,11 @@ pub struct Copied {
     pub bytes: u64,
 }
 
-fn store_fail(e: StoreError) -> Fail {
-    Fail::new(
-        Outcome::Network,
-        format!("the daemon cannot serve the commits: {e}"),
-    )
-}
-
 fn commit_parents(
     ctl: &CtlClient,
     id: &gix::ObjectId,
 ) -> Result<(gix::ObjectId, Vec<gix::ObjectId>), Fail> {
-    let (_, raw) = ctl.get(id).map_err(store_fail)?;
+    let (_, raw) = ctl.get(id).map_err(|e| store_fail(e, "pushed"))?;
     let commit = gix::objs::CommitRef::from_bytes(&raw, HASH_KIND)
         .map_err(|e| Fail::new(Outcome::Network, format!("bad commit {id}: {e}")))?;
     Ok((commit.tree(), commit.parents().collect()))
@@ -107,7 +100,7 @@ pub fn copy(ctl: &CtlClient, objects_dir: &Path, plan: &Plan) -> Result<Copied, 
             None => None,
         };
         copier.tree(tree, old)?;
-        let (_, raw) = ctl.get(id).map_err(store_fail)?;
+        let (_, raw) = ctl.get(id).map_err(|e| store_fail(e, "pushed"))?;
         copier.write(Kind::Commit, &raw)?;
         trees.insert(*id, tree);
     }
@@ -135,9 +128,9 @@ impl Copier<'_> {
         if self.odb.contains(&id) {
             return Ok(());
         }
-        let (_, raw) = self.ctl.get(&id).map_err(store_fail)?;
+        let (_, raw) = self.ctl.get(&id).map_err(|e| store_fail(e, "pushed"))?;
         let old_raw = match old {
-            Some(o) => Some(self.ctl.get(&o).map_err(store_fail)?.1),
+            Some(o) => Some(self.ctl.get(&o).map_err(|e| store_fail(e, "pushed"))?.1),
             None => None,
         };
         let old_entries: HashMap<&gix::bstr::BStr, (gix::objs::tree::EntryMode, gix::ObjectId)> =
@@ -172,11 +165,14 @@ impl Copier<'_> {
     }
 
     fn blobs(&mut self, ids: &[gix::ObjectId]) -> Result<(), Fail> {
-        let datas = self.ctl.get_blobs(ids, BATCH_MAX).map_err(store_fail)?;
+        let datas = self
+            .ctl
+            .get_blobs(ids, BATCH_MAX)
+            .map_err(|e| store_fail(e, "pushed"))?;
         for (id, data) in ids.iter().zip(datas) {
             let data = match data {
                 Some(d) => d,
-                None => self.ctl.get(id).map_err(store_fail)?.1,
+                None => self.ctl.get(id).map_err(|e| store_fail(e, "pushed"))?.1,
             };
             self.write(Kind::Blob, &data)?;
         }

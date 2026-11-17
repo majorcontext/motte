@@ -19,8 +19,8 @@ use jj_lib::repo::StoreFactories;
 use jj_lib::simple_op_heads_store::SimpleOpHeadsStore;
 use jj_lib::simple_op_store::SimpleOpStore;
 
-use crate::backend::{BACKEND_NAME, NativeBackend, SOCK_FILE};
-use crate::ctl::{CtlClient, StoreError};
+use crate::backend::{BACKEND_NAME, NativeBackend};
+use crate::ctl::{Code, CtlClient, StoreError, socket_path};
 
 pub const OP_STORE_NAME: &str = "motte-op-store";
 pub const OP_HEADS_NAME: &str = "motte-op-heads";
@@ -88,14 +88,11 @@ impl MotteOpHeadsStore {
         }
     }
 
-    /// The daemon socket, found the way the backend finds it.
+    /// The daemon socket. Without one the update goes on with the local heads only and marks
+    /// nothing as unsynced.
     fn ctl(&self) -> Option<CtlClient> {
-        if let Some(s) = std::env::var_os("MOTTE_VFS_SOCK") {
-            return Some(CtlClient::new(s));
-        }
-        let path = self.dir.parent()?.join("store").join(SOCK_FILE);
-        match std::fs::read(&path) {
-            Ok(b) => Some(CtlClient::new(String::from_utf8_lossy(&b).into_owned())),
+        match socket_path(&self.dir.parent()?.join("store")) {
+            Ok(sock) => Some(CtlClient::new(sock)),
             Err(e) => {
                 eprintln!("warning: no daemon socket for the remote op heads: {e}");
                 None
@@ -116,7 +113,7 @@ pub fn update_unsynced(repo: &Path, remove: &[String], add: Option<&str>) {
     edit_marker(repo, |h| remove.iter().any(|r| r == h), add);
 }
 
-/// Drops from the unsynced heads the ones that a drain swapped in and the ones that are no longer
+/// Drops from the unsynced heads the ones that a drain swapped in and the ones that are not
 /// local heads, and keeps the rest. It reads the local heads and the marks under one hold of the
 /// marker lock: a writer creates its head before it marks it under that lock, so every mark it
 /// reads names a head that existed before the read of the local heads.
@@ -268,7 +265,7 @@ pub enum Mirrored<T> {
     Done(T),
     /// The call failed or ran out of time, so the remote op heads may lag.
     Behind,
-    /// The daemon does not know the op; an old daemon cannot be drained.
+    /// The daemon answers `unknown_op`, so it has no op heads to drain.
     Unsupported,
 }
 
@@ -285,7 +282,7 @@ pub fn within<T: Send + 'static>(
     });
     match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
         Ok(r) => settle(r),
-        Err(_) => unsynced(StoreError::Daemon("the op heads budget ran out".into())),
+        Err(_) => unsynced(StoreError::Local("the op heads budget ran out".into())),
     }
 }
 
@@ -293,7 +290,7 @@ pub fn within<T: Send + 'static>(
 /// every daemon call.
 fn in_budget(deadline: Instant) -> Result<(), StoreError> {
     if Instant::now() >= deadline {
-        return Err(StoreError::Daemon("the op heads budget ran out".into()));
+        return Err(StoreError::Local("the op heads budget ran out".into()));
     }
     Ok(())
 }
@@ -317,7 +314,7 @@ pub fn mirror(
         in_budget(deadline)?;
         match ctl.opheads(Some((generation, &heads))) {
             Ok(_) => return Ok(()),
-            Err(StoreError::Daemon(m)) if m.contains("vcs_generation_conflict") => {}
+            Err(e) if e.is(&Code::GenerationConflict) => {}
             Err(e) => return Err(e),
         }
         in_budget(deadline)?;
@@ -348,7 +345,7 @@ fn merged(current: Vec<String>, old: &[String], new: &[String]) -> Vec<String> {
 /// The local op heads of the repo dir, sorted, read as `get_op_heads` does.
 pub fn read_heads(repo: &Path) -> Result<Vec<String>, StoreError> {
     let unreadable =
-        |e: std::io::Error| StoreError::Daemon(format!("cannot read the local op heads: {e}"));
+        |e: std::io::Error| StoreError::Local(format!("cannot read the local op heads: {e}"));
     let mut heads = Vec::new();
     for entry in std::fs::read_dir(repo.join("op_heads").join("heads")).map_err(unreadable)? {
         let name = entry.map_err(unreadable)?.file_name();
@@ -360,7 +357,7 @@ pub fn read_heads(repo: &Path) -> Result<Vec<String>, StoreError> {
         }
     }
     if heads.is_empty() {
-        return Err(StoreError::Daemon("the op log has no local head".into()));
+        return Err(StoreError::Local("the op log has no local head".into()));
     }
     heads.sort();
     Ok(heads)
@@ -398,7 +395,7 @@ pub fn merge_remote(
         in_budget(deadline)?;
         match ctl.opheads(Some((generation, &target))) {
             Ok(_) => return Ok(heads),
-            Err(StoreError::Daemon(m)) if m.contains("vcs_generation_conflict") => heads = local()?,
+            Err(e) if e.is(&Code::GenerationConflict) => heads = local()?,
             Err(e) => return Err(e),
         }
     }
@@ -420,7 +417,7 @@ pub fn put_ops(
     for (op, view) in pending {
         for (kind, obj) in [("views", view), ("operations", op)] {
             let data = std::fs::read(op_store.join(kind).join(obj)).map_err(|e| {
-                StoreError::Daemon(format!("cannot read {kind}/{obj} of the op log: {e}"))
+                StoreError::Local(format!("cannot read {kind}/{obj} of the op log: {e}"))
             })?;
             deadline.map_or(Ok(()), in_budget)?;
             ctl.putop(kind, obj, &data)?;
@@ -433,13 +430,13 @@ pub fn put_ops(
         .append(true)
         .open(repo_path.join(FLUSHED_FILE))
         .and_then(|mut f| std::io::Write::write_all(&mut f, sent.as_bytes()))
-        .map_err(|e| StoreError::Daemon(format!("cannot list the uploaded operations: {e}")))
+        .map_err(|e| StoreError::Local(format!("cannot list the uploaded operations: {e}")))
 }
 
 /// Stores the shallow roots in use at op log head `head` as a "views" object named after the head
 /// (a view is named by a hash of its content, so the two never meet). A restore of that head reads
-/// them back verbatim. Each id ends in a newline, so the body of an empty set is one newline:
-/// the daemon answers a read of an empty object with no `data` field.
+/// them back verbatim. Each id ends in a newline, so the body of an empty set is one newline and
+/// the object is never empty.
 pub fn put_shallow(ctl: &CtlClient, head: &str, roots: &[CommitId]) -> Result<(), StoreError> {
     let mut hex: Vec<String> = roots.iter().map(|r| r.hex()).collect();
     hex.sort();
@@ -460,7 +457,7 @@ pub fn get_shallow(ctl: &CtlClient, head: &str) -> Result<Option<Vec<CommitId>>,
                 .filter_map(|l| CommitId::try_from_hex(l.trim()))
                 .collect(),
         )),
-        Err(StoreError::Daemon(m)) if m.contains("vcs_not_found") => Ok(None),
+        Err(e) if e.is(&Code::NotFound) => Ok(None),
         Err(e) => Err(e),
     }
 }
@@ -476,8 +473,8 @@ pub fn settle<T>(r: Result<T, StoreError>) -> Result<Mirrored<T>, StoreError> {
 /// Fails on a lost claim. Any other failure leaves the remote op heads behind the local ones.
 fn unsynced<T>(e: StoreError) -> Result<Mirrored<T>, StoreError> {
     match e {
-        StoreError::Daemon(m) if m.contains("vcs_claim_lost") => Err(StoreError::Daemon(m)),
-        StoreError::Daemon(m) if m.contains("unknown op") => Ok(Mirrored::Unsupported),
+        e if e.is(&Code::ClaimLost) => Err(e),
+        e if e.is(&Code::UnknownOp) => Ok(Mirrored::Unsupported),
         e => {
             eprintln!("warning: the remote op heads were not updated: {e}");
             Ok(Mirrored::Behind)

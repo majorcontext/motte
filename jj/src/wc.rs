@@ -46,7 +46,7 @@ use jj_lib::working_copy::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::ctl::CtlClient;
+use crate::ctl::{CtlClient, MAX_OBJECT_BYTES};
 
 mod cache;
 mod overlay;
@@ -110,7 +110,6 @@ struct StateFile {
     tree_ids: Vec<String>,
     labels: Vec<String>,
     mount: PathBuf,
-    sock: PathBuf,
     /// Marker length used when a conflicted path was written to the mount.
     conflict_marker_len: BTreeMap<String, u32>,
     /// Paths that a checkout could not write; the next snapshot settles them.
@@ -122,7 +121,6 @@ struct StateFile {
 #[derive(Clone, Debug, Default)]
 pub struct VfsConfig {
     pub mount: PathBuf,
-    pub sock: PathBuf,
 }
 
 fn wc_err(
@@ -192,11 +190,14 @@ pub fn syncfs(mount: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn conn_for(st: &StateFile) -> Arc<CtlClient> {
-    let sock = std::env::var_os("MOTTE_VFS_SOCK")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| st.sock.clone());
-    Arc::new(CtlClient::new(sock))
+fn conn_for(store: &Store) -> Result<Arc<CtlClient>, WorkingCopyStateError> {
+    let backend = store
+        .backend()
+        .downcast_ref::<crate::backend::NativeBackend>()
+        .ok_or_else(|| wc_err("no daemon socket", "the repo has no native backend"))?;
+    let sock =
+        crate::ctl::socket_path(backend.store_path()).map_err(|e| wc_err("no daemon socket", e))?;
+    Ok(Arc::new(CtlClient::new(sock)))
 }
 
 pub struct VfsWorkingCopy {
@@ -259,7 +260,7 @@ impl WorkingCopy for VfsWorkingCopy {
             .map_err(|e| wc_err("Failed to lock working copy", e))?;
         let st = read_state(&self.state_path)?;
         let tree = load_tree(&self.store, &st)?;
-        let ctl = conn_for(&st);
+        let ctl = conn_for(&self.store)?;
         Ok(Box::new(LockedVfsWorkingCopy {
             store: self.store.clone(),
             state_path: self.state_path.clone(),
@@ -278,7 +279,7 @@ impl WorkingCopy for VfsWorkingCopy {
 }
 
 pub struct VfsWorkingCopyFactory {
-    /// Set by `jj motte init`; loading reads the mount and socket from the state file.
+    /// Set by `jj motte init`; loading reads the mount from the state file.
     pub init: Option<VfsConfig>,
 }
 
@@ -295,14 +296,13 @@ impl WorkingCopyFactory for VfsWorkingCopyFactory {
         let cfg = self.init.clone().ok_or_else(|| {
             wc_err(
                 "motte-vfs working copy must be created with `jj motte init`",
-                "missing --mount/--sock",
+                "missing --mount",
             )
         })?;
         let mut st = StateFile {
             operation_id: operation_id.hex(),
             workspace_name: workspace_name.as_str().to_owned(),
             mount: cfg.mount,
-            sock: cfg.sock,
             ..Default::default()
         };
         store_tree(&mut st, &store.empty_merged_tree());
@@ -404,81 +404,84 @@ type Job = (PathBuf, bool, Option<gix::ObjectId>, bool);
 const PUT_BATCH_FILES: usize = 64;
 const PUT_BATCH_BYTES: usize = 8 << 20;
 
+type Slots = std::sync::Mutex<Vec<Option<ReadPut>>>;
+
+/// Stores the blobs of the files in `read` and moves their results to `out`.
+fn put_reads(ctl: &CtlClient, jobs: &[Job], read: &mut Vec<(usize, Vec<u8>)>, out: &Slots) {
+    use crate::ctl::ObjectStore as _;
+    let ids: Vec<gix::ObjectId> = read
+        .iter()
+        .map(|(_, d)| crate::ctl::hash_object(gix::objs::Kind::Blob, d))
+        .collect();
+    let unsure: Vec<usize> = (0..read.len())
+        .filter(|&k| jobs[read[k].0].2 != Some(ids[k]))
+        .collect();
+    let (ask, send): (Vec<usize>, Vec<usize>) =
+        unsure.into_iter().partition(|&k| jobs[read[k].0].3);
+    let asked: Vec<gix::ObjectId> = ask.iter().map(|&k| ids[k]).collect();
+    let mut missing: Vec<usize> = match ctl.has(&asked) {
+        Ok(present) if !asked.is_empty() => ask
+            .iter()
+            .zip(present)
+            .filter(|(_, p)| !p)
+            .map(|(&k, _)| k)
+            .collect(),
+        _ => ask,
+    };
+    missing.extend(send);
+    let objs: Vec<_> = missing
+        .iter()
+        .map(|&k| (gix::objs::Kind::Blob, read[k].1.as_slice()))
+        .collect();
+    let res = if objs.is_empty() {
+        Ok(vec![])
+    } else {
+        ctl.put_many(&objs)
+    };
+    let mut out = out.lock().unwrap();
+    for (k, (i, data)) in read.drain(..).enumerate() {
+        out[i] = Some(match &res {
+            Ok(_) => Ok((ids[k], jobs[i].1.then_some(data))),
+            Err(e) => Err(io::Error::other(e.to_string())),
+        });
+    }
+}
+
+/// Reads the files of one chunk of jobs, and stores their blobs a batch at a time.
+fn read_chunk(ctl: &CtlClient, jobs: &[Job], range: std::ops::Range<usize>, out: &Slots) {
+    let mut read: Vec<(usize, Vec<u8>)> = Vec::new();
+    let mut bytes = 0;
+    for (i, job) in jobs.iter().enumerate().take(range.end).skip(range.start) {
+        match fs::read(&job.0) {
+            Ok(data) => {
+                if !read.is_empty() && bytes + data.len() > PUT_BATCH_BYTES {
+                    put_reads(ctl, jobs, &mut read, out);
+                    bytes = 0;
+                }
+                bytes += data.len();
+                read.push((i, data));
+            }
+            Err(e) => out.lock().unwrap()[i] = Some(Err(e)),
+        }
+    }
+    put_reads(ctl, jobs, &mut read, out);
+}
+
 /// Reads each file and stores it as a blob, spread over worker threads with one daemon connection each.
 /// A worker sends the blobs of up to `PUT_BATCH_FILES` files (or `PUT_BATCH_BYTES`) in one request.
 fn read_and_put(sock: &Path, jobs: &[Job], workers: usize) -> Vec<ReadPut> {
-    use crate::ctl::ObjectStore as _;
     let n = jobs.len();
-    let out: std::sync::Mutex<Vec<Option<ReadPut>>> =
-        std::sync::Mutex::new((0..n).map(|_| None).collect());
+    let out: Slots = std::sync::Mutex::new((0..n).map(|_| None).collect());
     let next = std::sync::atomic::AtomicUsize::new(0);
     let chunk = n.div_ceil(workers.max(1)).clamp(1, PUT_BATCH_FILES);
     let work = || {
         let ctl = CtlClient::new(sock);
-        let flush = |read: &mut Vec<(usize, Vec<u8>)>| {
-            let ids: Vec<gix::ObjectId> = read
-                .iter()
-                .map(|(_, d)| crate::ctl::hash_object(gix::objs::Kind::Blob, d))
-                .collect();
-            let unsure: Vec<usize> = (0..read.len())
-                .filter(|&k| jobs[read[k].0].2 != Some(ids[k]))
-                .collect();
-            let (ask, send): (Vec<usize>, Vec<usize>) =
-                unsure.into_iter().partition(|&k| jobs[read[k].0].3);
-            let asked: Vec<gix::ObjectId> = ask.iter().map(|&k| ids[k]).collect();
-            let mut missing: Vec<usize> = match ctl.has(&asked) {
-                Ok(present) if !asked.is_empty() => ask
-                    .iter()
-                    .zip(present)
-                    .filter(|(_, p)| !p)
-                    .map(|(&k, _)| k)
-                    .collect(),
-                _ => ask,
-            };
-            missing.extend(send);
-            let objs: Vec<_> = missing
-                .iter()
-                .map(|&k| (gix::objs::Kind::Blob, read[k].1.as_slice()))
-                .collect();
-            let res = if objs.is_empty() {
-                Ok(vec![])
-            } else {
-                ctl.put_many(&objs)
-            };
-            let mut out = out.lock().unwrap();
-            for (k, (i, data)) in read.drain(..).enumerate() {
-                out[i] = Some(match &res {
-                    Ok(_) => Ok((ids[k], jobs[i].1.then_some(data))),
-                    Err(e) => Err(io::Error::other(e.to_string())),
-                });
-            }
-        };
         loop {
             let start = next.fetch_add(chunk, std::sync::atomic::Ordering::Relaxed);
             if start >= n {
                 break;
             }
-            let mut read: Vec<(usize, Vec<u8>)> = Vec::new();
-            let mut bytes = 0;
-            for (i, job) in jobs
-                .iter()
-                .enumerate()
-                .take((start + chunk).min(n))
-                .skip(start)
-            {
-                match fs::read(&job.0) {
-                    Ok(data) => {
-                        if !read.is_empty() && bytes + data.len() > PUT_BATCH_BYTES {
-                            flush(&mut read);
-                            bytes = 0;
-                        }
-                        bytes += data.len();
-                        read.push((i, data));
-                    }
-                    Err(e) => out.lock().unwrap()[i] = Some(Err(e)),
-                }
-            }
-            flush(&mut read);
+            read_chunk(&ctl, jobs, start..(start + chunk).min(n), &out);
         }
     };
     if n < 4 {
@@ -620,22 +623,19 @@ impl LockedVfsWorkingCopy {
 
     /// Applies the rules that keep a new path out of the tree: ignored, not auto-tracked, over the
     /// size limit. Returns true when the path stays untracked.
-    #[allow(clippy::too_many_arguments)]
     async fn skip_untracked(
         &self,
-        options: &SnapshotOptions<'_>,
-        ignore: &mut IgnoreCtx<'_>,
-        builder: &mut MergedTreeBuilder,
-        stats: &mut SnapshotStats,
+        w: &mut Walk<'_>,
         rp: &RepoPathBuf,
         cur: &MergedTreeValue,
         md: &fs::Metadata,
     ) -> Result<bool, SnapshotError> {
+        let options = w.options;
         let mut untracked = false;
-        if !options.force_tracking_matcher.matches(rp) && ignore.is_ignored(rp)? {
+        if !options.force_tracking_matcher.matches(rp) && w.ignore.is_ignored(rp)? {
             untracked = true;
         } else if !options.start_tracking_matcher.matches(rp) {
-            stats
+            w.stats
                 .untracked_paths
                 .insert(rp.clone(), UntrackedReason::FileNotAutoTracked);
             untracked = true;
@@ -643,7 +643,7 @@ impl LockedVfsWorkingCopy {
             && md.len() > options.max_new_file_size
             && !options.force_tracking_matcher.matches(rp)
         {
-            stats.untracked_paths.insert(
+            w.stats.untracked_paths.insert(
                 rp.clone(),
                 UntrackedReason::FileTooLarge {
                     size: md.len(),
@@ -654,7 +654,7 @@ impl LockedVfsWorkingCopy {
         }
         if untracked && cur.is_tree() {
             // an untracked file replaced a tracked directory
-            self.remove_subtree(builder, rp).await?;
+            self.remove_subtree(&mut w.builder, rp).await?;
         }
         Ok(untracked)
     }
@@ -669,183 +669,208 @@ impl LockedVfsWorkingCopy {
         trust_stamps: bool,
         start_ns: i128,
     ) -> Result<Built, SnapshotError> {
-        let mut stats = SnapshotStats::default();
-        let mut builder = MergedTreeBuilder::new(self.tree.clone());
-        let mount_path = self.st.mount.clone();
-        let mut ignore = IgnoreCtx::new(&mount_path, options.base_ignores.clone());
         let t = Instant::now();
-        let mut n_files = 0usize;
-        let mut n_bytes = 0u64;
-        let mut d_put = std::time::Duration::ZERO;
-        let mut pending: Vec<Pending> = vec![];
-        let mut stamps: BTreeMap<String, Stamp> = BTreeMap::new();
-        // Paths that are files or symlinks now. Items below them (tombstones of the directory
-        // they replaced) must not reach the tree builder, or the directory would come back.
-        let mut file_roots: std::collections::HashSet<String> = std::collections::HashSet::new();
-        // Subtrees that the builder dropped. A path below one is written whatever the old tree held.
-        let mut cleared: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mount_path = self.st.mount.clone();
+        let mut w = Walk {
+            options,
+            cache,
+            trust_stamps,
+            builder: MergedTreeBuilder::new(self.tree.clone()),
+            stats: SnapshotStats::default(),
+            ignore: IgnoreCtx::new(&mount_path, options.base_ignores.clone()),
+            pending: vec![],
+            stamps: BTreeMap::new(),
+            file_roots: Default::default(),
+            cleared: Default::default(),
+            bytes: 0,
+        };
         for (path, item) in items {
-            if path
-                .match_indices('/')
-                .any(|(i, _)| file_roots.contains(&path[..i]))
-            {
+            if under(&w.file_roots, path) {
                 continue;
             }
-            let rp = RepoPathBuf::from_internal_string(path.clone())
-                .map_err(|e| snap_err(format!("invalid path {path:?} from daemon"), e))?;
-            let under_cleared = path
-                .match_indices('/')
-                .any(|(i, _)| cleared.contains(&path[..i]));
-            let mut kind = item.kind.as_str();
-            if kind == "base" && self.tree.path_value(&rp).await?.as_resolved().is_none() {
-                kind = "file";
-            }
-            match kind {
-                "deleted" => {
-                    self.remove_subtree(&mut builder, &rp).await?;
-                    cleared.insert(path.clone());
-                }
-                "dir" => {
-                    if item.opaque {
-                        self.remove_subtree(&mut builder, &rp).await?;
-                        cleared.insert(path.clone());
-                    } else {
-                        let cur = self.tree.path_value(&rp).await?;
-                        if cur.is_file_like() {
-                            builder.set_or_remove(rp.clone(), None);
-                        }
-                    }
-                }
-                "base" => {
-                    let known = item.known.clone().expect("a base item holds its value");
-                    let cur = self.tree.path_value(&rp).await?;
-                    file_roots.insert(path.clone());
-                    if !cur.is_file_like() {
-                        let Ok(md) = fs::symlink_metadata(rp.to_fs_path(self.mount())?) else {
-                            continue;
-                        };
-                        if self
-                            .skip_untracked(
-                                options,
-                                &mut ignore,
-                                &mut builder,
-                                &mut stats,
-                                &rp,
-                                &cur,
-                                &md,
-                            )
-                            .await?
-                        {
-                            continue;
-                        }
-                    }
-                    if under_cleared || known != cur {
-                        builder
-                            .set_or_remove_merge(rp, known)
-                            .map_err(|e| snap_err("conflict arity mismatch".to_owned(), e))?;
-                    }
-                }
-                _ => {
-                    let disk = rp.to_fs_path(self.mount())?;
-                    let md = match fs::symlink_metadata(&disk) {
-                        Ok(md) => md,
-                        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                            self.remove_subtree(&mut builder, &rp).await?;
-                            cleared.insert(path.clone());
-                            continue;
-                        }
-                        Err(e) => {
-                            return Err(snap_err(format!("Failed to stat {}", disk.display()), e));
-                        }
-                    };
-                    if md.is_dir() {
-                        let cur = self.tree.path_value(&rp).await?;
-                        if cur.is_file_like() {
-                            builder.set_or_remove(rp.clone(), None);
-                        }
-                        continue;
-                    }
-                    if !md.is_file() && !md.file_type().is_symlink() {
-                        continue;
-                    }
-                    let cur = self.tree.path_value(&rp).await?;
-                    file_roots.insert(path.clone());
-                    if !cur.is_file_like()
-                        && self
-                            .skip_untracked(
-                                options,
-                                &mut ignore,
-                                &mut builder,
-                                &mut stats,
-                                &rp,
-                                &cur,
-                                &md,
-                            )
-                            .await?
-                    {
-                        continue;
-                    }
-                    if let Some(progress) = options.progress {
-                        progress(&rp);
-                    }
-                    let exec = md.mode() & 0o100 != 0;
-                    if md.file_type().is_symlink() {
-                        let target = fs::read_link(&disk).map_err(|e| {
-                            snap_err(format!("Failed to read symlink {}", disk.display()), e)
-                        })?;
-                        let target = target.to_str().ok_or_else(|| {
-                            SnapshotError::InvalidUtf8SymlinkTarget { path: disk.clone() }
-                        })?;
-                        let id = self.store.write_symlink(&rp, target).await?;
-                        let new_value = Merge::normal(TreeValue::Symlink(id));
-                        if under_cleared || new_value != cur {
-                            builder
-                                .set_or_remove_merge(rp, new_value)
-                                .map_err(|e| snap_err("conflict arity mismatch".to_owned(), e))?;
-                        }
-                    } else {
-                        if trust_stamps
-                            && let Some(cur_value) = cur.as_resolved()
-                            && let Some(sha) = cache.and_then(|c| c.hit(path, &md))
-                            && let Some(id) = FileId::try_from_hex(sha)
-                        {
-                            let copy_id = match cur_value {
-                                Some(TreeValue::File { copy_id, .. }) => copy_id.clone(),
-                                _ => CopyId::placeholder(),
-                            };
-                            let new_value = Merge::normal(TreeValue::File {
-                                id,
-                                executable: exec,
-                                copy_id,
-                            });
-                            if under_cleared || new_value != cur {
-                                builder.set_or_remove_merge(rp, new_value).map_err(|e| {
-                                    snap_err("conflict arity mismatch".to_owned(), e)
-                                })?;
-                            }
-                            stamps.insert(path.clone(), Stamp::of(&md, sha.to_owned()));
-                            continue;
-                        }
-                        n_bytes += md.len();
-                        let known = stored_blob(&cur)
-                            .or_else(|| cache.and_then(|c| c.sha(path)).and_then(blob_id));
-                        let ask_has = cache.is_some_and(|c| !trust_stamps || c.sha(path).is_some());
-                        pending.push(Pending {
-                            rp,
-                            disk,
-                            cur,
-                            exec,
-                            md,
-                            known,
-                            ask_has,
-                            under_cleared,
-                        });
-                    }
-                }
+            self.settle_item(&mut w, path, item).await?;
+        }
+        self.write_pending(w, t, start_ns).await
+    }
+
+    async fn settle_item(
+        &mut self,
+        w: &mut Walk<'_>,
+        path: &str,
+        item: &Item,
+    ) -> Result<(), SnapshotError> {
+        let rp = RepoPathBuf::from_internal_string(path.to_owned())
+            .map_err(|e| snap_err(format!("invalid path {path:?} from daemon"), e))?;
+        let mut kind = item.kind.as_str();
+        if kind == "base" && self.tree.path_value(&rp).await?.as_resolved().is_none() {
+            kind = "file";
+        }
+        match kind {
+            "deleted" => self.clear_subtree(w, path, &rp).await,
+            "dir" if item.opaque => self.clear_subtree(w, path, &rp).await,
+            "dir" => self.drop_file_at(w, &rp).await,
+            "base" => self.settle_base(w, path, item, rp).await,
+            _ => self.settle_file(w, path, rp).await,
+        }
+    }
+
+    /// Drops the subtree at `rp` and remembers that a path below it is written whatever the old
+    /// tree held.
+    async fn clear_subtree(
+        &self,
+        w: &mut Walk<'_>,
+        path: &str,
+        rp: &RepoPathBuf,
+    ) -> Result<(), SnapshotError> {
+        self.remove_subtree(&mut w.builder, rp).await?;
+        w.cleared.insert(path.to_owned());
+        Ok(())
+    }
+
+    /// Removes the file or symlink that a directory replaced.
+    async fn drop_file_at(&self, w: &mut Walk<'_>, rp: &RepoPathBuf) -> Result<(), SnapshotError> {
+        if self.tree.path_value(rp).await?.is_file_like() {
+            w.builder.set_or_remove(rp.clone(), None);
+        }
+        Ok(())
+    }
+
+    /// A file or symlink that equals the base tree.
+    async fn settle_base(
+        &self,
+        w: &mut Walk<'_>,
+        path: &str,
+        item: &Item,
+        rp: RepoPathBuf,
+    ) -> Result<(), SnapshotError> {
+        let known = item.known.clone().expect("a base item holds its value");
+        let cur = self.tree.path_value(&rp).await?;
+        w.file_roots.insert(path.to_owned());
+        if !cur.is_file_like() {
+            let Ok(md) = fs::symlink_metadata(rp.to_fs_path(self.mount())?) else {
+                return Ok(());
+            };
+            if self.skip_untracked(w, &rp, &cur, &md).await? {
+                return Ok(());
             }
         }
-        // Regular files: read and store in parallel; only conflicted paths need their bytes back.
-        let jobs: Vec<Job> = pending
+        if under(&w.cleared, path) || known != cur {
+            w.set(rp, known)?;
+        }
+        Ok(())
+    }
+
+    /// A file, symlink or directory that the mount shows. A regular file is queued to be read.
+    async fn settle_file(
+        &self,
+        w: &mut Walk<'_>,
+        path: &str,
+        rp: RepoPathBuf,
+    ) -> Result<(), SnapshotError> {
+        let disk = rp.to_fs_path(self.mount())?;
+        let md = match fs::symlink_metadata(&disk) {
+            Ok(md) => md,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return self.clear_subtree(w, path, &rp).await;
+            }
+            Err(e) => {
+                return Err(snap_err(format!("Failed to stat {}", disk.display()), e));
+            }
+        };
+        if md.is_dir() {
+            return self.drop_file_at(w, &rp).await;
+        }
+        if !md.is_file() && !md.file_type().is_symlink() {
+            return Ok(());
+        }
+        let cur = self.tree.path_value(&rp).await?;
+        w.file_roots.insert(path.to_owned());
+        if !cur.is_file_like() && self.skip_untracked(w, &rp, &cur, &md).await? {
+            return Ok(());
+        }
+        if let Some(progress) = w.options.progress {
+            progress(&rp);
+        }
+        let under_cleared = under(&w.cleared, path);
+        if md.file_type().is_symlink() {
+            let id = self.write_symlink_at(&disk, &rp).await?;
+            let new_value = Merge::normal(TreeValue::Symlink(id));
+            if under_cleared || new_value != cur {
+                w.set(rp, new_value)?;
+            }
+            return Ok(());
+        }
+        let exec = md.mode() & 0o100 != 0;
+        if w.trust_stamps
+            && let Some(cur_value) = cur.as_resolved()
+            && let Some(sha) = w.cache.and_then(|c| c.hit(path, &md))
+            && let Some(id) = FileId::try_from_hex(sha)
+        {
+            let new_value = Merge::normal(TreeValue::File {
+                id,
+                executable: exec,
+                copy_id: copy_id_of(cur_value),
+            });
+            if under_cleared || new_value != cur {
+                w.set(rp, new_value)?;
+            }
+            w.stamps
+                .insert(path.to_owned(), Stamp::of(&md, sha.to_owned()));
+            return Ok(());
+        }
+        if md.len() > MAX_OBJECT_BYTES {
+            return Err(snap_err(
+                format!(
+                    "{path} is {} bytes; the store takes a file of at most {MAX_OBJECT_BYTES} bytes (16 MiB)",
+                    md.len()
+                ),
+                io::Error::other("file over the object size limit"),
+            ));
+        }
+        w.bytes += md.len();
+        let known =
+            stored_blob(&cur).or_else(|| w.cache.and_then(|c| c.sha(path)).and_then(blob_id));
+        let ask_has = w
+            .cache
+            .is_some_and(|c| !w.trust_stamps || c.sha(path).is_some());
+        w.pending.push(Pending {
+            rp,
+            disk,
+            cur,
+            exec,
+            md,
+            known,
+            ask_has,
+            under_cleared,
+        });
+        Ok(())
+    }
+
+    async fn write_symlink_at(
+        &self,
+        disk: &Path,
+        rp: &RepoPathBuf,
+    ) -> Result<jj_lib::backend::SymlinkId, SnapshotError> {
+        let target = fs::read_link(disk)
+            .map_err(|e| snap_err(format!("Failed to read symlink {}", disk.display()), e))?;
+        let target = target
+            .to_str()
+            .ok_or_else(|| SnapshotError::InvalidUtf8SymlinkTarget {
+                path: disk.to_owned(),
+            })?;
+        Ok(self.store.write_symlink(rp, target).await?)
+    }
+
+    /// Reads and stores the queued regular files in parallel, sets their values and writes the
+    /// tree; only conflicted paths need their bytes back.
+    async fn write_pending(
+        &mut self,
+        mut w: Walk<'_>,
+        t: Instant,
+        start_ns: i128,
+    ) -> Result<Built, SnapshotError> {
+        let jobs: Vec<Job> = w
+            .pending
             .iter()
             .map(|p| {
                 (
@@ -860,11 +885,12 @@ impl LockedVfsWorkingCopy {
         let results = read_and_put(self.ctl.path(), &jobs, 8);
         let d_fsread = t_par.elapsed();
         let t_put = Instant::now();
-        for (pf, res) in pending.into_iter().zip(results) {
+        let mut files = 0;
+        for (pf, res) in std::mem::take(&mut w.pending).into_iter().zip(results) {
             let (oid, data) = match res {
                 Ok(r) => r,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    self.remove_subtree(&mut builder, &pf.rp).await?;
+                    self.remove_subtree(&mut w.builder, &pf.rp).await?;
                     continue;
                 }
                 Err(e) => {
@@ -874,51 +900,84 @@ impl LockedVfsWorkingCopy {
                     ));
                 }
             };
-            n_files += 1;
+            files += 1;
             if Stamp::cacheable(&pf.md, start_ns) {
-                stamps.insert(
+                w.stamps.insert(
                     pf.rp.as_internal_file_string().to_owned(),
                     Stamp::of(&pf.md, oid.to_string()),
                 );
             }
             let new_value = match (pf.cur.as_resolved(), data) {
-                (Some(cur_value), _) => {
-                    let copy_id = match cur_value {
-                        Some(TreeValue::File { copy_id, .. }) => copy_id.clone(),
-                        _ => CopyId::placeholder(),
-                    };
-                    Merge::normal(TreeValue::File {
-                        id: FileId::from_bytes(oid.as_bytes()),
-                        executable: pf.exec,
-                        copy_id,
-                    })
-                }
+                (Some(cur_value), _) => Merge::normal(TreeValue::File {
+                    id: FileId::from_bytes(oid.as_bytes()),
+                    executable: pf.exec,
+                    copy_id: copy_id_of(cur_value),
+                }),
                 (None, Some(data)) => self.file_value(&pf.rp, &pf.cur, &data, pf.exec).await?,
                 (None, None) => unreachable!("conflicted paths keep their bytes"),
             };
             if pf.under_cleared || new_value != pf.cur {
-                builder
-                    .set_or_remove_merge(pf.rp, new_value)
-                    .map_err(|e| snap_err("conflict arity mismatch".to_owned(), e))?;
+                w.set(pf.rp, new_value)?;
             }
         }
-        d_put += t_put.elapsed();
+        let d_put = t_put.elapsed();
         let t_read = t.elapsed();
         let t = Instant::now();
-        let new_tree = builder.write_tree().await?;
-        let t_tree = t.elapsed();
+        let tree = w.builder.write_tree().await?;
         let timing = format!(
             "read+blobs={:?} (read+put_parallel={:?} assemble={:?}) write_tree={:?}",
-            t_read, d_fsread, d_put, t_tree
+            t_read,
+            d_fsread,
+            d_put,
+            t.elapsed()
         );
         Ok(Built {
-            tree: new_tree,
-            stats,
-            files: n_files,
-            bytes: n_bytes,
-            stamps,
+            tree,
+            stats: w.stats,
+            files,
+            bytes: w.bytes,
+            stamps: w.stamps,
             timing,
         })
+    }
+}
+
+/// The state of one walk over the items of a snapshot.
+struct Walk<'a> {
+    options: &'a SnapshotOptions<'a>,
+    cache: Option<&'a FileCache>,
+    trust_stamps: bool,
+    builder: MergedTreeBuilder,
+    stats: SnapshotStats,
+    ignore: IgnoreCtx<'a>,
+    pending: Vec<Pending>,
+    stamps: BTreeMap<String, Stamp>,
+    /// Paths that are files or symlinks now. Items below them (tombstones of the directory they
+    /// replaced) must not reach the tree builder, or the directory would come back.
+    file_roots: std::collections::HashSet<String>,
+    /// Subtrees that the builder dropped. A path below one is written whatever the old tree held.
+    cleared: std::collections::HashSet<String>,
+    bytes: u64,
+}
+
+impl Walk<'_> {
+    fn set(&mut self, rp: RepoPathBuf, value: MergedTreeValue) -> Result<(), SnapshotError> {
+        self.builder
+            .set_or_remove_merge(rp, value)
+            .map_err(|e| snap_err("conflict arity mismatch".to_owned(), e))
+    }
+}
+
+/// Whether `path` lies below a member of `roots`.
+fn under(roots: &std::collections::HashSet<String>, path: &str) -> bool {
+    path.match_indices('/')
+        .any(|(i, _)| roots.contains(&path[..i]))
+}
+
+fn copy_id_of(value: &Option<TreeValue>) -> CopyId {
+    match value {
+        Some(TreeValue::File { copy_id, .. }) => copy_id.clone(),
+        _ => CopyId::placeholder(),
     }
 }
 
@@ -1087,33 +1146,10 @@ impl LockedVfsWorkingCopy {
         new: &MergedTree,
     ) -> Result<CheckoutStats, CheckoutError> {
         const WINDOW: usize = 512;
-        let mut stats = CheckoutStats::default();
-        let mount = self.st.mount.clone();
-        let mut made_dirs: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
         let t_loop = Instant::now();
-        let mut entries: Vec<(RepoPathBuf, MergedTreeValue, MergedTreeValue)> = vec![];
-        {
-            let mut diff = old.diff_for_file_system(new, &EverythingMatcher);
-            while let Some(TreeDiffEntry { path, values }) = diff.next().await {
-                let d = values?;
-                if path.components().any(|c| {
-                    let n = c.as_internal_str();
-                    n.eq_ignore_ascii_case(".git") || n.eq_ignore_ascii_case(".jj")
-                }) {
-                    return Err(co_err(
-                        format!(
-                            "Refusing to check out reserved path {}",
-                            path.as_internal_file_string()
-                        ),
-                        "reserved path component",
-                    ));
-                }
-                entries.push((path, d.before, d.after));
-            }
-        }
+        let entries = diff_entries(old, new).await?;
         let t_diff = t_loop.elapsed();
-        let mut markers: Vec<(String, Option<u32>)> = vec![];
-        let mut skipped: Vec<String> = vec![];
+        let mut plan = Plan::default();
         let (mut d_prefetch, mut d_writes) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
         let backend = self.store.backend();
         let native = backend.downcast_ref::<crate::backend::NativeBackend>();
@@ -1123,191 +1159,18 @@ impl LockedVfsWorkingCopy {
             let window = std::mem::replace(&mut rest, tail);
             if let Some(native) = native {
                 let t = Instant::now();
-                let ids: Vec<gix::ObjectId> = window
-                    .iter()
-                    .flat_map(|(_, _, after)| after.iter().flatten())
-                    .filter_map(|v| match v {
-                        TreeValue::File { id, .. } => {
-                            Some(gix::ObjectId::from_bytes_or_panic(id.as_bytes()))
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                native.prefetch_blobs(&ids, 8);
+                native.prefetch_blobs(&window_blobs(&window), 8);
                 d_prefetch += t.elapsed();
             }
             let mut jobs: Vec<WriteJob> = vec![];
-            for (path, before, after_value) in window {
-                let after =
-                    materialize_tree_value(&self.store, &path, after_value, new.labels()).await?;
-                if matches!(
-                    after,
-                    MaterializedTreeValue::Absent | MaterializedTreeValue::AccessDenied(_)
-                ) {
-                    stats.removed_files += 1;
-                } else if before.is_absent() {
-                    stats.added_files += 1;
-                } else {
-                    stats.updated_files += 1;
-                }
-                if matches!(before.as_normal(), Some(TreeValue::GitSubmodule(_)))
-                    || matches!(after, MaterializedTreeValue::GitSubmodule(_))
-                {
-                    continue;
-                }
-                let disk = path.to_fs_path(&mount)?;
-                let after_absent = matches!(
-                    after,
-                    MaterializedTreeValue::Absent | MaterializedTreeValue::AccessDenied(_)
-                );
-                // For replacements the old file is unlinked inside the (parallel) write job.
-                let remove_first = before.is_present() && !after_absent;
-                if before.is_present() && after_absent {
-                    match fs::symlink_metadata(&disk) {
-                        Ok(md) if md.is_dir() => {
-                            // an untracked directory sits where a tracked file was
-                            stats.skipped_files += 1;
-                            skipped.push(path.as_internal_file_string().to_owned());
-                            continue;
-                        }
-                        Ok(_) => {
-                            fs::remove_file(&disk).map_err(|e| {
-                                co_err(format!("Failed to remove {}", disk.display()), e)
-                            })?;
-                        }
-                        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                        Err(e) => {
-                            return Err(co_err(format!("Failed to stat {}", disk.display()), e));
-                        }
-                    }
-                }
-                if after_absent {
-                    let mut dir = disk.parent();
-                    while let Some(d) = dir {
-                        if d == mount || fs::remove_dir(d).is_err() {
-                            break;
-                        }
-                        made_dirs.remove(d);
-                        dir = d.parent();
-                    }
-                    markers.push((path.as_internal_file_string().to_owned(), None));
-                    continue;
-                }
-                // parent directories
-                let parent = disk.parent().unwrap().to_owned();
-                if !made_dirs.contains(&parent) {
-                    let mut cur = mount.clone();
-                    let rel = parent.strip_prefix(&mount).unwrap();
-                    let mut blocked = false;
-                    for comp in rel.components() {
-                        cur.push(comp);
-                        match fs::symlink_metadata(&cur) {
-                            Ok(md) if md.is_dir() => {}
-                            Ok(_) => {
-                                blocked = true;
-                                break;
-                            }
-                            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                                fs::create_dir(&cur).map_err(|e| {
-                                    co_err(format!("Failed to create {}", cur.display()), e)
-                                })?;
-                            }
-                            Err(e) => {
-                                return Err(co_err(format!("Failed to stat {}", cur.display()), e));
-                            }
-                        }
-                    }
-                    if blocked {
-                        stats.skipped_files += 1;
-                        skipped.push(path.as_internal_file_string().to_owned());
-                        continue;
-                    }
-                    made_dirs.insert(parent);
-                }
-                let rel = path.as_internal_file_string().to_owned();
-                match after {
-                    MaterializedTreeValue::File(mut file) => {
-                        let mut data = Vec::new();
-                        file.reader
-                            .read_to_end(&mut data)
-                            .await
-                            .map_err(|e| co_err("Failed to read file contents", e))?;
-                        jobs.push(WriteJob {
-                            path: rel,
-                            disk,
-                            kind: JobKind::File {
-                                data,
-                                exec: file.executable,
-                            },
-                            marker: None,
-                            remove_first,
-                        });
-                    }
-                    MaterializedTreeValue::Symlink { id: _, target } => {
-                        jobs.push(WriteJob {
-                            path: rel,
-                            disk,
-                            kind: JobKind::Symlink(target),
-                            marker: None,
-                            remove_first,
-                        });
-                    }
-                    MaterializedTreeValue::FileConflict(file) => {
-                        let len = choose_materialized_conflict_marker_len(&file.contents);
-                        let options = ConflictMaterializeOptions {
-                            marker_style: self.marker_style,
-                            marker_len: Some(len),
-                            merge: self.store.merge_options().clone(),
-                        };
-                        let bytes = materialize_merge_result_to_bytes(
-                            &file.contents,
-                            &file.labels,
-                            &options,
-                        );
-                        jobs.push(WriteJob {
-                            path: rel,
-                            disk,
-                            kind: JobKind::File {
-                                data: bytes.to_vec(),
-                                exec: file.executable.unwrap_or(false),
-                            },
-                            marker: Some(len.try_into().unwrap_or(u32::MAX)),
-                            remove_first,
-                        });
-                    }
-                    MaterializedTreeValue::OtherConflict { id, labels } => {
-                        jobs.push(WriteJob {
-                            path: rel,
-                            disk,
-                            kind: JobKind::File {
-                                data: id.describe(&labels).into_bytes(),
-                                exec: false,
-                            },
-                            marker: None,
-                            remove_first,
-                        });
-                    }
-                    MaterializedTreeValue::Tree(_) => {
-                        panic!("unexpected tree entry in diff at {path:?}")
-                    }
-                    _ => {}
-                }
+            for (path, before, after) in window {
+                self.plan_entry(&mut plan, &mut jobs, new, path, before, after)
+                    .await?;
             }
             let t = Instant::now();
             let results = run_write_jobs(&jobs, 8);
             d_writes += t.elapsed();
-            for (job, res) in jobs.into_iter().zip(results) {
-                match res {
-                    Ok(true) => markers.push((job.path, job.marker)),
-                    Ok(false) => {
-                        stats.skipped_files += 1;
-                        skipped.push(job.path);
-                    }
-                    Err(e) => {
-                        return Err(co_err(format!("Failed to write {}", job.disk.display()), e));
-                    }
-                }
-            }
+            plan.finish_jobs(jobs, results)?;
         }
         trace!(
             "update: diff={:?} prefetch_blobs={:?} parallel_writes={:?} total={:?}",
@@ -1316,8 +1179,8 @@ impl LockedVfsWorkingCopy {
             d_writes,
             t_loop.elapsed()
         );
-        self.st.unwritten.extend(skipped);
-        for (p, m) in markers {
+        self.st.unwritten.extend(plan.skipped);
+        for (p, m) in plan.markers {
             match m {
                 Some(l) => {
                     self.st.conflict_marker_len.insert(p, l);
@@ -1327,7 +1190,245 @@ impl LockedVfsWorkingCopy {
                 }
             }
         }
-        Ok(stats)
+        Ok(plan.stats)
+    }
+
+    /// Settles one changed path: counts it, applies a removal or makes the parent directories,
+    /// and queues the write of a file, symlink or conflict.
+    async fn plan_entry(
+        &self,
+        plan: &mut Plan,
+        jobs: &mut Vec<WriteJob>,
+        new: &MergedTree,
+        path: RepoPathBuf,
+        before: MergedTreeValue,
+        after_value: MergedTreeValue,
+    ) -> Result<(), CheckoutError> {
+        let after = materialize_tree_value(&self.store, &path, after_value, new.labels()).await?;
+        let after_absent = matches!(
+            after,
+            MaterializedTreeValue::Absent | MaterializedTreeValue::AccessDenied(_)
+        );
+        if after_absent {
+            plan.stats.removed_files += 1;
+        } else if before.is_absent() {
+            plan.stats.added_files += 1;
+        } else {
+            plan.stats.updated_files += 1;
+        }
+        if matches!(before.as_normal(), Some(TreeValue::GitSubmodule(_)))
+            || matches!(after, MaterializedTreeValue::GitSubmodule(_))
+        {
+            return Ok(());
+        }
+        let mount = &self.st.mount;
+        let disk = path.to_fs_path(mount)?;
+        let rel = path.as_internal_file_string().to_owned();
+        if after_absent {
+            if before.is_present() && !plan.remove_file(&disk, &rel)? {
+                return Ok(());
+            }
+            plan.remove_empty_parents(&disk, mount);
+            plan.markers.push((rel, None));
+            return Ok(());
+        }
+        if !plan.make_parents(&disk, mount, &rel)? {
+            return Ok(());
+        }
+        // For replacements the old file is unlinked inside the (parallel) write job.
+        let remove_first = before.is_present();
+        let Some((kind, marker)) = self.job_kind(after, &path).await? else {
+            return Ok(());
+        };
+        jobs.push(WriteJob {
+            path: rel,
+            disk,
+            kind,
+            marker,
+            remove_first,
+        });
+        Ok(())
+    }
+
+    /// What to write for a materialized value, and the marker length of a conflict. `None` for a
+    /// value that is not written.
+    async fn job_kind(
+        &self,
+        after: MaterializedTreeValue,
+        path: &RepoPathBuf,
+    ) -> Result<Option<(JobKind, Option<u32>)>, CheckoutError> {
+        Ok(Some(match after {
+            MaterializedTreeValue::File(mut file) => {
+                let mut data = Vec::new();
+                file.reader
+                    .read_to_end(&mut data)
+                    .await
+                    .map_err(|e| co_err("Failed to read file contents", e))?;
+                (
+                    JobKind::File {
+                        data,
+                        exec: file.executable,
+                    },
+                    None,
+                )
+            }
+            MaterializedTreeValue::Symlink { id: _, target } => (JobKind::Symlink(target), None),
+            MaterializedTreeValue::FileConflict(file) => {
+                let len = choose_materialized_conflict_marker_len(&file.contents);
+                let options = ConflictMaterializeOptions {
+                    marker_style: self.marker_style,
+                    marker_len: Some(len),
+                    merge: self.store.merge_options().clone(),
+                };
+                let bytes =
+                    materialize_merge_result_to_bytes(&file.contents, &file.labels, &options);
+                let kind = JobKind::File {
+                    data: bytes.to_vec(),
+                    exec: file.executable.unwrap_or(false),
+                };
+                (kind, Some(len.try_into().unwrap_or(u32::MAX)))
+            }
+            MaterializedTreeValue::OtherConflict { id, labels } => (
+                JobKind::File {
+                    data: id.describe(&labels).into_bytes(),
+                    exec: false,
+                },
+                None,
+            ),
+            MaterializedTreeValue::Tree(_) => {
+                panic!("unexpected tree entry in diff at {path:?}")
+            }
+            _ => return Ok(None),
+        }))
+    }
+}
+
+type DiffEntry = (RepoPathBuf, MergedTreeValue, MergedTreeValue);
+
+/// The paths that differ between `old` and `new`, with their values. A path in `.git` or `.jj`
+/// is refused.
+async fn diff_entries(old: &MergedTree, new: &MergedTree) -> Result<Vec<DiffEntry>, CheckoutError> {
+    let mut entries = vec![];
+    let mut diff = old.diff_for_file_system(new, &EverythingMatcher);
+    while let Some(TreeDiffEntry { path, values }) = diff.next().await {
+        let d = values?;
+        if path.components().any(|c| {
+            let n = c.as_internal_str();
+            n.eq_ignore_ascii_case(".git") || n.eq_ignore_ascii_case(".jj")
+        }) {
+            return Err(co_err(
+                format!(
+                    "Refusing to check out reserved path {}",
+                    path.as_internal_file_string()
+                ),
+                "reserved path component",
+            ));
+        }
+        entries.push((path, d.before, d.after));
+    }
+    Ok(entries)
+}
+
+/// The blobs that the files of a window will read.
+fn window_blobs(window: &[DiffEntry]) -> Vec<gix::ObjectId> {
+    window
+        .iter()
+        .flat_map(|(_, _, after)| after.iter().flatten())
+        .filter_map(|v| match v {
+            TreeValue::File { id, .. } => Some(gix::ObjectId::from_bytes_or_panic(id.as_bytes())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// What a checkout has settled so far.
+#[derive(Default)]
+struct Plan {
+    stats: CheckoutStats,
+    made_dirs: std::collections::HashSet<PathBuf>,
+    markers: Vec<(String, Option<u32>)>,
+    skipped: Vec<String>,
+}
+
+impl Plan {
+    /// Unlinks the file of a removed path. Returns false when an untracked directory sits there
+    /// and the path is skipped.
+    fn remove_file(&mut self, disk: &Path, rel: &str) -> Result<bool, CheckoutError> {
+        match fs::symlink_metadata(disk) {
+            Ok(md) if md.is_dir() => {
+                self.stats.skipped_files += 1;
+                self.skipped.push(rel.to_owned());
+                return Ok(false);
+            }
+            Ok(_) => fs::remove_file(disk)
+                .map_err(|e| co_err(format!("Failed to remove {}", disk.display()), e))?,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(co_err(format!("Failed to stat {}", disk.display()), e)),
+        }
+        Ok(true)
+    }
+
+    /// Removes the directories that a removed path left empty, up to the mount.
+    fn remove_empty_parents(&mut self, disk: &Path, mount: &Path) {
+        let mut dir = disk.parent();
+        while let Some(d) = dir {
+            if d == mount || fs::remove_dir(d).is_err() {
+                break;
+            }
+            self.made_dirs.remove(d);
+            dir = d.parent();
+        }
+    }
+
+    /// Makes the parent directories of `disk`. Returns false when a file blocks the way and the
+    /// path is skipped.
+    fn make_parents(
+        &mut self,
+        disk: &Path,
+        mount: &Path,
+        rel: &str,
+    ) -> Result<bool, CheckoutError> {
+        let parent = disk.parent().unwrap().to_owned();
+        if self.made_dirs.contains(&parent) {
+            return Ok(true);
+        }
+        let mut cur = mount.to_owned();
+        for comp in parent.strip_prefix(mount).unwrap().components() {
+            cur.push(comp);
+            match fs::symlink_metadata(&cur) {
+                Ok(md) if md.is_dir() => {}
+                Ok(_) => {
+                    self.stats.skipped_files += 1;
+                    self.skipped.push(rel.to_owned());
+                    return Ok(false);
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => fs::create_dir(&cur)
+                    .map_err(|e| co_err(format!("Failed to create {}", cur.display()), e))?,
+                Err(e) => return Err(co_err(format!("Failed to stat {}", cur.display()), e)),
+            }
+        }
+        self.made_dirs.insert(parent);
+        Ok(true)
+    }
+
+    fn finish_jobs(
+        &mut self,
+        jobs: Vec<WriteJob>,
+        results: Vec<io::Result<bool>>,
+    ) -> Result<(), CheckoutError> {
+        for (job, res) in jobs.into_iter().zip(results) {
+            match res {
+                Ok(true) => self.markers.push((job.path, job.marker)),
+                Ok(false) => {
+                    self.stats.skipped_files += 1;
+                    self.skipped.push(job.path);
+                }
+                Err(e) => {
+                    return Err(co_err(format!("Failed to write {}", job.disk.display()), e));
+                }
+            }
+        }
+        Ok(())
     }
 }
 

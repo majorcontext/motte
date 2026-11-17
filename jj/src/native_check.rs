@@ -3,10 +3,9 @@ use std::rc::Rc;
 
 use gix::objs::{Kind, TreeRef};
 use jj_lib::backend::CommitId;
-use motte_jj::ctl::{CtlClient, HASH_KIND, ObjectStore as _, StoreError};
+use motte_jj::ctl::{Code, CtlClient, HASH_KIND, ObjectStore as _, StoreError};
 
-use crate::native_push::store_fail;
-use crate::push::{self, Fail, Outcome};
+use crate::push::{self, Fail, Outcome, store_fail};
 
 /// Blobs that one `get_blobs` call checks, on a daemon without the `has` op.
 const BLOB_BATCH: usize = 64;
@@ -53,7 +52,7 @@ fn check_blobs(ctl: &CtlClient, blobs: &[gix::ObjectId], short: &str) -> Result<
             )),
             None => Ok(()),
         },
-        Err(StoreError::Daemon(m)) if m.contains("unknown op") => {
+        Err(e) if e.is(&Code::UnknownOp) => {
             for chunk in blobs.chunks(BLOB_BATCH) {
                 if ctl.get_blobs(chunk, 1).is_err() {
                     for blob in chunk {
@@ -95,7 +94,7 @@ struct Check<'a> {
 
 fn absent(e: StoreError, what: &str, id: &gix::ObjectId, commit: &str) -> Fail {
     match e {
-        StoreError::NotFound(_) | StoreError::Daemon(_) => Fail::new(
+        StoreError::NotFound(_) | StoreError::Daemon { .. } => Fail::new(
             Outcome::Network,
             format!("the store does not hold the {what} {id} of commit {commit}: {e}"),
         ),

@@ -1,7 +1,9 @@
 //! Client for the `motte-vfsd` control socket (one JSON object per line) and the object-store
 //! abstraction the native backend writes git objects through.
 
-use std::collections::{HashMap, HashSet};
+mod wire;
+
+use std::collections::HashSet;
 use std::fmt::Debug;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -13,9 +15,25 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use gix::objs::Kind;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde::de::DeserializeOwned;
+use serde_json::Value;
+
+pub use wire::{Code, MAX_OBJECT_BYTES, OpHeadsReply, Request, WireObject};
 
 pub const HASH_KIND: gix::hash::Kind = gix::hash::Kind::Sha1;
+
+/// The file in the store directory of a repo that names the control socket.
+pub const SOCK_FILE: &str = "ctl_sock";
+
+/// The control socket of a workspace: `MOTTE_VFS_SOCK`, else the path in the file `ctl_sock` of
+/// the store directory.
+pub fn socket_path(store_dir: &Path) -> std::io::Result<PathBuf> {
+    if let Some(sock) = std::env::var_os("MOTTE_VFS_SOCK") {
+        return Ok(sock.into());
+    }
+    let named = std::fs::read(store_dir.join(SOCK_FILE))?;
+    Ok(String::from_utf8_lossy(&named).into_owned().into())
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -27,10 +45,35 @@ pub enum StoreError {
         #[source]
         source: std::io::Error,
     },
-    #[error("daemon error: {0}")]
-    Daemon(String),
+    /// The answer to a request that must not be sent twice never came, so the request may have
+    /// taken effect.
+    #[error("control socket {path}: no answer to a request that may have taken effect: {source}")]
+    AnswerLost {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("daemon error {}: {message}", .code.as_str())]
+    Daemon { code: Code, message: String },
+    /// A failure on the side of the shim, such as an unreadable local file.
+    #[error("{0}")]
+    Local(String),
     #[error("bad daemon response: {0}")]
     Protocol(String),
+}
+
+impl StoreError {
+    /// The code of an error answer of the daemon.
+    pub fn code(&self) -> Option<&Code> {
+        match self {
+            Self::Daemon { code, .. } => Some(code),
+            _ => None,
+        }
+    }
+
+    pub fn is(&self, code: &Code) -> bool {
+        self.code() == Some(code)
+    }
 }
 
 pub type StoreResult<T> = Result<T, StoreError>;
@@ -49,14 +92,6 @@ pub enum RefSwap {
     Swapped(Option<RefInfo>),
     /// The stored generation differed; carries the stored ref, `None` when there is none.
     Conflict(Option<RefInfo>),
-}
-
-fn ref_reply(v: Value) -> StoreResult<RefInfo> {
-    let r = v
-        .get("ref")
-        .cloned()
-        .ok_or_else(|| StoreError::Protocol("ref answer without ref".into()))?;
-    serde_json::from_value(r).map_err(|e| StoreError::Protocol(e.to_string()))
 }
 
 /// Raw git object storage (payloads without the `<type> <len>\0` header).
@@ -92,42 +127,15 @@ fn parse_kind(s: &str) -> StoreResult<Kind> {
     })
 }
 
-/// In-memory store, used by tests.
-#[derive(Debug, Default)]
-pub struct MemStore {
-    objects: Mutex<HashMap<gix::ObjectId, (Kind, Vec<u8>)>>,
+fn too_large(len: usize) -> StoreError {
+    StoreError::Local(format!(
+        "an object of {len} bytes passes the limit of {MAX_OBJECT_BYTES} bytes (16 MiB)"
+    ))
 }
 
-impl MemStore {
-    pub fn len(&self) -> usize {
-        self.objects.lock().unwrap().len()
-    }
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-    pub fn all(&self) -> HashMap<gix::ObjectId, (Kind, Vec<u8>)> {
-        self.objects.lock().unwrap().clone()
-    }
-}
-
-impl ObjectStore for MemStore {
-    fn get(&self, id: &gix::ObjectId) -> StoreResult<(Kind, Vec<u8>)> {
-        self.objects
-            .lock()
-            .unwrap()
-            .get(id)
-            .cloned()
-            .ok_or_else(|| StoreError::NotFound(id.to_string()))
-    }
-    fn put(&self, kind: Kind, data: &[u8]) -> StoreResult<gix::ObjectId> {
-        let id = hash_object(kind, data);
-        self.objects
-            .lock()
-            .unwrap()
-            .entry(id)
-            .or_insert_with(|| (kind, data.to_vec()));
-        Ok(id)
-    }
+fn decode(data: &str) -> StoreResult<Vec<u8>> {
+    B64.decode(data)
+        .map_err(|e| StoreError::Protocol(e.to_string()))
 }
 
 struct Conn {
@@ -135,13 +143,10 @@ struct Conn {
     r: BufReader<UnixStream>,
 }
 
-/// Counters for the end-to-end report.
-#[derive(Debug, Default, Clone)]
-pub struct CtlStats {
-    pub gets: u64,
-    pub puts: u64,
-    pub batches: u64,
-    pub put_skipped: u64,
+impl std::fmt::Debug for Conn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Conn")
+    }
 }
 
 /// Client for the daemon control socket.
@@ -150,14 +155,7 @@ pub struct CtlClient {
     path: PathBuf,
     idle: Mutex<Vec<Conn>>,
     known: Mutex<HashSet<gix::ObjectId>>,
-    stats: Mutex<CtlStats>,
     no_batch: AtomicBool,
-}
-
-impl std::fmt::Debug for Conn {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Conn")
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -247,17 +245,12 @@ impl CtlClient {
             path: path.into(),
             idle: Mutex::new(Vec::new()),
             known: Mutex::new(HashSet::new()),
-            stats: Mutex::new(CtlStats::default()),
             no_batch: AtomicBool::new(false),
         }
     }
 
     pub fn path(&self) -> &Path {
         &self.path
-    }
-
-    pub fn stats(&self) -> CtlStats {
-        self.stats.lock().unwrap().clone()
     }
 
     fn io_err(&self, source: std::io::Error) -> StoreError {
@@ -267,7 +260,6 @@ impl CtlClient {
         }
     }
 
-    /// Opens the control socket.
     fn connect(&self) -> StoreResult<Conn> {
         let w = UnixStream::connect(&self.path).map_err(|e| self.io_err(e))?;
         let r = w.try_clone().map_err(|e| self.io_err(e))?;
@@ -287,21 +279,20 @@ impl CtlClient {
         serde_json::from_str(&buf).map_err(|e| StoreError::Protocol(e.to_string()))
     }
 
-    /// Sends one request and returns the reply object; retries once on a broken connection.
-    /// Connections are pooled so that concurrent callers do not serialize on one socket.
-    pub fn call(&self, req: Value) -> StoreResult<Value> {
-        self.send(req, true)
-    }
-
-    /// `call`, except that an `err` reply is returned as a reply when `fail_on_err` is false.
-    fn send(&self, mut req: Value, fail_on_err: bool) -> StoreResult<Value> {
-        if let Some(tp) = crate::trace::traceparent() {
-            req["traceparent"] = json!(tp);
-        }
-        let mut line = serde_json::to_vec(&req).unwrap();
+    /// Sends one request and returns the answer object, an error answer too. After a lost answer
+    /// it sends an idempotent request once more, and fails a request that may have taken effect
+    /// with `AnswerLost`. Connections are pooled so that concurrent callers do not serialize on
+    /// one socket.
+    fn exchange(&self, req: &Request) -> StoreResult<Value> {
+        let line = wire::Line {
+            request: req,
+            traceparent: crate::trace::traceparent(),
+        };
+        let mut line = serde_json::to_vec(&line).expect("a request encodes");
         line.push(b'\n');
+        let tries = if req.is_idempotent() { 2 } else { 1 };
         let mut last = None;
-        for _ in 0..2 {
+        for _ in 0..tries {
             let pooled = self.idle.lock().unwrap().pop();
             let mut conn = match pooled {
                 Some(c) => c,
@@ -310,32 +301,50 @@ impl CtlClient {
             match self.call_once(&mut conn, &line) {
                 Ok(v) => {
                     self.idle.lock().unwrap().push(conn);
-                    if let Some(e) = v.get("err").and_then(Value::as_str).filter(|_| fail_on_err) {
-                        return Err(StoreError::Daemon(e.to_owned()));
-                    }
                     return Ok(v);
                 }
-                Err(e @ StoreError::Io { .. }) => {
+                Err(StoreError::Io { path, source }) => {
                     self.idle.lock().unwrap().clear();
-                    last = Some(e);
+                    last = Some((path, source));
                 }
                 Err(e) => return Err(e),
             }
         }
-        Err(last.unwrap())
+        let (path, source) = last.expect("one try ran");
+        Err(if req.is_idempotent() {
+            StoreError::Io { path, source }
+        } else {
+            StoreError::AnswerLost { path, source }
+        })
+    }
+
+    /// The failure that an error answer stands for.
+    fn answered(v: &Value) -> Option<StoreError> {
+        let message = v.get("err").and_then(Value::as_str)?;
+        let code = v.get("code").and_then(Value::as_str);
+        Some(StoreError::Daemon {
+            code: Code::of_answer(code, message),
+            message: message.to_owned(),
+        })
+    }
+
+    /// Sends a request and returns the answer, or the error that an error answer stands for.
+    pub fn call(&self, req: &Request) -> StoreResult<Value> {
+        let v = self.exchange(req)?;
+        match Self::answered(&v) {
+            Some(e) => Err(e),
+            None => Ok(v),
+        }
+    }
+
+    fn call_as<T: DeserializeOwned>(&self, req: &Request) -> StoreResult<T> {
+        serde_json::from_value(self.call(req)?).map_err(|e| StoreError::Protocol(e.to_string()))
     }
 
     /// The dirty set: every path where the upper directory differs from the base tree, with the
     /// change token of the walk that listed it.
     pub fn dirty(&self) -> StoreResult<DirtyReply> {
-        let v = match self.call(json!({ "op": "dirty" })) {
-            Err(StoreError::Daemon(m)) if m.contains("unknown op") => {
-                return Err(StoreError::Protocol(NOT_OVERLAY.into()));
-            }
-            other => other?,
-        };
-        let reply: DirtyReply =
-            serde_json::from_value(v).map_err(|e| StoreError::Protocol(e.to_string()))?;
+        let reply: DirtyReply = self.call_as(&Request::Dirty).map_err(not_overlay)?;
         if reply.token.is_empty() {
             return Err(StoreError::Protocol(NOT_OVERLAY.into()));
         }
@@ -344,63 +353,76 @@ impl CtlClient {
 
     /// The change token of the upper directory.
     pub fn token(&self) -> StoreResult<TokenReply> {
-        let v = match self.call(json!({"op": "token"})) {
-            Err(StoreError::Daemon(m)) if m.contains("unknown op") => {
-                return Err(StoreError::Protocol(NOT_OVERLAY.into()));
-            }
-            other => other?,
-        };
-        serde_json::from_value(v).map_err(|e| StoreError::Protocol(e.to_string()))
+        self.call_as(&Request::Token).map_err(not_overlay)
     }
 
     /// Reads the remote op heads, or swaps them when `swap` names the expected generation and the
-    /// new heads. Answers the generation and the heads.
+    /// new heads. Answers the generation and the heads. A swap whose answer is lost is judged by
+    /// a read: it landed when the generation moved on to exactly these heads, it is sent again
+    /// when the generation is still `expect`, and it lost otherwise.
     pub fn opheads(&self, swap: Option<(i64, &[String])>) -> StoreResult<(i64, Vec<String>)> {
-        let mut req = json!({"op": "opheads"});
-        if let Some((expect, heads)) = swap {
-            req["expect"] = json!(expect);
-            req["heads"] = json!(heads);
-        }
-        let v = self.call(req)?;
-        let heads = v
-            .get("heads")
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|h| h.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default();
-        Ok((v.get("gen").and_then(Value::as_i64).unwrap_or(0), heads))
+        let req = Request::OpHeads {
+            expect: swap.map(|(e, _)| e),
+            heads: swap.map(|(_, h)| h.to_vec()),
+        };
+        let reply: OpHeadsReply = match self.call_as(&req) {
+            Err(StoreError::AnswerLost { .. }) => {
+                let (expect, heads) = swap.expect("only a swap loses its answer");
+                let now: OpHeadsReply = self.call_as(&Request::OpHeads {
+                    expect: None,
+                    heads: None,
+                })?;
+                if now.generation == expect {
+                    self.call_as(&req)?
+                } else if now.heads == heads {
+                    now
+                } else {
+                    return Err(StoreError::Daemon {
+                        code: Code::GenerationConflict,
+                        message: format!("the op heads moved to generation {}", now.generation),
+                    });
+                }
+            }
+            other => other?,
+        };
+        Ok((reply.generation, reply.heads))
     }
 
-    /// Records the head operation and the mount commit of the workspace with the control plane. A daemon
-    /// without the `workspace` op answers `false`; the answer `true` means the control plane took it.
-    /// `generation` is the op-heads generation of the swap that set `op`, which orders the reports.
+    /// Records the head operation and the mount commit of the workspace with the control plane. A
+    /// daemon that answers `unknown_op` has no control plane to tell, and the answer is `false`;
+    /// `true` means the control plane took it. `generation` is the op-heads generation of the swap
+    /// that set `op`, which orders the reports.
     pub fn set_workspace(&self, op: &str, commit: &str, generation: i64) -> StoreResult<bool> {
-        match self
-            .call(json!({"op": "workspace", "sha": op, "commit": commit, "generation": generation}))
-        {
+        let req = Request::Workspace {
+            sha: op.to_owned(),
+            commit: commit.to_owned(),
+            generation,
+        };
+        match self.call(&req) {
             Ok(_) => Ok(true),
-            Err(StoreError::Daemon(m)) if m.contains("unknown op") => Ok(false),
+            Err(e) if e.is(&Code::UnknownOp) => Ok(false),
             Err(e) => Err(e),
         }
     }
 
     /// Lists the refs of the repo of the workspace.
     pub fn refs(&self) -> StoreResult<Vec<RefInfo>> {
-        let v = self.call(json!({"op": "refs"}))?;
-        serde_json::from_value(v.get("refs").cloned().unwrap_or_else(|| json!([])))
-            .map_err(|e| StoreError::Protocol(e.to_string()))
+        Ok(self
+            .call_as::<wire::RefsReply>(&Request::Refs { name: None })?
+            .refs)
     }
 
-    /// Reads one ref; an absent ref fails as a daemon error that carries `vcs_not_found`.
+    /// Reads one ref; an absent ref fails with the code `vcs_not_found`.
     pub fn get_ref(&self, name: &str) -> StoreResult<RefInfo> {
-        ref_reply(self.call(json!({"op": "refs", "name": name}))?)
+        let req = Request::Refs {
+            name: Some(name.to_owned()),
+        };
+        Ok(self.call_as::<wire::RefReply>(&req)?.stored)
     }
 
-    /// Swaps a ref when its stored generation is `expect` (0 creates it), or deletes it with `delete`.
-    /// A lost race is `RefSwap::Conflict` with the stored ref, so the caller retries from the winner.
+    /// Swaps a ref when its stored generation is `expect` (0 creates it), or deletes it with
+    /// `delete`. A lost race is `RefSwap::Conflict` with the stored ref, so the caller retries
+    /// from the winner. A swap whose answer is lost is judged by reading the ref.
     pub fn swap_ref(
         &self,
         name: &str,
@@ -408,47 +430,75 @@ impl CtlClient {
         commit: &str,
         delete: bool,
     ) -> StoreResult<RefSwap> {
-        let mut req = json!({"op": "swapref", "name": name, "expect": expect});
-        if delete {
-            req["delete"] = json!(true);
-        } else {
-            req["commit"] = json!(commit);
+        let req = Request::SwapRef {
+            name: name.to_owned(),
+            expect,
+            commit: (!delete).then(|| commit.to_owned()),
+            delete,
+        };
+        match self.swap_once(&req) {
+            Err(StoreError::AnswerLost { .. }) => {}
+            other => return other,
         }
-        let v = self.send(req, false)?;
-        let conflict = v.get("code").and_then(Value::as_str) == Some("vcs_generation_conflict");
-        match v.get("err").and_then(Value::as_str) {
-            Some(_) if conflict => Ok(RefSwap::Conflict(
-                v.get("ref")
-                    .map(|r| serde_json::from_value(r.clone()))
-                    .transpose()
-                    .map_err(|e| StoreError::Protocol(e.to_string()))?,
-            )),
-            Some(e) => Err(StoreError::Daemon(e.to_owned())),
+        let stored = match self.get_ref(name) {
+            Ok(r) => Some(r),
+            Err(e) if e.is(&Code::NotFound) => None,
+            Err(e) => return Err(e),
+        };
+        match &stored {
             None if delete => Ok(RefSwap::Swapped(None)),
-            None => ref_reply(v).map(|r| RefSwap::Swapped(Some(r))),
+            None if expect > 0 => Ok(RefSwap::Conflict(None)),
+            Some(r) if !delete && r.commit == commit && r.generation > expect => {
+                Ok(RefSwap::Swapped(stored))
+            }
+            Some(r) if r.generation != expect => Ok(RefSwap::Conflict(stored)),
+            _ => self.swap_once(&req),
         }
+    }
+
+    fn swap_once(&self, req: &Request) -> StoreResult<RefSwap> {
+        let v = self.exchange(req)?;
+        let Some(e) = Self::answered(&v) else {
+            let delete = matches!(req, Request::SwapRef { delete: true, .. });
+            return Ok(RefSwap::Swapped(if delete {
+                None
+            } else {
+                Some(parse::<wire::RefReply>(v)?.stored)
+            }));
+        };
+        if !e.is(&Code::GenerationConflict) {
+            return Err(e);
+        }
+        let stored = v
+            .get("ref")
+            .map(|r| serde_json::from_value(r.clone()))
+            .transpose()
+            .map_err(|e| StoreError::Protocol(e.to_string()))?;
+        Ok(RefSwap::Conflict(stored))
     }
 
     /// Stores one object of the op log of the workspace; `kind` is "operations" or "views".
     pub fn putop(&self, kind: &str, id: &str, data: &[u8]) -> StoreResult<()> {
-        self.call(json!({"op": "putop", "type": kind, "sha": id, "data": B64.encode(data)}))
-            .map(|_| ())
+        self.call(&Request::PutOp {
+            kind: kind.to_owned(),
+            sha: id.to_owned(),
+            data: B64.encode(data),
+        })
+        .map(|_| ())
     }
 
+    /// Reads one object of the op log. The caller checks that the bytes belong to `id`.
     pub fn getop(&self, kind: &str, id: &str) -> StoreResult<Vec<u8>> {
-        let v = self.call(json!({"op": "getop", "type": kind, "sha": id}))?;
-        let data = v
-            .get("data")
-            .and_then(Value::as_str)
-            .ok_or_else(|| StoreError::Protocol("getop answer without data".into()))?;
-        B64.decode(data)
-            .map_err(|e| StoreError::Protocol(e.to_string()))
+        let req = Request::GetOp {
+            kind: kind.to_owned(),
+            sha: id.to_owned(),
+        };
+        decode(&self.call_as::<wire::Data>(&req)?.data)
     }
 
     /// The files of the view that differ from the daemon's base tree, read without a snapshot.
     pub fn changes(&self) -> StoreResult<ChangesReply> {
-        let v = self.call(json!({"op": "changes"}))?;
-        serde_json::from_value(v).map_err(|e| StoreError::Protocol(e.to_string()))
+        self.call_as(&Request::Changes)
     }
 
     /// Reads blobs in batches of `GET_BATCH`, or one by one from a daemon without `getbatch`. A
@@ -467,18 +517,14 @@ impl CtlClient {
     }
 
     /// Asks the daemon which objects the store holds, without reading them. A daemon without the
-    /// `has` op fails as a daemon error that contains "unknown op".
+    /// `has` op fails with the code `unknown_op`.
     pub fn has(&self, ids: &[gix::ObjectId]) -> StoreResult<Vec<bool>> {
         let mut out = Vec::with_capacity(ids.len());
         for chunk in ids.chunks(HAS_BATCH) {
-            let shas: Vec<String> = chunk.iter().map(|i| i.to_string()).collect();
-            let v = self.call(json!({"op": "has", "shas": shas}))?;
-            let present: Vec<bool> = v
-                .get("present")
-                .map(|p| serde_json::from_value(p.clone()))
-                .transpose()
-                .map_err(|e| StoreError::Protocol(e.to_string()))?
-                .unwrap_or_default();
+            let shas = chunk.iter().map(ToString::to_string).collect();
+            let present = self
+                .call_as::<wire::Present>(&Request::Has { shas })?
+                .present;
             if present.len() != chunk.len() {
                 return Err(StoreError::Protocol("has answered another count".into()));
             }
@@ -488,13 +534,15 @@ impl CtlClient {
     }
 
     fn get_batch(&self, ids: &[gix::ObjectId], max_size: u64) -> StoreResult<Vec<Option<Vec<u8>>>> {
-        let shas: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
-        let req = json!({"op": "getbatch", "shas": shas, "max_size": max_size});
-        let v = match self.call(req) {
-            Err(StoreError::Daemon(m)) if m.contains("unknown op") => {
+        let req = Request::GetBatch {
+            shas: ids.iter().map(ToString::to_string).collect(),
+            max_size: Some(max_size),
+        };
+        let reply: wire::Datas = match self.call_as(&req) {
+            Err(e) if e.is(&Code::UnknownOp) => {
                 return ids.iter().map(|id| self.get_one(id)).collect();
             }
-            Err(StoreError::Daemon(m)) if m.contains("too_large") => {
+            Err(e) if e.is(&Code::ObjectTooLarge) => {
                 if ids.len() == 1 {
                     return Ok(vec![None]);
                 }
@@ -505,26 +553,18 @@ impl CtlClient {
             }
             other => other?,
         };
-        let datas = v.get("datas").and_then(Value::as_array);
-        if datas.map(Vec::len) != Some(ids.len()) {
+        if reply.datas.len() != ids.len() {
             return Err(StoreError::Protocol(
                 "getbatch answered another count".into(),
             ));
         }
-        let large: HashSet<u64> = v
-            .get("large")
-            .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Value::as_u64).collect())
-            .unwrap_or_default();
         let mut out = Vec::with_capacity(ids.len());
-        for (i, (id, d)) in ids.iter().zip(datas.into_iter().flatten()).enumerate() {
-            if large.contains(&(i as u64)) {
+        for (i, (id, d)) in ids.iter().zip(&reply.datas).enumerate() {
+            if reply.large.contains(&(i as u64)) {
                 out.push(None);
                 continue;
             }
-            let data = B64
-                .decode(d.as_str().unwrap_or(""))
-                .map_err(|e| StoreError::Protocol(e.to_string()))?;
+            let data = decode(d)?;
             if hash_object(Kind::Blob, &data) != *id {
                 return Err(StoreError::Protocol(format!(
                     "daemon sent wrong bytes for {id}"
@@ -539,26 +579,36 @@ impl CtlClient {
     fn get_one(&self, id: &gix::ObjectId) -> StoreResult<Option<Vec<u8>>> {
         match self.get(id) {
             Ok((_, data)) => Ok(Some(data)),
-            Err(StoreError::Daemon(m)) if m.contains("too_large") => Ok(None),
+            Err(e) if e.is(&Code::ObjectTooLarge) => Ok(None),
             Err(e) => Err(e),
         }
     }
 }
 
+fn parse<T: DeserializeOwned>(v: Value) -> StoreResult<T> {
+    serde_json::from_value(v).map_err(|e| StoreError::Protocol(e.to_string()))
+}
+
+/// A daemon that cannot answer `dirty` or `token` has no upper directory.
+fn not_overlay(e: StoreError) -> StoreError {
+    if e.is(&Code::UnknownOp) {
+        StoreError::Protocol(NOT_OVERLAY.into())
+    } else {
+        e
+    }
+}
+
 impl ObjectStore for CtlClient {
     fn get(&self, id: &gix::ObjectId) -> StoreResult<(Kind, Vec<u8>)> {
-        self.stats.lock().unwrap().gets += 1;
-        let v = match self.call(json!({"op": "get", "sha": id.to_string()})) {
-            Err(StoreError::Daemon(m)) if m.contains("not found") => {
-                return Err(StoreError::NotFound(id.to_string()));
-            }
+        let req = Request::Get {
+            sha: id.to_string(),
+        };
+        let reply: wire::TypeData = match self.call_as(&req) {
+            Err(e) if e.is(&Code::NotFound) => return Err(StoreError::NotFound(id.to_string())),
             other => other?,
         };
-        let kind = parse_kind(v.get("type").and_then(Value::as_str).unwrap_or(""))?;
-        let data = v.get("data").and_then(Value::as_str).unwrap_or("");
-        let data = B64
-            .decode(data)
-            .map_err(|e| StoreError::Protocol(e.to_string()))?;
+        let kind = parse_kind(&reply.kind)?;
+        let data = decode(&reply.data)?;
         if hash_object(kind, &data) != *id {
             return Err(StoreError::Protocol(format!(
                 "daemon sent wrong bytes for {id}"
@@ -571,13 +621,16 @@ impl ObjectStore for CtlClient {
     fn put(&self, kind: Kind, data: &[u8]) -> StoreResult<gix::ObjectId> {
         let id = hash_object(kind, data);
         if self.known.lock().unwrap().contains(&id) {
-            self.stats.lock().unwrap().put_skipped += 1;
             return Ok(id);
         }
-        self.stats.lock().unwrap().puts += 1;
-        let v =
-            self.call(json!({"op": "put", "type": kind_name(kind), "data": B64.encode(data)}))?;
-        let sha = v.get("sha").and_then(Value::as_str).unwrap_or("");
+        if data.len() as u64 > MAX_OBJECT_BYTES {
+            return Err(too_large(data.len()));
+        }
+        let req = Request::Put {
+            kind: kind_name(kind).to_owned(),
+            data: B64.encode(data),
+        };
+        let sha = self.call_as::<wire::Sha>(&req)?.sha;
         if id.to_hex() != sha {
             return Err(StoreError::Protocol(format!(
                 "daemon sha {sha} != local {id}"
@@ -600,26 +653,30 @@ impl ObjectStore for CtlClient {
                 .filter(|&i| !known.contains(&ids[i]) && seen.insert(ids[i]))
                 .collect()
         };
-        self.stats.lock().unwrap().put_skipped += (ids.len() - missing.len()) as u64;
         if missing.is_empty() {
             return Ok(ids);
         }
-        let list: Vec<Value> = missing
+        if let Some(&i) = missing
             .iter()
-            .map(|&i| json!({"type": kind_name(objects[i].0), "data": B64.encode(objects[i].1)}))
+            .find(|&&i| objects[i].1.len() as u64 > MAX_OBJECT_BYTES)
+        {
+            return Err(too_large(objects[i].1.len()));
+        }
+        let list = missing
+            .iter()
+            .map(|&i| WireObject {
+                kind: kind_name(objects[i].0).to_owned(),
+                data: B64.encode(objects[i].1),
+            })
             .collect();
-        let v = match self.call(json!({"op": "putbatch", "objects": list})) {
-            Err(StoreError::Daemon(m)) if m.contains("unknown op") => {
+        let reply = match self.call_as::<wire::Shas>(&Request::PutBatch { objects: list }) {
+            Err(e) if e.is(&Code::UnknownOp) => {
                 self.no_batch.store(true, Ordering::Relaxed);
                 return objects.iter().map(|(k, d)| self.put(*k, d)).collect();
             }
             other => other?,
         };
-        let shas: Vec<&str> = v
-            .get("shas")
-            .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Value::as_str).collect())
-            .unwrap_or_default();
+        let shas = reply.shas;
         if shas.len() != missing.len()
             || missing
                 .iter()
@@ -629,11 +686,6 @@ impl ObjectStore for CtlClient {
             return Err(StoreError::Protocol(
                 "putbatch shas differ from local hashes".into(),
             ));
-        }
-        {
-            let mut stats = self.stats.lock().unwrap();
-            stats.puts += missing.len() as u64;
-            stats.batches += 1;
         }
         self.known
             .lock()

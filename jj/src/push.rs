@@ -8,12 +8,13 @@ use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::{RefTarget, RemoteRef, RemoteRefState};
 use jj_lib::ref_name::{RefName, RemoteName};
 use jj_lib::repo::{ReadonlyRepo, Repo as _};
-use motte_jj::ctl::{CtlClient, HASH_KIND, StoreError};
+use motte_jj::ctl::{Code, CtlClient, HASH_KIND, StoreError};
 use motte_jj::trace;
 
+use crate::daemon;
 use crate::native_delete;
 use crate::native_push;
-use crate::push_git::{Finished, Git, Remote, Update, failure};
+use crate::push_git::{Finished, Git, Update, failure};
 use crate::push_objects::{self, Plan};
 use crate::repo_config::{self, Origin};
 
@@ -88,7 +89,15 @@ impl Fail {
 
 impl From<CommandError> for Fail {
     fn from(error: CommandError) -> Self {
-        let outcome = if error.error.to_string().contains("vcs_claim_lost") {
+        let lost = std::iter::successors(
+            Some(&*error.error as &(dyn std::error::Error + 'static)),
+            |e| e.source(),
+        )
+        .any(|e| {
+            e.downcast_ref::<StoreError>()
+                .is_some_and(|s| s.is(&Code::ClaimLost))
+        });
+        let outcome = if lost {
             Outcome::ClaimLost
         } else {
             Outcome::Refused
@@ -150,18 +159,26 @@ async fn push(ui: &mut Ui, helper: &CommandHelper, args: &PushArgs) -> Result<()
             "deleting a bookmark of origin is supported only for a native repo",
         ));
     }
+    git_push(ui, helper, &mut ws, &names).await
+}
+
+/// Pushes to a git origin. The claim is probed before and after the objects reach the transport
+/// repo, so a writer that lost its claim sends nothing.
+async fn git_push(
+    ui: &mut Ui,
+    helper: &CommandHelper,
+    ws: &mut WorkspaceCommandHelper,
+    names: &[String],
+) -> Result<(), Fail> {
     let origin = Origin::from_settings(helper.settings()).ok_or_else(|| {
         Fail::new(
             Outcome::Refused,
             "this workspace has no origin; it has no GitHub repository",
         )
     })?;
-    let ctl = CtlClient::new(
-        std::env::var("MOTTE_VFS_SOCK")
-            .map_err(|_| Fail::new(Outcome::Refused, "set MOTTE_VFS_SOCK"))?,
-    );
+    let ctl = daemon(ws.repo_path()).map_err(|e| Fail::new(Outcome::Refused, e))?;
     let repo = ws.repo().clone();
-    let targets = targets(&repo, &names).await?;
+    let targets = targets(&repo, names).await?;
     let git = Git::open(ws.repo_path(), &origin.url)?;
     let odb = open_odb(&git)?;
     let ids: Vec<gix::ObjectId> = targets.iter().map(|t| to_oid(&t.id)).collect();
@@ -176,36 +193,30 @@ async fn push(ui: &mut Ui, helper: &CommandHelper, args: &PushArgs) -> Result<()
 
     claim(&ctl, "pushed")?;
     let origin_branch = repo_config::origin_branch(helper.settings());
-    let mut asked = names.clone();
+    let mut asked = names.to_vec();
     asked.extend(origin_branch.clone());
     let remote = git.ls_remote(&asked)?;
-    refuse_default_rewrite(&repo, &targets, &remote).await?;
+    for t in &targets {
+        if remote.default_branch.as_deref() == Some(&t.name) {
+            let tip = remote.tips.get(&t.name).map(String::as_str);
+            refuse_rewrite(&repo, t, "default", tip).await?;
+        }
+    }
     let pending: Vec<&Target> = targets
         .iter()
         .filter(|t| remote.tips.get(&t.name) != Some(&t.id.hex()))
         .collect();
     if pending.is_empty() {
-        return record(ui, &mut ws, &targets, true).await;
+        return record(ui, ws, &targets, true).await;
     }
-    if !plan.base.is_empty() {
-        let shas: Vec<String> = plan.base.iter().map(ToString::to_string).collect();
-        let mut branches: Vec<String> = names
-            .iter()
-            .filter(|n| remote.tips.contains_key(*n))
-            .cloned()
-            .collect();
-        branches.extend(remote.default_branch.clone());
-        branches.extend(origin_branch.filter(|b| remote.tips.contains_key(b)));
-        branches.sort();
-        branches.dedup();
-        git.fetch(&shas, &branches)?;
-        if let Some(missing) = plan.base.iter().find(|b| !git.has_all(&[b.to_string()])) {
-            return Err(Fail::new(
-                Outcome::Network,
-                format!("origin does not have commit {missing}"),
-            ));
-        }
-    }
+    let mut branches: Vec<String> = names
+        .iter()
+        .filter(|n| remote.tips.contains_key(*n))
+        .cloned()
+        .collect();
+    branches.extend(remote.default_branch.clone());
+    branches.extend(origin_branch.filter(|b| remote.tips.contains_key(b)));
+    fetch_bases(&git, &plan, branches)?;
     let copied = push_objects::copy(&ctl, &git.objects_dir(), &plan)?;
     writeln!(
         ui.status(),
@@ -225,9 +236,27 @@ async fn push(ui: &mut Ui, helper: &CommandHelper, args: &PushArgs) -> Result<()
             lease: t.lease.clone(),
         })
         .collect();
-    let finished = git.push(&updates)?;
-    judge(&finished)?;
-    record(ui, &mut ws, &targets, false).await
+    judge(&git.push(&updates)?)?;
+    record(ui, ws, &targets, false).await
+}
+
+/// Fetches the base commits of the plan from origin into the transport repo, so that the new
+/// commits have parents there.
+fn fetch_bases(git: &Git, plan: &Plan, mut branches: Vec<String>) -> Result<(), Fail> {
+    if plan.base.is_empty() {
+        return Ok(());
+    }
+    let shas: Vec<String> = plan.base.iter().map(ToString::to_string).collect();
+    branches.sort();
+    branches.dedup();
+    git.fetch(&shas, &branches)?;
+    match plan.base.iter().find(|b| !git.has_all(&[b.to_string()])) {
+        Some(missing) => Err(Fail::new(
+            Outcome::Network,
+            format!("origin does not have commit {missing}"),
+        )),
+        None => Ok(()),
+    }
 }
 
 pub fn open_odb(git: &Git) -> Result<gix::odb::Handle, Fail> {
@@ -311,29 +340,26 @@ pub(crate) async fn check_new_commits(repo: &ReadonlyRepo, plan: &Plan) -> Resul
     Ok(())
 }
 
-/// A bookmark with the name of the default branch of origin may move forward only.
-async fn refuse_default_rewrite(
+/// A bookmark that names a protected branch of origin, of `kind`, may move forward only: `tip`,
+/// the commit that origin holds for it, must be an ancestor of the target.
+pub(crate) async fn refuse_rewrite(
     repo: &ReadonlyRepo,
-    targets: &[Target],
-    remote: &Remote,
+    t: &Target,
+    kind: &str,
+    tip: Option<&str>,
 ) -> Result<(), Fail> {
-    for t in targets {
-        if remote.default_branch.as_deref() != Some(&t.name) {
-            continue;
-        }
-        let Some(tip) = remote.tips.get(&t.name).and_then(CommitId::try_from_hex) else {
-            continue;
-        };
-        let known = repo.index().has_id(&tip).await.unwrap_or(false);
-        if !known || !repo.index().is_ancestor(&tip, &t.id).await.unwrap_or(false) {
-            return Err(Fail::new(
-                Outcome::Refused,
-                format!(
-                    "refusing to rewrite {}, the default branch of {REMOTE}: its tip is not an ancestor of the commit",
-                    t.name
-                ),
-            ));
-        }
+    let Some(tip) = tip.and_then(CommitId::try_from_hex) else {
+        return Ok(());
+    };
+    let known = repo.index().has_id(&tip).await.unwrap_or(false);
+    if !known || !repo.index().is_ancestor(&tip, &t.id).await.unwrap_or(false) {
+        return Err(Fail::new(
+            Outcome::Refused,
+            format!(
+                "refusing to rewrite {}, the {kind} branch of {REMOTE}: its tip is not an ancestor of the commit",
+                t.name
+            ),
+        ));
     }
     Ok(())
 }
@@ -342,15 +368,31 @@ async fn refuse_default_rewrite(
 pub fn claim(ctl: &CtlClient, sent: &str) -> Result<(), Fail> {
     match ctl.opheads(None) {
         Ok(_) => Ok(()),
-        Err(StoreError::Daemon(m)) if m.contains("vcs_not_found") => Ok(()),
-        Err(StoreError::Daemon(m)) if m.contains("vcs_claim_lost") => Err(Fail::new(
-            Outcome::ClaimLost,
-            format!("this workspace lost its claim on the op log; nothing was {sent}"),
-        )),
+        Err(e) if e.is(&Code::NotFound) => Ok(()),
+        Err(e) if e.is(&Code::ClaimLost) => Err(store_fail(e, sent)),
         Err(e) => Err(Fail::new(
             Outcome::Network,
             format!("cannot confirm the claim: {e}; nothing was {sent}"),
         )),
+    }
+}
+
+/// The outcome of a daemon failure: a lost claim, a daemon without a ref store, or the network.
+/// `sent` names what the command had not done yet.
+pub(crate) fn store_fail(e: StoreError, sent: &str) -> Fail {
+    match e.code() {
+        Some(Code::ClaimLost) => Fail::new(
+            Outcome::ClaimLost,
+            format!("this workspace lost its claim on the op log; nothing was {sent}"),
+        ),
+        Some(Code::UnknownOp) => Fail::new(
+            Outcome::Refused,
+            "the daemon of this workspace has no ref store; the repo is not native",
+        ),
+        _ => Fail::new(
+            Outcome::Network,
+            format!("the daemon failed; nothing was {sent}: {e}"),
+        ),
     }
 }
 

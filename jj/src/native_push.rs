@@ -6,11 +6,12 @@ use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::ref_name::RemoteName;
 use jj_lib::repo::{ReadonlyRepo, Repo as _};
-use motte_jj::ctl::{CtlClient, RefInfo, RefSwap, StoreError};
+use motte_jj::ctl::{Code, CtlClient, RefInfo, RefSwap};
 
-use crate::WALK_LIMIT;
+use crate::daemon;
+use crate::init_cmd::WALK_LIMIT;
 use crate::native_check;
-use crate::push::{self, Fail, Outcome, REMOTE, Target};
+use crate::push::{self, Fail, Outcome, REMOTE, Target, store_fail};
 use crate::push_objects::Plan;
 use crate::repo_config::Native;
 
@@ -20,10 +21,7 @@ pub async fn push(
     names: &[String],
     native: &Native,
 ) -> Result<(), Fail> {
-    let ctl = CtlClient::new(
-        std::env::var("MOTTE_VFS_SOCK")
-            .map_err(|_| Fail::new(Outcome::Refused, "set MOTTE_VFS_SOCK"))?,
-    );
+    let ctl = daemon(ws.repo_path()).map_err(|e| Fail::new(Outcome::Refused, e))?;
     let repo = ws.repo().clone();
     let targets = push::targets(&repo, names).await?;
     let base = CommitId::try_from_hex(&native.base).ok_or_else(|| {
@@ -116,24 +114,10 @@ async fn new_commits(
     Ok(commits)
 }
 
-pub(crate) fn store_fail(e: StoreError, sent: &str) -> Fail {
-    match e {
-        StoreError::Daemon(m) if m.contains("vcs_claim_lost") => Fail::new(
-            Outcome::ClaimLost,
-            format!("this workspace lost its claim on the op log; nothing was {sent}"),
-        ),
-        StoreError::Daemon(m) if m.contains("unknown op") => Fail::new(
-            Outcome::Refused,
-            "the daemon of this workspace has no ref store; the repo is not native",
-        ),
-        e => Fail::new(Outcome::Network, format!("the store failed: {e}")),
-    }
-}
-
 pub(crate) fn read_ref(ctl: &CtlClient, name: &str, sent: &str) -> Result<Option<RefInfo>, Fail> {
     match ctl.get_ref(name) {
         Ok(r) => Ok(Some(r)),
-        Err(StoreError::Daemon(m)) if m.contains("vcs_not_found") => Ok(None),
+        Err(e) if e.is(&Code::NotFound) => Ok(None),
         Err(e) => Err(store_fail(e, sent)),
     }
 }
@@ -154,19 +138,8 @@ async fn refuse_default_rewrite(
         } else {
             continue;
         };
-        let Some(tip) = s.as_ref().and_then(|r| CommitId::try_from_hex(&r.commit)) else {
-            continue;
-        };
-        let known = repo.index().has_id(&tip).await.unwrap_or(false);
-        if !known || !repo.index().is_ancestor(&tip, &t.id).await.unwrap_or(false) {
-            return Err(Fail::new(
-                Outcome::Refused,
-                format!(
-                    "refusing to rewrite {}, the {} branch of {REMOTE}: its tip is not an ancestor of the commit",
-                    t.name, kind
-                ),
-            ));
-        }
+        let tip = s.as_ref().map(|r| r.commit.as_str());
+        push::refuse_rewrite(repo, t, kind, tip).await?;
     }
     Ok(())
 }

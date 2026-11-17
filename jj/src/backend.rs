@@ -41,12 +41,11 @@ use jj_lib::repo_path::{RepoPath, RepoPathBuf, RepoPathComponentBuf};
 use jj_lib::settings::UserSettings;
 use smallvec::SmallVec;
 
-use crate::ctl::{CtlClient, HASH_KIND, ObjectStore, StoreError};
+use crate::ctl::{CtlClient, HASH_KIND, ObjectStore, SOCK_FILE, StoreError, socket_path};
 
 pub const BACKEND_NAME: &str = "motte-objects";
 const CHANGE_ID_LENGTH: usize = 16;
 const EMPTY_STRING_PLACEHOLDER: &str = "JJ_EMPTY_STRING";
-pub(crate) const SOCK_FILE: &str = "ctl_sock";
 const SHALLOW_FILE: &str = "shallow";
 const EXTRAS_FILE: &str = "extras";
 const EXTRAS_LOCK: &str = "extras.lock";
@@ -247,19 +246,16 @@ impl NativeBackend {
     }
 
     pub fn load(settings: &UserSettings, store_path: &Path) -> Result<Self, BackendLoadError> {
-        let sock = match std::env::var_os("MOTTE_VFS_SOCK") {
-            Some(s) => PathBuf::from(s),
-            None => {
-                let b =
-                    fs::read(store_path.join(SOCK_FILE)).map_err(|e| BackendLoadError(e.into()))?;
-                PathBuf::from(String::from_utf8_lossy(&b).into_owned())
-            }
-        };
+        let sock = socket_path(store_path).map_err(|e| BackendLoadError(e.into()))?;
         let git_settings =
             GitSettings::from_settings(settings).map_err(|e| BackendLoadError(e.into()))?;
         let store = Arc::new(CtlClient::new(sock));
         Self::new(store, store_path, git_settings.write_change_id_header)
             .map_err(|e| BackendLoadError(e.into()))
+    }
+
+    pub fn store_path(&self) -> &Path {
+        &self.store_path
     }
 
     /// The roots in the `shallow` file; a missing file holds none.
@@ -594,6 +590,53 @@ fn signature_to_git(signature: &Signature) -> gix::actor::Signature {
     }
 }
 
+impl NativeBackend {
+    /// The git parents of a commit. The root commit is no git parent; a commit that has no other
+    /// parent keeps it in `contents`.
+    fn git_parents(&self, contents: &mut Commit) -> BackendResult<SmallVec<[gix::ObjectId; 1]>> {
+        contents.parents.retain(|id| *id != self.root_commit_id);
+        let mut parents = SmallVec::new();
+        for parent_id in &contents.parents {
+            parents.push(self.oid(parent_id)?);
+        }
+        if contents.parents.is_empty() {
+            contents.parents.push(self.root_commit_id.clone());
+        }
+        Ok(parents)
+    }
+
+    /// The headers that `GitBackend::write_commit` adds for conflicts and the change ID.
+    fn extra_headers(&self, contents: &Commit) -> Vec<(BString, BString)> {
+        let tree_ids = &contents.root_tree;
+        let mut extra_headers: Vec<(BString, BString)> = vec![];
+        if !contents.conflict_labels.is_resolved() {
+            assert!(
+                contents
+                    .conflict_labels
+                    .iter()
+                    .all(|label| !label.contains('\n'))
+            );
+            let mut joined_with_newlines = contents.conflict_labels.iter().join("\n");
+            joined_with_newlines.push('\n');
+            extra_headers.push((
+                JJ_CONFLICT_LABELS_COMMIT_HEADER.into(),
+                joined_with_newlines.into(),
+            ));
+        }
+        if !tree_ids.is_resolved() {
+            let value = tree_ids.iter().map(|id| id.hex()).join(" ");
+            extra_headers.push((JJ_TREES_COMMIT_HEADER.into(), value.into()));
+        }
+        if self.write_change_id_header {
+            extra_headers.push((
+                CHANGE_ID_COMMIT_HEADER.into(),
+                contents.change_id.reverse_hex().into(),
+            ));
+        }
+        extra_headers
+    }
+}
+
 #[async_trait]
 impl Backend for NativeBackend {
     fn name(&self) -> &str {
@@ -807,54 +850,24 @@ impl Backend for NativeBackend {
         let _op = crate::trace::span("jj.write_commit");
         assert!(contents.secure_sig.is_none(), "commit.secure_sig was set");
 
-        let tree_ids = &contents.root_tree;
-        let git_tree_id = match tree_ids.as_resolved() {
+        let git_tree_id = match contents.root_tree.as_resolved() {
             Some(tree_id) => self.oid(tree_id)?,
-            None => self.write_tree_conflict(tree_ids)?,
+            None => self.write_tree_conflict(&contents.root_tree)?,
         };
         let author = signature_to_git(&contents.author);
         let mut committer = signature_to_git(&contents.committer);
-        let message = &contents.description;
         if contents.parents.is_empty() {
             return Err(BackendError::Other(
                 "Cannot write a commit with no parents".into(),
             ));
         }
-        contents.parents.retain(|id| *id != self.root_commit_id);
-        let mut parents = SmallVec::new();
-        for parent_id in &contents.parents {
-            parents.push(self.oid(parent_id)?);
-        }
-        if contents.parents.is_empty() {
-            contents.parents.push(self.root_commit_id.clone());
-        }
-        let mut extra_headers: Vec<(BString, BString)> = vec![];
-        if !contents.conflict_labels.is_resolved() {
-            assert!(
-                contents
-                    .conflict_labels
-                    .iter()
-                    .all(|label| !label.contains('\n'))
-            );
-            let mut joined_with_newlines = contents.conflict_labels.iter().join("\n");
-            joined_with_newlines.push('\n');
-            extra_headers.push((
-                JJ_CONFLICT_LABELS_COMMIT_HEADER.into(),
-                joined_with_newlines.into(),
-            ));
-        }
-        if !tree_ids.is_resolved() {
-            let value = tree_ids.iter().map(|id| id.hex()).join(" ");
-            extra_headers.push((JJ_TREES_COMMIT_HEADER.into(), value.into()));
-        }
-        if self.write_change_id_header {
-            extra_headers.push((
-                CHANGE_ID_COMMIT_HEADER.into(),
-                contents.change_id.reverse_hex().into(),
-            ));
-        }
-
-        if tree_ids.iter().any(|id| id == &self.empty_tree_id) {
+        let parents = self.git_parents(&mut contents)?;
+        let extra_headers = self.extra_headers(&contents);
+        if contents
+            .root_tree
+            .iter()
+            .any(|id| id == &self.empty_tree_id)
+        {
             let tree_id = self.write_tree_object(vec![])?;
             assert!(tree_id.is_empty_tree());
         }
@@ -870,7 +883,7 @@ impl Backend for NativeBackend {
             .map_err(|e| BackendError::Other(e.into()))?;
         let id = loop {
             let mut commit = gix::objs::Commit {
-                message: message.to_owned().into(),
+                message: contents.description.clone().into(),
                 tree: git_tree_id,
                 author: author.clone(),
                 committer: committer.clone(),

@@ -7,12 +7,12 @@ use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::ref_name::RemoteName;
 use jj_lib::repo::Repo as _;
-use motte_jj::ctl::{CtlClient, ObjectStore as _, StoreError};
+use motte_jj::ctl::{ObjectStore as _, StoreError};
 
+use crate::daemon;
 use crate::fetch::{self, Tip};
 use crate::fetch_objects::{self, Walk};
-use crate::native_push::store_fail;
-use crate::push::{self, Fail, Outcome, REMOTE};
+use crate::push::{self, Fail, Outcome, REMOTE, store_fail};
 
 pub async fn fetch(
     ui: &mut Ui,
@@ -20,10 +20,7 @@ pub async fn fetch(
     names: &[String],
     default_branch: &str,
 ) -> Result<(), Fail> {
-    let ctl = CtlClient::new(
-        std::env::var("MOTTE_VFS_SOCK")
-            .map_err(|_| Fail::new(Outcome::Refused, "set MOTTE_VFS_SOCK"))?,
-    );
+    let ctl = daemon(ws.repo_path()).map_err(|e| Fail::new(Outcome::Refused, e))?;
     let repo = ws.repo().clone();
 
     push::claim(&ctl, "fetched")?;
