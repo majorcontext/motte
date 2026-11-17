@@ -21,7 +21,8 @@ Non-goals:
 | `internal/objstore` | Object store seam with Cloud Storage and filesystem buckets. | M1 |
 | `internal/gitpack` | Reader and writer of git pack files and v2 indexes. | M1 |
 | Store service | HTTP service, PostgreSQL index, the epoch fence. | M2 |
-| `client` | Typed Go client for callers. | M3 |
+| `client` | Typed Go client for callers. Public package. | M3 |
+| `testserver` | Starts a real server in a caller's test. Public package. | M3 |
 | `vfsd` and `volume` | Node daemon that serves a virtual workspace, and its volume attributes. | M4 |
 | jj backend | The jj crate that talks to the store plane. | M5 |
 
@@ -158,6 +159,18 @@ Authorization happens at claim time. For a repository that the store keeps (it h
 The path prefix `/v1` is additive. New fields and new routes are allowed, and clients ignore unknown fields. A breaking change gets `/v2`, served beside `/v1`. The module is tagged with semantic versions.
 
 Wire error codes keep their `vcs_` text: `vcs_claim_lost`, `vcs_generation_conflict`, `vcs_not_found`, `vcs_object_invalid`, `vcs_object_too_large`, `vcs_repo_forbidden`, `vcs_workspace_conflict`, `vcs_workspace_deleted`, `vcs_not_configured`. The error body is `{"error":{"code","message","details"}}`. A conflict on a ref carries the stored ref in `details.ref`.
+
+## Client
+
+Package `client` has one typed method for each route of both planes. A `Client` sends one grant. The caller gives a `GrantFunc` that the client calls before each request, so a caller holds one `Client` for each scope that it uses.
+
+- Each call has a time budget of 2 seconds, which `WithBudget` changes. A deadline on the call context that is earlier than the budget wins.
+- The client injects the W3C trace context of the call context into the request headers.
+- The client follows no redirect. A 3xx answer is the error `ErrRedirect`, and the grant goes to no other host.
+- A failure answer is an `*Error` with the HTTP status, the wire code, the message and the details. `errors.Is` matches the sentinel of the code: `ErrNotConfigured`, `ErrNotFound`, `ErrGenerationConflict`, `ErrClaimLost`, `ErrObjectInvalid`, `ErrObjectTooLarge`, `ErrRepoForbidden`, `ErrWorkspaceConflict`, `ErrWorkspaceDeleted`, `ErrUnauthorized`, `ErrInvalidBody` and `ErrInternal`. A failure answer with no wire error body is `ErrUnexpected`.
+- `CurrentRef` returns the stored ref that a ref generation conflict carries.
+
+Package `testserver` runs the real server in the process of a test, on a fresh schema of the PostgreSQL database that the caller names (or `MOTTE_TEST_DATABASE_URL`) and a temporary filesystem bucket. It skips the test when no DSN is set. It returns the base URL, the control-plane and node signers, and helpers that mint operator, node, read and import grants.
 
 ## Observability
 

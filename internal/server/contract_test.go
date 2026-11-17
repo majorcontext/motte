@@ -3,29 +3,23 @@ package server_test
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
-	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/majorcontext/motte/api"
+	"github.com/majorcontext/motte/client"
 	"github.com/majorcontext/motte/grant"
 	"github.com/majorcontext/motte/internal/gitpack"
-	"github.com/majorcontext/motte/internal/objstore"
 	"github.com/majorcontext/motte/internal/pg"
-	"github.com/majorcontext/motte/internal/server"
-	"github.com/majorcontext/motte/internal/store"
+	"github.com/majorcontext/motte/testserver"
 )
 
 const (
@@ -35,12 +29,12 @@ const (
 )
 
 type env struct {
-	t      *testing.T
-	pool   *pgxpool.Pool
-	url    string
-	cp     grant.Signer
-	node   grant.Signer
-	expire time.Time
+	*testserver.Server
+	t    *testing.T
+	pool *pgxpool.Pool
+	url  string
+	cp   grant.Signer
+	node grant.Signer
 }
 
 type reply struct {
@@ -49,79 +43,29 @@ type reply struct {
 	body   map[string]any
 }
 
-// newEnv starts the real server on a fresh schema of the test database.
 func newEnv(t *testing.T) *env {
 	t.Helper()
-	dsn := os.Getenv("MOTTE_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("MOTTE_TEST_DATABASE_URL is not set")
-	}
-	ctx := context.Background()
-	admin, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var raw [6]byte
-	_, _ = rand.Read(raw[:])
-	schema := "t_" + hex.EncodeToString(raw[:])
-	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.ConnConfig.RuntimeParams["search_path"] = schema
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		pool.Close()
-		_, _ = admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE")
-		admin.Close()
-	})
-	if err := pg.Migrate(ctx, pool); err != nil {
-		t.Fatal(err)
-	}
-	cpPub, cpKey, _ := ed25519.GenerateKey(rand.Reader)
-	nodePub, nodeKey, _ := ed25519.GenerateKey(rand.Reader)
-	db := &pg.DB{Pool: pool}
-	srv := &server.Server{
-		DB: db, Objects: store.New(objstore.NewMemory(), db),
-		Verifier: grant.NewVerifier(
-			grant.Key{Kid: "cp", Public: cpPub, Scopes: []grant.Scope{grant.ScopeNode, grant.ScopeRead, grant.ScopeImport, grant.ScopeOperator}},
-			grant.Key{Kid: "node", Public: nodePub, Scopes: []grant.Scope{grant.ScopeNode}}),
-	}
-	ts := httptest.NewServer(srv.Handler())
-	t.Cleanup(ts.Close)
-	return &env{t: t, pool: pool, url: ts.URL, cp: grant.Signer{Kid: "cp", Key: cpKey}, node: grant.Signer{Kid: "node", Key: nodeKey}, expire: time.Now().Add(time.Hour)}
+	ts := testserver.Start(t, "")
+	return &env{Server: ts, t: t, pool: ts.Pool, url: ts.URL, cp: ts.Operator, node: ts.Node}
 }
 
-func (e *env) mint(s grant.Signer, c grant.Claims) string {
-	e.t.Helper()
-	if c.Exp == 0 {
-		c.Exp = e.expire.Unix()
+func (e *env) mint(s grant.Signer, c grant.Claims) string { return e.Mint(e.t, s, c) }
+
+func (e *env) operator() string { return e.OperatorGrant(e.t) }
+
+func (e *env) nodeGrant(ws string, epoch uint64) string { return e.NodeGrant(e.t, ws, epoch, repoText) }
+
+func (e *env) readGrant(repo string) string { return e.ReadGrant(e.t, repo) }
+
+func (e *env) importGrant(repo string) string { return e.ImportGrant(e.t, repo) }
+
+// refuses fails unless err is the sentinel at the HTTP status.
+func refuses(t *testing.T, err error, sentinel error, status int) {
+	t.Helper()
+	var ce *client.Error
+	if !errors.Is(err, sentinel) || !errors.As(err, &ce) || ce.Status != status {
+		t.Fatalf("error = %v, want %v with status %d", err, sentinel, status)
 	}
-	tok, err := s.Mint(c)
-	if err != nil {
-		e.t.Fatal(err)
-	}
-	return tok
-}
-
-func (e *env) operator() string { return e.mint(e.cp, grant.Claims{Scope: grant.ScopeOperator}) }
-
-func (e *env) nodeGrant(ws string, epoch uint64) string {
-	return e.mint(e.node, grant.Claims{Scope: grant.ScopeNode, WS: ws, Epoch: epoch, Repo: repoText})
-}
-
-func (e *env) readGrant(repo string) string {
-	return e.mint(e.cp, grant.Claims{Scope: grant.ScopeRead, Repo: repo})
-}
-
-func (e *env) importGrant(repo string) string {
-	return e.mint(e.cp, grant.Claims{Scope: grant.ScopeImport, Repo: repo})
 }
 
 func (e *env) call(method, path, token string, body any) reply {
@@ -216,35 +160,32 @@ func TestClaimWaitsForAWriteInFlight(t *testing.T) {
 func TestRefGenerationIsACompareAndSwapThatNeverRepeats(t *testing.T) {
 	e := newEnv(t)
 	e.want(e.claim("ws1", 1, repoText), 200, "")
-	tok := e.nodeGrant("ws1", 1)
-	put := func(expect int64, commit string) reply {
-		return e.call("PUT", "/v1/vcs/refs/feature/x", tok, map[string]any{"expect": expect, "commit": commit})
+	node := e.Client(e.nodeGrant("ws1", 1))
+	ctx := context.Background()
+	first, err := node.SwapRef(ctx, "feature/x", 0, commitA)
+	if err != nil {
+		t.Fatal(err)
 	}
-	gen := func(r reply) int64 { v, _ := r.body["generation"].(float64); return int64(v) }
-	first := put(0, commitA)
-	e.want(first, 200, "")
 	for _, c := range []struct {
 		name   string
 		expect int64
-	}{{"create over an existing ref", 0}, {"stale expect", gen(first) + 100}} {
-		r := put(c.expect, commitB)
-		e.want(r, 409, "vcs_generation_conflict")
-		stored := r.body["error"].(map[string]any)["details"].(map[string]any)["ref"].(map[string]any)
-		if stored["commit"] != commitA || int64(stored["generation"].(float64)) != gen(first) {
+	}{{"create over an existing ref", 0}, {"stale expect", first.Generation + 100}} {
+		_, err := node.SwapRef(ctx, "feature/x", c.expect, commitB)
+		refuses(t, err, client.ErrGenerationConflict, 409)
+		if stored, ok := client.CurrentRef(err); !ok || stored.Commit != commitA || stored.Generation != first.Generation {
 			t.Errorf("%s: conflict carries %v, want the stored ref", c.name, stored)
 		}
 	}
-	second := put(gen(first), commitB)
-	e.want(second, 200, "")
-	if gen(second) <= gen(first) {
-		t.Errorf("generation after a swap = %d, want above %d", gen(second), gen(first))
+	second, err := node.SwapRef(ctx, "feature/x", first.Generation, commitB)
+	if err != nil || second.Generation <= first.Generation {
+		t.Fatalf("swap = %v, %v; want a generation above %d", second, err, first.Generation)
 	}
-	e.want(e.call("DELETE", fmt.Sprintf("/v1/vcs/refs/feature/x?expect=%d", gen(first)), tok, nil), 409, "vcs_generation_conflict")
-	if r := e.call("DELETE", fmt.Sprintf("/v1/vcs/refs/feature/x?expect=%d", gen(second)), tok, nil); r.status != 204 {
-		t.Fatalf("delete = %d", r.status)
+	refuses(t, node.DeleteRef(ctx, "feature/x", first.Generation), client.ErrGenerationConflict, 409)
+	if err := node.DeleteRef(ctx, "feature/x", second.Generation); err != nil {
+		t.Fatal(err)
 	}
-	if third := put(0, commitA); gen(third) <= gen(second) {
-		t.Errorf("generation after delete and create = %d, want above %d", gen(third), gen(second))
+	if third, err := node.SwapRef(ctx, "feature/x", 0, commitA); err != nil || third.Generation <= second.Generation {
+		t.Errorf("create after delete = %v, %v; want a generation above %d", third, err, second.Generation)
 	}
 }
 
@@ -254,101 +195,138 @@ func TestImportedPackServesObjects(t *testing.T) {
 	pack, idx, names := gitpack.Build([]gitpack.Object{{Type: gitpack.Blob, Data: []byte("hello")}})
 	sum := sha256.Sum256(pack)
 	id := hex.EncodeToString(sum[:])
-	body := map[string]any{"index": base64.StdEncoding.EncodeToString(idx), "pack": base64.StdEncoding.EncodeToString(pack)}
-	e.want(e.call("PUT", "/v1/vcs/packs/"+strings.Repeat("0", 64), e.importGrant(repoText), body), 400, "vcs_object_invalid")
-	if r := e.call("PUT", "/v1/vcs/packs/"+id, e.importGrant(repoText), body); r.status != 204 {
-		t.Fatalf("import = %d %v", r.status, r.body)
+	ctx := context.Background()
+	imp := e.Client(e.importGrant(repoText))
+	refuses(t, imp.ImportPack(ctx, strings.Repeat("0", 64), idx, pack), client.ErrObjectInvalid, 400)
+	if err := imp.ImportPack(ctx, id, idx, pack); err != nil {
+		t.Fatal(err)
 	}
 	sha := names[0].String()
-	for name, tok := range map[string]string{"node": e.nodeGrant("ws1", 1), "read": e.readGrant(repoText)} {
-		r := e.call("GET", "/v1/vcs/objects/"+sha, tok, nil)
-		if want := base64.StdEncoding.EncodeToString([]byte("hello")); r.status != 200 || r.body["data"] != want || r.body["type"] != "blob" {
-			t.Errorf("%s grant read = %d %v", name, r.status, r.body)
+	for name, c := range map[string]*client.Client{"node": e.Client(e.nodeGrant("ws1", 1)), "read": e.Client(e.readGrant(repoText))} {
+		if o, err := c.Object(ctx, sha); err != nil || o.Type != "blob" || string(o.Data) != "hello" {
+			t.Errorf("%s grant read = %v, %v", name, o, err)
 		}
 	}
-	r := e.call("POST", "/v1/vcs/objects/has", e.importGrant(repoText), map[string]any{"shas": []string{sha, commitA}})
-	if p, _ := r.body["present"].([]any); len(p) != 2 || p[0] != true || p[1] != false {
-		t.Errorf("has = %v", r.body)
+	if p, err := imp.Has(ctx, []string{sha, commitA}); err != nil || len(p) != 2 || !p[0] || p[1] {
+		t.Errorf("has = %v, %v", p, err)
 	}
-	e.want(e.call("GET", "/v1/vcs/objects/"+sha, e.readGrant("gh:acme/other"), nil), 404, "vcs_not_found")
+	_, err := e.Client(e.readGrant("gh:acme/other")).Object(ctx, sha)
+	refuses(t, err, client.ErrNotFound, 404)
 }
 
 func TestDeletedWorkspaceRefusesReadsAndWrites(t *testing.T) {
 	e := newEnv(t)
 	e.want(e.claim("ws1", 1, repoText), 200, "")
-	tok := e.nodeGrant("ws1", 1)
+	ctx := context.Background()
+	node, op := e.Client(e.nodeGrant("ws1", 1)), e.Client(e.operator())
 	for range 2 {
-		if r := e.call("DELETE", "/v1/workspaces/ws1", e.operator(), nil); r.status != 204 {
-			t.Fatalf("delete = %d", r.status)
+		if err := op.DeleteWorkspace(ctx, "ws1"); err != nil {
+			t.Fatal(err)
 		}
 	}
-	e.want(e.call("GET", "/v1/vcs/refs", tok, nil), 401, "unauthorized")
-	e.want(e.call("PUT", "/v1/vcs/refs/x", tok, map[string]any{"expect": 0, "commit": commitA}), 401, "unauthorized")
-	e.want(e.claim("ws1", 2, repoText), 410, "vcs_workspace_deleted")
+	_, err := node.Refs(ctx)
+	refuses(t, err, client.ErrUnauthorized, 401)
+	_, err = node.SwapRef(ctx, "x", 0, commitA)
+	refuses(t, err, client.ErrUnauthorized, 401)
+	_, err = op.Claim(ctx, "ws1", api.ClaimRequest{Epoch: 2, Owner: "o1", Repo: repoText})
+	refuses(t, err, client.ErrWorkspaceDeleted, 410)
 }
 
 func TestCreateRepoStartsOnARootCommitOfMain(t *testing.T) {
 	e := newEnv(t)
-	create := func(name string) reply {
-		return e.call("POST", "/v1/repos", e.operator(), map[string]any{"name": name, "owner": "o1"})
-	}
+	ctx := context.Background()
+	op := e.Client(e.operator())
 	for _, name := range []string{"", "   ", strings.Repeat("a", 101), "bad\x07name"} {
-		e.want(create(name), 400, "invalid_body")
+		_, err := op.CreateRepo(ctx, name, "o1")
+		refuses(t, err, client.ErrInvalidBody, 400)
 	}
-	r := create("  widgets  ")
-	e.want(r, 201, "")
-	path := r.body["path"].(string)
-	if !strings.HasPrefix(path, "repo_") {
-		t.Fatalf("path = %q", path)
+	path, err := op.CreateRepo(ctx, "  widgets  ", "o1")
+	if err != nil || !strings.HasPrefix(path, "repo_") {
+		t.Fatalf("create = %q, %v", path, err)
 	}
-	e.want(create("second"), 201, "")
-	ref := e.call("GET", "/v1/vcs/refs/main", e.readGrant("native:"+path), nil)
-	e.want(ref, 200, "")
-	commit := ref.body["commit"].(string)
-	c := e.call("GET", "/v1/vcs/commits/"+commit, e.readGrant("native:"+path), nil)
-	if emptyTree := gitpack.Hash(gitpack.Tree, nil).String(); c.status != 200 || c.body["tree"] != emptyTree {
-		t.Errorf("root commit = %d %v, want the empty tree %s", c.status, c.body, emptyTree)
+	if _, err := op.CreateRepo(ctx, "second", "o1"); err != nil {
+		t.Fatal(err)
 	}
-	list := e.call("GET", "/v1/repos", e.operator(), nil)
-	repos, _ := list.body["repos"].([]any)
-	if len(repos) != 2 || repos[1].(map[string]any)["name"] != "widgets" {
-		t.Errorf("list = %v, want newest first with the trimmed name last", list.body)
+	read := e.Client(e.readGrant("native:" + path))
+	ref, err := read.Ref(ctx, "main")
+	if err != nil {
+		t.Fatal(err)
 	}
-	e.want(e.call("GET", "/v1/repos/"+path, e.operator(), nil), 200, "")
-	e.want(e.call("GET", "/v1/repos/repo_missing", e.operator(), nil), 404, "vcs_not_found")
+	c, err := read.Commit(ctx, ref.Commit)
+	if emptyTree := gitpack.Hash(gitpack.Tree, nil).String(); err != nil || c.Tree != emptyTree {
+		t.Errorf("root commit = %v, %v, want the empty tree %s", c, err, emptyTree)
+	}
+	repos, err := op.Repos(ctx)
+	if err != nil || len(repos) != 2 || repos[1].Name != "widgets" {
+		t.Errorf("list = %v, %v, want newest first with the trimmed name last", repos, err)
+	}
+	if _, err := op.Repo(ctx, path); err != nil {
+		t.Error(err)
+	}
+	_, err = op.Repo(ctx, "repo_missing")
+	refuses(t, err, client.ErrNotFound, 404)
 }
 
 func TestClaimBindsOwnerAndRepoOnce(t *testing.T) {
 	e := newEnv(t)
-	path := e.call("POST", "/v1/repos", e.operator(), map[string]any{"name": "w", "owner": "o1"}).body["path"].(string)
+	ctx := context.Background()
+	op := e.Client(e.operator())
+	path, err := op.CreateRepo(ctx, "w", "o1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	native := "native:" + path
-	e.want(e.claim("ws1", 1, native), 200, "")
-	e.want(e.call("PUT", "/v1/workspaces/ws2/claim", e.operator(), map[string]any{"epoch": 1, "owner": "o2", "repo": native}), 403, "vcs_repo_forbidden")
-	e.want(e.call("PUT", "/v1/workspaces/ws1/claim", e.operator(), map[string]any{"epoch": 1, "owner": "o2", "repo": native}), 403, "vcs_repo_forbidden")
-	e.want(e.claim("ws3", 1, "native:repo_unknown"), 403, "vcs_repo_forbidden")
-	e.want(e.claim("ws4", 1, repoText), 200, "")
-	e.want(e.claim("ws4", 1, "gh:acme/other"), 409, "vcs_workspace_conflict")
+	claim := func(ws, owner, repo string) error {
+		_, err := op.Claim(ctx, ws, api.ClaimRequest{Epoch: 1, Owner: owner, Repo: repo})
+		return err
+	}
+	if err := claim("ws1", "o1", native); err != nil {
+		t.Fatal(err)
+	}
+	refuses(t, claim("ws2", "o2", native), client.ErrRepoForbidden, 403)
+	refuses(t, claim("ws1", "o2", native), client.ErrRepoForbidden, 403)
+	refuses(t, claim("ws3", "o1", "native:repo_unknown"), client.ErrRepoForbidden, 403)
+	if err := claim("ws4", "o1", repoText); err != nil {
+		t.Fatal(err)
+	}
+	refuses(t, claim("ws4", "o1", "gh:acme/other"), client.ErrWorkspaceConflict, 409)
 }
 
 func TestFlushOrdersByGenerationUnderTheEpochFence(t *testing.T) {
 	e := newEnv(t)
-	e.want(e.claim("ws1", 1, repoText), 200, "")
-	flush := func(epoch uint64, gen int, prev, op string) reply {
-		return e.call("POST", "/v1/workspaces/ws1/flush", e.operator(), map[string]any{"epoch": epoch, "generation": gen, "prev": prev, "op": op, "snapshot": commitA})
+	ctx := context.Background()
+	op := e.Client(e.operator())
+	claim := func(epoch uint64) api.ClaimResponse {
+		r, err := op.Claim(ctx, "ws1", api.ClaimRequest{Epoch: epoch, Owner: "o1", Repo: repoText})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
 	}
+	flush := func(epoch uint64, gen int64, prev, id string) error {
+		return op.Flush(ctx, "ws1", api.FlushRequest{Epoch: epoch, Generation: gen, Prev: prev, Op: id, Snapshot: commitA})
+	}
+	claim(1)
 	opA, opB, opC := strings.Repeat("a", 16), strings.Repeat("b", 16), strings.Repeat("c", 16)
-	e.want(flush(1, 5, "", opA), 204, "")
-	e.want(flush(1, 3, "", opB), 204, "")
-	e.want(flush(1, 0, opB, opC), 204, "")
-	if r := e.claim("ws1", 1, repoText); r.body["op"] != opA || r.body["snapshot"] != commitA {
-		t.Errorf("claim after flushes = %v, want op %s: the lower generation and the mismatched prev are dropped", r.body, opA)
+	for _, f := range []struct {
+		gen      int64
+		prev, id string
+	}{{5, "", opA}, {3, "", opB}, {0, opB, opC}} {
+		if err := flush(1, f.gen, f.prev, f.id); err != nil {
+			t.Fatal(err)
+		}
 	}
-	e.want(flush(1, 0, opA, opC), 204, "")
-	if r := e.claim("ws1", 1, repoText); r.body["op"] != opC {
-		t.Errorf("claim after a matching prev = %v, want op %s", r.body, opC)
+	if r := claim(1); r.Op != opA || r.Snapshot != commitA {
+		t.Errorf("claim after flushes = %v, want op %s: the lower generation and the mismatched prev are dropped", r, opA)
 	}
-	e.want(e.claim("ws1", 2, repoText), 200, "")
-	e.want(flush(1, 6, "", opB), 409, "vcs_claim_lost")
+	if err := flush(1, 0, opA, opC); err != nil {
+		t.Fatal(err)
+	}
+	if r := claim(1); r.Op != opC {
+		t.Errorf("claim after a matching prev = %v, want op %s", r, opC)
+	}
+	claim(2)
+	refuses(t, flush(1, 6, "", opB), client.ErrClaimLost, 409)
 }
 
 func TestGrantScopeRefusals(t *testing.T) {
@@ -358,7 +336,7 @@ func TestGrantScopeRefusals(t *testing.T) {
 	nodeOther := e.mint(e.node, grant.Claims{Scope: grant.ScopeNode, WS: "ws1", Epoch: 1, Repo: "gh:acme/other"})
 	cpNode := e.mint(e.cp, grant.Claims{Scope: grant.ScopeNode, WS: "ws1", Epoch: 1, Repo: repoText})
 	nodeKeyOperator := func() string {
-		tok, err := e.node.Mint(grant.Claims{Scope: grant.ScopeOperator, Exp: e.expire.Unix()})
+		tok, err := e.node.Mint(grant.Claims{Scope: grant.ScopeOperator, Exp: e.Expire.Unix()})
 		if err != nil {
 			t.Fatal(err)
 		}
