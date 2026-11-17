@@ -12,18 +12,19 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
+	"github.com/majorcontext/motte/bucket"
+	"github.com/majorcontext/motte/bucket/fs"
+	"github.com/majorcontext/motte/bucket/gcs"
 	"github.com/majorcontext/motte/grant"
-	"github.com/majorcontext/motte/internal/objstore"
-	"github.com/majorcontext/motte/internal/objstore/fs"
-	"github.com/majorcontext/motte/internal/objstore/gcs"
-	"github.com/majorcontext/motte/internal/pg"
 	"github.com/majorcontext/motte/internal/server"
+	"github.com/majorcontext/motte/meta"
+	"github.com/majorcontext/motte/meta/postgres"
+	"github.com/majorcontext/motte/meta/sqlite"
 )
 
 func main() {
@@ -34,7 +35,7 @@ func main() {
 	}
 }
 
-func openBucket(ctx context.Context, c config) (objstore.Store, error) {
+func openBucket(ctx context.Context, c config) (bucket.Store, error) {
 	if c.bucketKind == "fs" {
 		root, err := fs.New(c.bucket)
 		if err != nil {
@@ -47,6 +48,21 @@ func openBucket(ctx context.Context, c config) (objstore.Store, error) {
 		return nil, err
 	}
 	return gcs.New(client, c.bucket), nil
+}
+
+func openMeta(ctx context.Context, c config) (meta.Store, func(), error) {
+	if c.meta == "sqlite" {
+		db, err := sqlite.Open(ctx, c.sqlitePath)
+		if err != nil {
+			return nil, nil, err
+		}
+		return db, func() { _ = db.Close() }, nil
+	}
+	db, err := postgres.Open(ctx, c.databaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	return db, db.Close, nil
 }
 
 func run(log *slog.Logger) error {
@@ -68,19 +84,16 @@ func run(log *slog.Logger) error {
 	}
 	otel.SetTextMapPropagator(propagation.TraceContext{})
 
-	pool, err := pgxpool.New(ctx, cfg.databaseURL)
+	db, closeMeta, err := openMeta(ctx, cfg)
 	if err != nil {
 		return err
 	}
-	defer pool.Close()
-	if err := pg.Migrate(ctx, pool); err != nil {
-		return err
-	}
+	defer closeMeta()
 	bucket, err := openBucket(ctx, cfg)
 	if err != nil {
 		return err
 	}
-	srv := server.New(server.Config{Pool: pool, Bucket: bucket, Verifier: grant.NewVerifier(cfg.keys...), Logger: log})
+	srv := server.New(server.Config{Meta: db, Bucket: bucket, Verifier: grant.NewVerifier(cfg.keys...), Logger: log})
 	hs := &http.Server{Addr: cfg.listen, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 1)
 	go func() { errc <- hs.ListenAndServe() }()

@@ -42,9 +42,11 @@ type reply struct {
 	body   map[string]any
 }
 
+var startServer = func(t *testing.T) *testserver.Server { return testserver.Start(t, "") }
+
 func newEnv(t *testing.T) *env {
 	t.Helper()
-	ts := testserver.Start(t, "")
+	ts := startServer(t)
 	return &env{Server: ts, t: t, url: ts.URL, cp: ts.Operator, node: ts.Node}
 }
 
@@ -428,5 +430,24 @@ func TestObjectsBodyStartingWithAHugeTokenAnswersTooLarge(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 413 {
 		t.Errorf("status = %d, want 413", resp.StatusCode)
+	}
+}
+
+// The scenarios that pin the fence, the generations and the repo rules also hold on the SQLite and filesystem
+// composition, which needs no other service.
+func TestContractOnTheLocalBackend(t *testing.T) {
+	prev := startServer
+	startServer = func(t *testing.T) *testserver.Server { return testserver.StartLocal(t) }
+	t.Cleanup(func() { startServer = prev })
+	for name, fn := range map[string]func(*testing.T){
+		"stale epoch":       TestStaleEpochWritesAreRefusedAfterAClaimRaise,
+		"ref generation":    TestRefGenerationIsACompareAndSwapThatNeverRepeats,
+		"imported pack":     TestImportedPackServesObjects,
+		"deleted workspace": TestDeletedWorkspaceRefusesReadsAndWrites,
+		"create repo":       TestCreateRepoStartsOnARootCommitOfMain,
+		"claim binds":       TestClaimBindsOwnerAndRepoOnce,
+		"flush order":       TestFlushOrdersByGenerationUnderTheEpochFence,
+	} {
+		t.Run(name, fn)
 	}
 }

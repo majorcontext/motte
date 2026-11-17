@@ -6,9 +6,9 @@ import (
 
 	"github.com/majorcontext/motte/api"
 	"github.com/majorcontext/motte/grant"
-	"github.com/majorcontext/motte/internal/pg"
 	"github.com/majorcontext/motte/internal/repos"
 	"github.com/majorcontext/motte/internal/store"
+	"github.com/majorcontext/motte/meta"
 )
 
 func (s *Server) registerControlPlane(mux *http.ServeMux) {
@@ -20,7 +20,7 @@ func (s *Server) registerControlPlane(mux *http.ServeMux) {
 	s.handle(mux, "DELETE /v1/workspaces/{id}", s.deleteWorkspace, grant.ScopeOperator)
 }
 
-func repoView(r pg.Repo) api.Repo {
+func repoView(r meta.Repo) api.Repo {
 	return api.Repo{Path: r.Path, Name: r.Name, Owner: r.Owner, CreatedAt: r.CreatedAt.UTC().Format(time.RFC3339)}
 }
 
@@ -38,7 +38,7 @@ func (s *Server) createRepo(w http.ResponseWriter, r *http.Request, _ call) erro
 	if err != nil {
 		return err
 	}
-	if err := s.index.CreateRepo(r.Context(), pg.Repo{Path: path, Name: name, Owner: req.Owner}, repos.Text(path), names[1].String()); err != nil {
+	if err := s.index.CreateRepo(r.Context(), meta.Repo{Path: path, Name: name, Owner: req.Owner}, repos.Text(path), names[1].String()); err != nil {
 		return err
 	}
 	s.writeJSON(w, http.StatusCreated, api.CreateRepoResponse{Path: path})

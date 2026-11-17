@@ -23,8 +23,9 @@ import (
 
 	"golang.org/x/sync/semaphore"
 
+	"github.com/majorcontext/motte/bucket"
 	"github.com/majorcontext/motte/internal/gitpack"
-	"github.com/majorcontext/motte/internal/objstore"
+	"github.com/majorcontext/motte/meta"
 )
 
 var (
@@ -65,15 +66,10 @@ func ParseRepo(s string) (Repo, error) {
 	return Repo{Prefix: prefix, Path: path}, nil
 }
 
-type PackRef struct {
-	ID    string
-	Bytes int64
-}
-
 // PackIndex lists the packs of a repo, oldest first.
 type PackIndex interface {
-	AddPack(ctx context.Context, repo Repo, packID string, bytes int64) error
-	Packs(ctx context.Context, repo Repo) ([]PackRef, error)
+	AddPack(ctx context.Context, repo, packID string, bytes int64) error
+	Packs(ctx context.Context, repo string) ([]meta.Pack, error)
 }
 
 type OpKind string
@@ -92,7 +88,7 @@ var (
 
 // Service stores the objects of every repo and workspace in one object store.
 type Service struct {
-	st    objstore.Store
+	st    bucket.Store
 	index PackIndex
 
 	budget *semaphore.Weighted
@@ -113,12 +109,12 @@ func (s *Service) Reserve(ctx context.Context, bytes int64) (release func(), err
 	return func() { s.budget.Release(n) }, nil
 }
 
-func New(st objstore.Store, index PackIndex) *Service {
+func New(st bucket.Store, index PackIndex) *Service {
 	return &Service{st: st, index: index, open: map[string]*openPack{}, budget: semaphore.NewWeighted(MemoryBudget)}
 }
 
 func mapNotFound(err error) error {
-	if errors.Is(err, objstore.ErrNotFound) {
+	if errors.Is(err, bucket.ErrNotFound) {
 		return ErrNotFound
 	}
 	return err
@@ -227,7 +223,7 @@ func (s *Service) putPack(ctx context.Context, repo Repo, id string, idx, pack [
 	if _, err := s.st.Create(ctx, prefix+"/"+id+".pack", pack); err != nil {
 		return err
 	}
-	return s.index.AddPack(ctx, repo, id, int64(len(pack)))
+	return s.index.AddPack(ctx, repo.String(), id, int64(len(pack)))
 }
 
 type bytesReader []byte
@@ -247,7 +243,7 @@ func (b bytesReader) Size() int64 { return int64(len(b)) }
 // blockReader reads a pack from the object store in blocks and keeps the
 // last few, so one object costs about one range read.
 type blockReader struct {
-	st   objstore.Store
+	st   bucket.Store
 	key  string
 	size int64
 
@@ -371,7 +367,7 @@ func (s *Service) evict() {
 	s.order = s.order[1:]
 }
 
-func (s *Service) openPack(ctx context.Context, st objstore.Store, prefix string, ref PackRef) (*openPack, error) {
+func (s *Service) openPack(ctx context.Context, st bucket.Store, prefix string, ref meta.Pack) (*openPack, error) {
 	key := prefix + "|" + ref.ID
 	s.mu.Lock()
 	if e, ok := s.open[key]; ok {
@@ -408,9 +404,9 @@ func (s *Service) openPack(ctx context.Context, st objstore.Store, prefix string
 // view is the packs of one repo as of one request.
 type view struct {
 	s      *Service
-	st     objstore.Store
+	st     bucket.Store
 	prefix string
-	refs   []PackRef
+	refs   []meta.Pack
 }
 
 func (s *Service) view(ctx context.Context, repo Repo) (*view, error) {
@@ -418,7 +414,7 @@ func (s *Service) view(ctx context.Context, repo Repo) (*view, error) {
 	if err != nil {
 		return nil, err
 	}
-	refs, err := s.index.Packs(ctx, repo)
+	refs, err := s.index.Packs(ctx, repo.String())
 	if err != nil {
 		return nil, err
 	}

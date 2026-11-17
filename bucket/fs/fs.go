@@ -1,4 +1,4 @@
-// Package fs backs the objstore seam with a directory.
+// Package fs backs the bucket seam with a directory.
 package fs
 
 import (
@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/majorcontext/motte/internal/objstore"
+	"github.com/majorcontext/motte/bucket"
 )
 
 // headerSize is the fixed block that precedes the bytes of an object file: a 4-byte big-endian length and the JSON
@@ -50,14 +50,14 @@ func New(root string) (*Root, error) {
 }
 
 // Bucket opens one bucket of the directory.
-func (r *Root) Bucket(name string) objstore.Store { return bucket{r, name} }
+func (r *Root) Bucket(name string) bucket.Store { return dirBucket{r, name} }
 
-type bucket struct {
+type dirBucket struct {
 	r    *Root
 	name string
 }
 
-func (b bucket) path(key string) (string, error) {
+func (b dirBucket) path(key string) (string, error) {
 	if !bucketName.MatchString(b.name) {
 		return "", fmt.Errorf("fs: invalid bucket %q", b.name)
 	}
@@ -74,7 +74,7 @@ func (b bucket) path(key string) (string, error) {
 	return filepath.Join(b.r.root, b.name, name[:2], name), nil
 }
 
-func (b bucket) Create(_ context.Context, key string, data []byte) (bool, error) {
+func (b dirBucket) Create(_ context.Context, key string, data []byte) (bool, error) {
 	final, err := b.path(key)
 	if err != nil {
 		return false, err
@@ -116,7 +116,7 @@ func (b bucket) Create(_ context.Context, key string, data []byte) (bool, error)
 
 // syncDirs persists the directory entries from path up to the root, so a
 // crash after a write cannot lose the object or a new directory.
-func (b bucket) syncDirs(path string) error {
+func (b dirBucket) syncDirs(path string) error {
 	for dir := filepath.Dir(path); ; dir = filepath.Dir(dir) {
 		d, err := os.Open(dir)
 		if err != nil {
@@ -133,18 +133,18 @@ func (b bucket) syncDirs(path string) error {
 	}
 }
 
-func (b bucket) Get(ctx context.Context, key string) ([]byte, error) {
+func (b dirBucket) Get(ctx context.Context, key string) ([]byte, error) {
 	return b.GetRange(ctx, key, 0, -1)
 }
 
-func (b bucket) GetRange(_ context.Context, key string, off, n int64) ([]byte, error) {
+func (b dirBucket) GetRange(_ context.Context, key string, off, n int64) ([]byte, error) {
 	p, err := b.path(key)
 	if err != nil {
 		return nil, err
 	}
 	f, err := os.Open(p)
 	if errors.Is(err, iofs.ErrNotExist) {
-		return nil, objstore.ErrNotFound
+		return nil, bucket.ErrNotFound
 	}
 	if err != nil {
 		return nil, err

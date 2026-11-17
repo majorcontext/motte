@@ -18,11 +18,12 @@ Non-goals:
 |---|---|---|
 | `grant` | Claims, Ed25519 signer, verifier. Public package. | M1 |
 | `api` | Wire types and error codes. Public package. | M1 |
-| `internal/objstore` | Object store seam with Cloud Storage and filesystem buckets. | M1 |
+| `bucket` | Object store seam with Cloud Storage (`bucket/gcs`) and filesystem (`bucket/fs`) buckets, and its conformance suite `bucket/buckettest`. Public package. | M1 |
 | `internal/gitpack` | Reader and writer of git pack files and v2 indexes. | M1 |
-| Store service | HTTP service, PostgreSQL index, the epoch fence. | M2 |
+| `meta` | Metadata seam: repositories, workspaces and the epoch fence, op heads, refs, pack listing. Backends `meta/postgres` and `meta/sqlite`, and the suite `meta/metatest`. Public package. | M2 |
+| Store service | HTTP service over a `meta` store and a `bucket` store, and the epoch fence. | M2 |
 | `client` | Typed Go client for callers. Public package. | M3 |
-| `testserver` | Starts a real server in a caller's test. Public package. | M3 |
+| `testserver` | Starts a real server in a caller's test, on PostgreSQL (`Start`) or on SQLite and a temporary directory (`StartLocal`). Public package. | M3 |
 | `internal/vfs/...`, `cmd/motte-vfsd`, `volume` | Node daemon that serves a virtual workspace, and its public volume attributes. | M4 |
 | jj backend | `jj/`: the jj binary whose stores and working copy use the workspace daemon. Released for linux amd64 and arm64. | M5 |
 
@@ -37,13 +38,25 @@ The store plane serves the node daemon and the jj backend. The control plane ser
 | Variable | Meaning |
 |---|---|
 | `MOTTE_LISTEN` | Listen address. Default `:8080`. |
-| `MOTTE_DATABASE_URL` | PostgreSQL DSN. |
+| `MOTTE_META` | Metadata backend: `postgres` or `sqlite`. Default `postgres`. |
+| `MOTTE_DATABASE_URL` | PostgreSQL DSN. Required for `postgres`. |
+| `MOTTE_SQLITE_PATH` | SQLite database file. Required for `sqlite`. |
 | `MOTTE_BUCKET_KIND` | `gcs` or `fs`. |
 | `MOTTE_BUCKET` | Bucket name for `gcs`, directory for `fs`. |
 | `MOTTE_TRUSTED_KEYS` | JSON list of `{"kid","key","scopes"}`. `key` is the standard base64 of an Ed25519 public key. `scopes` holds only `node`, `read`, `import` and `operator`. The service refuses to start on any other scope text. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Optional. Enables OTLP trace export. |
 
-The service applies its embedded migrations at start, under a PostgreSQL advisory lock, so replicas can start together. `GET /health` answers 200. `GET /ready` answers 200 while the database answers a ping. `GET /metrics` serves Prometheus metrics. These three routes need no grant. A request for a path or method that no route serves answers 404 `vcs_not_found` or 405 `method_not_allowed` in the error envelope.
+The service refuses to start on a `MOTTE_META` or `MOTTE_BUCKET_KIND` value that it does not know. The service applies the embedded migrations of its metadata backend at start. The PostgreSQL backend applies them under an advisory lock, so replicas can start together. `GET /health` answers 200. `GET /ready` answers 200 while the metadata backend answers a ping. `GET /metrics` serves Prometheus metrics. These three routes need no grant. A request for a path or method that no route serves answers 404 `vcs_not_found` or 405 `method_not_allowed` in the error envelope.
+
+### Run locally
+
+The service runs with the `sqlite` metadata backend and the `fs` bucket and no other service. The key pair is any Ed25519 pair, and this command makes one and starts the service on `:8080`:
+
+```
+openssl genpkey -algorithm ed25519 -out motte.key && MOTTE_META=sqlite MOTTE_SQLITE_PATH=motte.db MOTTE_BUCKET_KIND=fs MOTTE_BUCKET=objects MOTTE_TRUSTED_KEYS="[{\"kid\":\"local\",\"key\":\"$(openssl pkey -in motte.key -pubout -outform DER | tail -c 32 | base64)\",\"scopes\":[\"node\",\"read\",\"import\",\"operator\"]}]" go run ./cmd/motte
+```
+
+A Go test starts the same composition with `testserver.StartLocal`, which needs no service and never skips. `testserver.Start` runs on PostgreSQL and skips without `MOTTE_TEST_DATABASE_URL`. One process uses one SQLite file and one `fs` directory.
 
 ### Limits and memory
 
@@ -100,6 +113,8 @@ A ref route serves any repository, whether or not it has a `repos` row.
 
 ## Data model
 
+The tables below are the PostgreSQL schema. Every backend of `meta.Store` keeps the same fields. See Backends.
+
 ```
 repos(path pk, name, owner, created_at)
 packs(repo, pack_id, bytes, created_at, pk(repo, pack_id))
@@ -116,10 +131,10 @@ A ref generation comes from the sequence `ref_generation`. It is never reused, i
 
 `workspaces.epoch` is the highest epoch that the caller claimed.
 
-- Claim: `INSERT ... ON CONFLICT (id) DO UPDATE SET epoch = GREATEST(workspaces.epoch, EXCLUDED.epoch) WHERE deleted_at IS NULL RETURNING epoch, op, snapshot`. A claim below the stored epoch answers 409 `vcs_claim_lost`. A claim on a deleted workspace answers 410. `owner` and `repo` are set once. A different value answers 409.
+- Claim: the PostgreSQL statement is `INSERT ... ON CONFLICT (id) DO UPDATE SET epoch = GREATEST(workspaces.epoch, EXCLUDED.epoch) WHERE deleted_at IS NULL RETURNING epoch, op, snapshot`. A claim below the stored epoch answers 409 `vcs_claim_lost`. A claim on a deleted workspace answers 410. `owner` and `repo` are set once. A different value answers 409.
 - A claim needs `epoch` of 1 or more. A claim on a `native` repository that has no row, or whose `repos.owner` differs from `owner`, answers 403 `vcs_repo_forbidden`. A claim whose `owner` or `repo` differs from the stored value answers 409 `vcs_workspace_conflict`. A claim on a deleted workspace answers 410 `vcs_workspace_deleted`.
-- Write: every ref swap, ref delete and op-heads swap is one statement. It starts with `WITH guard AS (SELECT id FROM workspaces WHERE id = $ws AND epoch = $epoch AND deleted_at IS NULL FOR SHARE)`. The write applies only when the guard row exists. A workspace report is one `UPDATE` of the workspace row with the same epoch, repository and `deleted_at` conditions in its `WHERE`. It takes the row lock itself, because two reports that hold `FOR SHARE` and then update the row can deadlock.
-- The claim `UPDATE` takes the row lock that `FOR SHARE` conflicts with. A write in flight finishes first, and every later write of the old epoch fails. `vcs_claim_lost` wins over `vcs_generation_conflict`. An op-heads write also needs `op_heads.epoch <= $epoch`.
+- Write: in PostgreSQL, every ref swap, ref delete and op-heads swap is one statement. It starts with `WITH guard AS (SELECT id FROM workspaces WHERE id = $ws AND epoch = $epoch AND deleted_at IS NULL FOR SHARE)`. The write applies only when the guard row exists. A workspace report is one `UPDATE` of the workspace row with the same epoch, repository and `deleted_at` conditions in its `WHERE`. It takes the row lock itself, because two reports that hold `FOR SHARE` and then update the row can deadlock.
+- In PostgreSQL, the claim `UPDATE` takes the row lock that `FOR SHARE` conflicts with. In every backend, a write in flight finishes first, and every later write of the old epoch fails. `vcs_claim_lost` wins over `vcs_generation_conflict`. An op-heads write also needs `op_heads.epoch <= $epoch`.
 - A `node` route compares the grant epoch with `workspaces.epoch` before it runs, for reads and writes. A missing or deleted workspace answers 401. A repository that differs from `workspaces.repo` answers 403 `vcs_repo_forbidden`. A different epoch answers 409 `vcs_claim_lost`. Every write statement also needs `workspaces.repo` to equal the grant repository.
 
 ### Raise before commit
@@ -137,6 +152,72 @@ The caller raises the epoch before it commits its own increment. The caller call
 ### Repository creation
 
 `POST /v1/repos` creates the repository with one root commit under the ref `main`. The root commit has the empty tree, the author and committer `motte <motte@motte.invalid>` and the creation time as its time. The store writes the root objects first, then the `repos` row and the ref in one transaction, so a failed create leaves no repository without `main`. The path is `repo_` and random base32 text. The name is trimmed and has 1 to 100 bytes with no control character, else 400 `invalid_body`. A workspace can start on `main` at once.
+
+## Backends
+
+A caller of the service chooses where the service keeps its state. Two seams hold it. `meta.Store` keeps the small mutable records. `bucket.Store` keeps the immutable objects. The server and `internal/store` depend only on these two interfaces and on their neutral types and errors. A backend is a Go type that implements one of them. The operator writes or picks a backend, and `cmd/motte` builds the server from it. The server needs no change.
+
+| Interface | Holds | Backends |
+|---|---|---|
+| `meta.Store` | Repositories, workspaces and their epoch fence, op heads, refs, the pack listing. | `meta/postgres`, `meta/sqlite` |
+| `bucket.Store` | Pack files, pack indexes and op objects. | `bucket/gcs`, `bucket/fs` |
+
+The suites `meta/metatest` and `bucket/buckettest` export `Run(t, newBackend)`. A backend passes its suite before a server uses it. The suite is the executable form of this section, and a difference between them is a defect.
+
+### Contract of meta.Store
+
+Every method that writes is one atomic unit. The unit is one conditional statement, or one atomic batch of statements, or one read-write transaction. No method needs a transaction that spans calls, a row lock that the caller holds, or a read whose result changes the write. The database decides each condition. This is the weakest set that a backend can offer: a database with atomic batches and no interactive transactions, such as Cloudflare D1, meets it.
+
+- Fence: the fence of workspace `ws` at `epoch` and `repo` holds while the workspace row has that id, that epoch and that repo and is not deleted. A write that needs the fence checks it in the same unit as the write. A claim and a write are ordered. A write that is ordered after the claim sees the raised epoch and fails.
+- Failed condition: a write whose condition fails changes nothing. The backend then reads the workspace row, and the ref or op-heads row when the method names it, and picks the error. `meta.Fence` holds the precedence, so every backend gives the same one: `ErrClaimLost` wins over a generation conflict. These reads are not part of the unit. The error answers for a state that is at least as new as the write attempt.
+- Generation: the generation of a ref is positive and unique in the store. No ref ever takes a generation that was taken before, including a ref that is deleted and created again. The backend takes it from one counter in the unit of the write. A generation is not ordered across refs, and a failed write can skip one.
+- Order: names, repositories, pack ids and workspace ids are opaque text. A list sorts them by byte value of their UTF-8 text.
+- Time: `Repo.CreatedAt` and the creation time of a pack come from the clock of the backend, with a resolution of 1 millisecond or finer.
+- Racers: of N concurrent calls that need the same free condition, exactly one wins and the others get the error of a lost condition.
+- Visibility: a method that returns nil has committed durably. A read that starts after it sees the write, in every client of the store.
+
+| Method | Condition | Effect | Error on a failed condition |
+|---|---|---|---|
+| `CreateRepo(r, repoText, commit)` | No `repos` row has path `r.Path`, and no ref `main` exists in `repoText`. | Inserts the repo row and the ref `main` at `commit` with a new generation. | `ErrExists`. Neither row exists. |
+| `Repo(path)` | None. | Returns the row. | `ErrNotFound`. |
+| `Repos()` | None. | Lists newest first: `created_at` descending, then `path` descending. | None. |
+| `Claim(id, epoch, owner, repo)` | The workspace is absent, or it is not deleted and has the same owner and repo. | Inserts the row, or sets `epoch` to the higher of the stored one and `epoch`. Returns the stored epoch, op and snapshot. | `ErrGone` for a deleted workspace. Else `ErrWorkspaceConflict`. A lower `epoch` is not an error: the caller compares the returned epoch. |
+| `Live(id, epoch, repo)` | None. | Reads the workspace row. | The first of `ErrNotFound`, `ErrGone`, `ErrWrongRepo`, `ErrClaimLost`. |
+| `Delete(id)` | None. | Sets `deleted_at` once. The call keeps an earlier `deleted_at`. | None. An unknown workspace is not an error. |
+| `Report(ws, epoch, repo, generation, prev, op, snapshot)` | The fence holds. With `generation` above 0: the stored `report_generation` is unset or at most `generation`. With `generation` 0: the stored `op` equals `prev`. | Sets `op` and `snapshot`. Sets `report_generation` when `generation` is above 0. | `ErrClaimLost` when the fence fails. When the fence holds and the ordering rule fails, the call changes nothing and returns nil. |
+| `Flush(ws, epoch, generation, prev, op, snapshot)` | As `Report`, with the repo of the stored row. | As `Report`. | `ErrNotFound`, `ErrGone`, `ErrClaimLost` by `Fence.FlushLost`. Nil when the ordering rule fails. |
+| `OpHeads(ws)` | None. | Returns epoch, generation and heads. | `ErrNotFound`. |
+| `SwapOpHeads(ws, epoch, repo, 0, heads)` | The fence holds and no op-heads row exists. | Inserts generation 1 with `epoch` and `heads`. | `ErrClaimLost`, else `*OpHeadsConflict` with the stored row as `Current`. |
+| `SwapOpHeads(ws, epoch, repo, expect, heads)` | The fence holds, the stored generation is `expect` and the stored epoch is at most `epoch`. | Sets `epoch` and `heads`. Adds 1 to the generation. | `ErrClaimLost` when the fence fails or the stored epoch is above `epoch`, else `*OpHeadsConflict` with `Current` nil when no row exists. |
+| `Ref(repo, name)` | None. | Returns the ref. | `ErrNotFound`. |
+| `Refs(repo)` | None. | Lists the refs of the repo by name. | None. |
+| `SwapRef(ws, epoch, repo, name, 0, sha)` | The fence holds and the ref is absent. | Inserts the ref with a new generation. | `ErrClaimLost`, else `*RefConflict` with the stored ref as `Current`. |
+| `SwapRef(ws, epoch, repo, name, expect, sha)` | The fence holds and the stored generation is `expect`. | Sets the commit and a new generation. | `ErrClaimLost`, else `*RefConflict` with `Current` nil when the ref is absent. |
+| `DeleteRef(ws, epoch, repo, name, expect)` | The fence holds and the stored generation is `expect`. | Deletes the ref. | As `SwapRef`. |
+| `AddPack(repo, id, bytes)` | No pack row has the repo and id. | Inserts the row with the creation time. | None. A repeat changes nothing and keeps the first `bytes`. |
+| `Packs(repo)` | None. | Lists the packs of the repo, oldest first, then by id. | None. |
+
+A `repo` argument of a fenced write is the repo of the grant. It must equal the repo of the workspace row. Op `heads` is a non-empty list of text. The server validates every other value before it calls the store.
+
+### Contract of bucket.Store
+
+- `Create(key, data)` writes `data` when no object has `key`, and returns true. It returns false and changes nothing when an object has `key`. Of N concurrent creators of one key, exactly one gets true. A stored object is never replaced and never deleted.
+- `Get(key)` returns the whole object. `GetRange(key, off, n)` returns up to `n` bytes from `off`, fewer at the end, none when `off` is at or past the end, and the rest of the object when `n` is negative. A missing key is `bucket.ErrNotFound` for both.
+- A read that starts after a `Create` that returned sees the whole object. The `fs` backend keeps its on-disk format: a 4096-byte header block, then the data.
+
+### Provided backends
+
+- `meta/postgres` is the production backend. It keeps the schema in the section Data model, applies `meta/postgres/migrations` at start under an advisory lock, and meets each write with one statement. The fence of a ref or op-heads write is a `FOR SHARE` read of the workspace row inside the statement. A report is one `UPDATE` that locks the row itself. The generation comes from the sequence `ref_generation`. `CreateRepo` is one statement that inserts the repo row and, from its `RETURNING`, the ref.
+- `meta/sqlite` is for tests and for a service that runs with no other process. It keeps the same fields in the tables of `meta/sqlite/migrations`. It uses a pure Go driver, so the service builds with CGO disabled. It opens one connection, so its writes are ordered, and one process uses one database file. Each write is one transaction of statements in which no read feeds a write. The fence is an `EXISTS` condition of the statement. The generation comes from the row `ref_generation` of the table `counters`, which the same transaction increments. Times are integer microseconds, and the heads are JSON text.
+- `bucket/gcs` and `bucket/fs` are the object backends. `gcs` writes with the precondition that the object does not exist. `fs` links a synced temporary file to its name.
+
+### A new backend
+
+A backend implements the interface and returns the sentinel errors of its package. It does not map them to wire codes: the server does. It adds a test that calls `metatest.Run` or `buckettest.Run` with a constructor that returns an empty store. It adds a branch to `cmd/motte` that chooses it from the environment. The backends below are not in the repository. Each paragraph states how the backend meets the contract.
+
+- Cloud Spanner (`meta`): each write is one read-write transaction. The transaction reads the rows that the condition names, tests the condition, writes, and commits. Spanner orders transactions strictly, so a claim and a write are ordered. The generation counter is one row that the transaction updates, or a Spanner sequence, which is unique and not ordered. The creation time is the commit timestamp. Reads that pick an error are strong reads. The heads are an `ARRAY<STRING>`.
+- Cloudflare D1 (`meta`): each write is one `batch` call. D1 runs a batch as one transaction and rolls it back when a statement fails. D1 has no interactive transaction and no row lock, and the contract needs neither. The conditions are the `WHERE` clauses and `INSERT ... SELECT ... WHERE EXISTS` fences of `meta/sqlite`, which is SQLite SQL. The counter is a row that the first statement of the batch increments. The result of a statement reports the rows that it changed, and a conditional statement that changed no row is the failed condition. Reads that pick an error go to the primary.
+- Cloudflare R2 (`bucket`): R2 has an S3-compatible API. `Create` is `PutObject` with `If-None-Match: *`, which answers 412 when the key exists. `Get` and `GetRange` are `GetObject` with an optional `Range` header, and a 416 answer is an empty result. R2 reads see a completed write.
 
 ## jj backend
 

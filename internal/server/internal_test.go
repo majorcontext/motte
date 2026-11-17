@@ -15,9 +15,10 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/majorcontext/motte/bucket/fs"
 	"github.com/majorcontext/motte/grant"
-	"github.com/majorcontext/motte/internal/objstore/fs"
 	"github.com/majorcontext/motte/internal/pgtest"
+	"github.com/majorcontext/motte/meta/postgres"
 )
 
 type harness struct {
@@ -38,7 +39,7 @@ func start(t *testing.T) *harness {
 	pub, key, _ := ed25519.GenerateKey(rand.Reader)
 	h := &harness{pool: pool, logs: &bytes.Buffer{}}
 	h.Server = New(Config{
-		Pool: pool, Bucket: root.Bucket("motte"), Logger: slog.New(slog.NewJSONHandler(h.logs, nil)),
+		Meta: &postgres.Store{Pool: pool}, Bucket: root.Bucket("motte"), Logger: slog.New(slog.NewJSONHandler(h.logs, nil)),
 		Verifier: grant.NewVerifier(grant.Key{Kid: "cp", Public: pub, Scopes: []grant.Scope{grant.ScopeOperator}}),
 	})
 	h.token, err = grant.Signer{Kid: "cp", Key: key}.Mint(grant.Claims{Scope: grant.ScopeOperator, Exp: time.Now().Add(time.Hour).Unix()})

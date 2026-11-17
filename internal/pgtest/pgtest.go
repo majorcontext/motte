@@ -10,7 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/majorcontext/motte/internal/pg"
+	"github.com/majorcontext/motte/meta/postgres"
 )
 
 // DSNEnv is the environment variable that Pool reads when it gets no DSN.
@@ -51,7 +51,7 @@ func Pool(t testing.TB, dsn string) *pgxpool.Pool {
 		_, _ = admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE")
 		admin.Close()
 	})
-	if err := pg.Migrate(ctx, pool); err != nil {
+	if err := postgres.Migrate(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
 	return pool
