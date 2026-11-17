@@ -8,6 +8,7 @@
 leaf 10
 package default 10
 
-# The server tests upload large bodies; the package takes 17 s to 19 s beside the rest of the suite.
-package internal/server 28
-test internal/server TestLargestObjectIsStoredAndALargeTreeIsRead 14
+
+# The limit tests move 16 MiB objects and a 5 MiB tree through JSON under the race
+# detector; each test stays under the leaf budget, and the package takes 17 s on two CPUs.
+package internal/server 20
