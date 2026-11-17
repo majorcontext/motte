@@ -474,7 +474,7 @@ func (s *Server) swapRef(w http.ResponseWriter, r *http.Request, c call) error {
 	if req.Expect < 0 || !lowerHex(req.Commit, 40, 40) {
 		return store.ErrInvalid
 	}
-	ref, err := s.writeRefAs(r.Context(), c, name, req.Expect, req.Commit, false)
+	ref, err := s.writeRefAs(r.Context(), c, refWrite{Name: name, Expect: req.Expect, SHA: req.Commit})
 	if err != nil {
 		return err
 	}
@@ -491,7 +491,7 @@ func (s *Server) deleteRef(w http.ResponseWriter, r *http.Request, c call) error
 	if err != nil || expect < 1 {
 		return store.ErrInvalid
 	}
-	if _, err := s.writeRefAs(r.Context(), c, name, expect, "", true); err != nil {
+	if _, err := s.writeRefAs(r.Context(), c, refWrite{Name: name, Expect: expect, Remove: true}); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)

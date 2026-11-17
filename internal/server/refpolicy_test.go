@@ -13,6 +13,7 @@ import (
 )
 
 func TestProtectedRefsAdmitOnlyAMergeGrant(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	ctx := context.Background()
 	e.want(e.claim("ws1", 1, repoText), 200, "")
@@ -67,6 +68,7 @@ func TestProtectedRefsAdmitOnlyAMergeGrant(t *testing.T) {
 }
 
 func TestProtectedRefsRouteRules(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	ctx := context.Background()
 	e.want(e.claim("ws1", 1, repoText), 200, "")
@@ -88,6 +90,7 @@ func TestProtectedRefsRouteRules(t *testing.T) {
 }
 
 func TestMergeGrantStaysInItsRepoAndCheckedKey(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	ctx := context.Background()
 	other := e.Client(e.MergeGrant(t, "gh:acme/other"))
@@ -106,6 +109,7 @@ func TestMergeGrantStaysInItsRepoAndCheckedKey(t *testing.T) {
 }
 
 func TestMainOfANewRepoIsNotProtected(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	ctx := context.Background()
 	op := e.Client(e.operator())
@@ -128,6 +132,7 @@ func TestMainOfANewRepoIsNotProtected(t *testing.T) {
 }
 
 func TestRefEventsRecordEveryWrite(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	ctx := context.Background()
 	op := e.Client(e.operator())
@@ -215,6 +220,7 @@ func TestRefEventsRecordEveryWrite(t *testing.T) {
 }
 
 func TestEventRouteRules(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	for _, q := range []string{"cursor=x", "cursor=MSwy", "limit=0", "limit=1001", "limit=x"} {
 		e.want(e.call("GET", "/v1/events?"+q, e.operator(), nil), 400, "invalid_body")
@@ -226,6 +232,7 @@ func TestEventRouteRules(t *testing.T) {
 }
 
 func TestSubscriptionRoutes(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	ctx := context.Background()
 	op := e.Client(e.operator())

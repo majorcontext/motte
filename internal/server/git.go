@@ -35,7 +35,7 @@ func pushCost(n int64) int64 {
 var errProtocolV2 = gitproto.RequestError("protocol v2 is required: use git 2.26 or later")
 
 func (s *Server) registerGit(mux *http.ServeMux) {
-	scopes := []grant.Scope{grant.ScopeRead, grant.ScopeWrite}
+	scopes := []grant.Scope{grant.ScopeRead, grant.ScopeWrite, grant.ScopeMerge}
 	s.register(mux, "GET /git/{path...}", s.gitInfoRefs, scopes, gitToken, gitChallenge)
 	s.register(mux, "POST /git/{path...}", s.gitService, scopes, gitToken, gitChallenge)
 }
@@ -93,7 +93,7 @@ func (s *Server) gitCall(r *http.Request, c call) (string, error) {
 }
 
 func requireWrite(c call) error {
-	if c.claims.Scope != grant.ScopeWrite {
+	if c.claims.Scope != grant.ScopeWrite && c.claims.Scope != grant.ScopeMerge {
 		return errNotWritable
 	}
 	return nil
@@ -312,16 +312,20 @@ func (s *Server) applyCommand(ctx context.Context, c call, cmd gitproto.Command)
 	}
 	var conflict *meta.RefConflict
 	err := s.updateRef(ctx, c, name, cmd.Old, cmd.New)
-	if errors.As(err, &conflict) {
+	switch {
+	case errors.As(err, &conflict):
 		return "stale info", nil
+	case errors.Is(err, errProtected):
+		return "protected", nil
 	}
 	return "", err
 }
 
 // updateRef is the one write of a ref that a direct push makes. It is a compare and swap on the commit that the
-// client saw: a zero old creates the ref and a zero new deletes it.
+// client saw: a zero old creates the ref and a zero new deletes it. It goes through writeRefAs, so a protected ref
+// refuses a write grant.
 func (s *Server) updateRef(ctx context.Context, c call, name string, old, new gitpack.SHA) error {
-	_, err := s.index.UpdateRef(ctx, c.claims.Repo, name, shaText(old), shaText(new))
+	_, err := s.writeRefAs(ctx, c, refWrite{Name: name, ByCommit: true, Old: shaText(old), New: shaText(new)})
 	return err
 }
 

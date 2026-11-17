@@ -224,7 +224,7 @@ type ProtectedRefs struct {
 // partition. No order holds across partitions. Old is empty for a create and
 // New is empty for a delete. Generation is that of the ref after the change, or
 // of the deleted ref. Kind is the scope of the grant that wrote the ref: node,
-// merge or operator. Time is RFC 3339.
+// write, merge or operator. Time is RFC 3339.
 type Event struct {
 	Partition  int    `json:"partition"`
 	Seq        int64  `json:"seq"`
