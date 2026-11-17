@@ -206,3 +206,31 @@ func TestTheLimitCountsDistinctPaths(t *testing.T) {
 		t.Fatalf("4 distinct paths: err = %v, want ErrTooLarge", err)
 	}
 }
+
+func TestFastForwardChecksEveryCommitOfTheRange(t *testing.T) {
+	m := mem{}
+	base := m.commit(gitpack.SHA{}, m.tree(map[string]string{"a": "1"}), "")
+	mid := m.commit(base, m.tree(map[string]string{"a": "1", "\xff": "1"}), "")
+	head := m.commit(mid, m.tree(map[string]string{"a": "1"}), "")
+	var inv Invalid
+	if _, err := m.batch(base).Land(context.Background(), base, head, time.Unix(1, 0)); !errors.As(err, &inv) {
+		t.Fatalf("err = %v, want Invalid for the path that the middle commit adds", err)
+	}
+}
+
+func TestTheCacheOfBaseDiffsIsBounded(t *testing.T) {
+	defer func(n int) { MaxChangedPaths = n }(MaxChangedPaths)
+	MaxChangedPaths = 4
+	m := mem{}
+	start := m.commit(gitpack.SHA{}, m.tree(map[string]string{"a": "0"}), "")
+	b := m.batch(start)
+	for i := range 5 {
+		other := m.commit(gitpack.SHA{}, m.tree(map[string]string{fmt.Sprint("x", i): "1", fmt.Sprint("y", i): "1"}), "")
+		if ok, err := b.before(context.Background(), other, func(string) {}); err != nil || !ok {
+			t.Fatalf("before = %v, %v", ok, err)
+		}
+		if b.cached > MaxChangedPaths {
+			t.Fatalf("cache holds %d paths, want at most %d", b.cached, MaxChangedPaths)
+		}
+	}
+}

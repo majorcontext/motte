@@ -240,7 +240,11 @@ func (b *batchRun) attempt(ctx context.Context) (retry bool, err error) {
 	if err != nil {
 		return false, err
 	}
-	writeRefused := s.refProtected(ctx, grant.ScopeWrite, b.key.Repo, b.key.Ref) != nil
+	protected := s.refProtected(ctx, grant.ScopeWrite, b.key.Repo, b.key.Ref)
+	if protected != nil && !errors.Is(protected, errProtected) {
+		return false, protected
+	}
+	writeRefused := protected != nil
 	if err := b.res.grow(0); err != nil {
 		return false, err
 	}
@@ -273,8 +277,10 @@ func (b *batchRun) attempt(ctx context.Context) (retry bool, err error) {
 		if err := b.res.grow(int64(batch.Bytes())); err != nil {
 			return false, err
 		}
-		if _, err := s.objects.PutObjects(ctx, b.repo, objs); err != nil {
-			return false, err
+		for _, part := range splitObjects(objs, store.MaxBatch/2, store.MaxPackBytes/2) {
+			if _, err := s.objects.PutObjects(ctx, b.repo, part); err != nil {
+				return false, err
+			}
 		}
 	}
 	moved, err := s.index.LandRef(ctx, meta.LandMove{Repo: b.key.Repo, Ref: b.key.Ref, Old: ref.Commit, New: batch.Tip().String(), Kind: b.kind, Rows: b.rows, Results: b.results}, b.owner, s.events.Clock.Now())
@@ -413,4 +419,18 @@ func (s *Server) sweepLands(ctx context.Context, prune bool) {
 	for _, k := range keys {
 		s.kickLeader(k)
 	}
+}
+
+// splitObjects cuts objs into parts of at most count objects and bytes of data, in order, so each part is a valid put.
+func splitObjects(objs []gitpack.Object, count, bytes int) [][]gitpack.Object {
+	var parts [][]gitpack.Object
+	start, size := 0, 0
+	for i, o := range objs {
+		if i > start && (i-start == count || size+len(o.Data) > bytes) {
+			parts = append(parts, objs[start:i])
+			start, size = i, 0
+		}
+		size += len(o.Data)
+	}
+	return append(parts, objs[start:])
 }

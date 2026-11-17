@@ -73,6 +73,7 @@ type Batch struct {
 	trees    map[gitpack.SHA][]Entry
 	produced map[gitpack.SHA][]Entry
 	diffs    map[gitpack.SHA]diffResult
+	cached   int
 }
 
 // diffResult is the paths that differ between a base and the start tip, and false when they are too many to keep.
@@ -196,7 +197,7 @@ func (b *Batch) land(ctx context.Context, base, head gitpack.SHA, when time.Time
 		return Landed{Old: head, New: head, Noop: true}, nil
 	}
 	if i := b.tipIndex(base, chain); i >= 0 {
-		return b.fastForward(ctx, head, chain[len(chain)-1].c.Tree)
+		return b.fastForward(ctx, head, baseCommit, chain)
 	}
 	return b.rebase(ctx, base, baseCommit, chain, when)
 }
@@ -208,12 +209,15 @@ func (b *Batch) tipIndex(base gitpack.SHA, chain []link) int {
 	return slices.IndexFunc(chain, func(l link) bool { return l.sha == b.tip })
 }
 
-func (b *Batch) fastForward(ctx context.Context, head, headTree gitpack.SHA) (Landed, error) {
+func (b *Batch) fastForward(ctx context.Context, head gitpack.SHA, baseCommit Commit, chain []link) (Landed, error) {
+	if _, _, err := b.scan(ctx, baseCommit, chain, false); err != nil {
+		return Landed{}, err
+	}
 	tip, err := b.commit(ctx, b.tip)
 	if err != nil {
 		return Landed{}, err
 	}
-	paths, err := b.collect(ctx, tip.Tree, headTree, true)
+	paths, err := b.collect(ctx, tip.Tree, chain[len(chain)-1].c.Tree, true)
 	if err != nil {
 		return Landed{}, err
 	}
@@ -267,19 +271,31 @@ func (p *pathSet) sorted() []string {
 	return out
 }
 
-func (b *Batch) rebase(ctx context.Context, base gitpack.SHA, baseCommit Commit, chain []link, when time.Time) (Landed, error) {
+// scan diffs each commit of the range against its parent, and checks the changed paths of every commit, so a path
+// that one commit adds and a later one removes still counts. It returns the changes when keep is set.
+func (b *Batch) scan(ctx context.Context, baseCommit Commit, chain []link, keep bool) ([][]Change, *pathSet, error) {
 	changes := make([][]Change, len(chain))
 	set := newPathSet(true)
 	parent := baseCommit.Tree
 	for i, l := range chain {
 		err := b.diff(ctx, parent, l.c.Tree, "", func(ch Change) error {
-			changes[i] = append(changes[i], ch)
+			if keep {
+				changes[i] = append(changes[i], ch)
+			}
 			return set.add(ch.Path)
 		})
 		if err != nil {
-			return Landed{}, err
+			return nil, nil, err
 		}
 		parent = l.c.Tree
+	}
+	return changes, set, nil
+}
+
+func (b *Batch) rebase(ctx context.Context, base gitpack.SHA, baseCommit Commit, chain []link, when time.Time) (Landed, error) {
+	changes, set, err := b.scan(ctx, baseCommit, chain, true)
+	if err != nil {
+		return Landed{}, err
 	}
 	paths := set.sorted()
 	if hits, err := b.conflicts(ctx, base, paths); err != nil || len(hits) > 0 {
@@ -385,7 +401,12 @@ func (b *Batch) before(ctx context.Context, base gitpack.SHA, emit func(string))
 			return false, err
 		}
 		d = diffResult{paths: paths, ok: err == nil}
+		if b.cached+len(d.paths) > MaxChangedPaths {
+			clear(b.diffs)
+			b.cached = 0
+		}
 		b.diffs[base] = d
+		b.cached += len(d.paths)
 	}
 	if !d.ok {
 		return false, nil

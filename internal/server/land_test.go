@@ -423,6 +423,37 @@ func TestLandKeepsOneTerminalResultWhenTheFailureIsNotRecorded(t *testing.T) {
 	})
 }
 
+// failProtected refuses the second call of ProtectedRefs, which is the one of the leader.
+type failProtected struct {
+	meta.Store
+	calls atomic.Int32
+}
+
+func (f *failProtected) ProtectedRefs(ctx context.Context, repo string) ([]string, error) {
+	if f.calls.Add(1) == 2 {
+		return nil, errors.New("store is down")
+	}
+	return f.Store.ProtectedRefs(ctx, repo)
+}
+
+func TestLandRetriesWhenTheProtectedListCannotBeRead(t *testing.T) {
+	eachBackend(t, func(t *testing.T, l *landEnv) {
+		var o objSet
+		head := o.commit(map[string]string{"a": "1"}, "", "a", l.root)
+		o.upload(t, l.env, l.repo)
+		if _, err := l.merge.SwapRef(context.Background(), "feature", 0, l.root); err != nil {
+			t.Fatal(err)
+		}
+		srv := httptest.NewServer(server.New(server.Config{Meta: &failProtected{Store: l.Meta}, Bucket: l.Bucket, Verifier: l.Verifier,
+			Lands: server.LandsConfig{Poll: 2 * time.Millisecond}}).Handler())
+		t.Cleanup(srv.Close)
+		c := client.New(srv.URL, client.StaticGrant(l.WriteGrant(t, l.repo)))
+		if _, err := c.Land(context.Background(), l.repo, api.LandRequest{Ref: "feature", Base: l.root, Head: head}); err != nil {
+			t.Fatalf("a backend error stored a result: %v", err)
+		}
+	})
+}
+
 func TestLandLeaderRestartsAfterItLosesTheLeaseToAnotherOwner(t *testing.T) {
 	eachBackend(t, func(t *testing.T, l *landEnv) {
 		var o objSet
