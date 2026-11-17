@@ -380,7 +380,6 @@ func TestGrantScopeRefusals(t *testing.T) {
 		{"read grant claims", "PUT", "/v1/workspaces/ws1/claim", read, map[string]any{}, 401, "unauthorized"},
 		{"node key signs an operator grant", "GET", "/v1/repos", nodeKeyOperator, nil, 401, "unauthorized"},
 		{"expired grant", "GET", "/v1/vcs/refs", expired, nil, 401, "unauthorized"},
-		{"grant without the Bearer scheme", "GET", "/v1/vcs/refs", "", nil, 401, "unauthorized"},
 		{"no grant", "GET", "/v1/vcs/refs", "", nil, 401, "unauthorized"},
 		{"node grant of another repo", "GET", "/v1/vcs/refs", nodeOther, nil, 403, "vcs_repo_forbidden"},
 		{"node grant of the control key is valid", "GET", "/v1/vcs/refs", cpNode, nil, 200, ""},
@@ -427,5 +426,19 @@ func TestWriteStatementsRefuseAStaleEpochOnTheirOwn(t *testing.T) {
 				t.Errorf("error = %v, want pg.ErrClaimLost, not a generation conflict", err)
 			}
 		})
+	}
+}
+
+func TestGrantWithoutTheBearerSchemeIsRefused(t *testing.T) {
+	e := newEnv(t)
+	req, _ := http.NewRequest("GET", e.url+"/v1/repos", nil)
+	req.Header.Set("Authorization", e.operator())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Errorf("status = %d, want 401", resp.StatusCode)
 	}
 }
