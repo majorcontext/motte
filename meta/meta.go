@@ -229,6 +229,8 @@ type Store interface {
 	// ErrNotFound, ErrLeaseHeld.
 	AdvanceCursor(ctx context.Context, id string, partition int, owner string, cursor int64) error
 
+	LandStore
+
 	// AddPack records a pack once. A repeat is a no-op.
 	AddPack(ctx context.Context, repo, packID string, bytes int64) error
 	// Packs lists the packs of a repo, oldest first, ties by id.
