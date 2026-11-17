@@ -7,13 +7,12 @@ import (
 	"io"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/majorcontext/motte/api"
 	"github.com/majorcontext/motte/grant"
 	"github.com/majorcontext/motte/internal/gitpack"
+	"github.com/majorcontext/motte/internal/refname"
 	"github.com/majorcontext/motte/internal/store"
 )
 
@@ -24,7 +23,6 @@ const (
 	treeDefault   = 4096
 	opBodyMax     = store.MaxOpBytes*4/3 + 1024
 	packBodyMax   = (store.MaxPackBytes+store.MaxIdxBytes)*4/3 + 4096
-	refNameMax    = 255
 )
 
 func (s *Server) registerStorePlane(mux *http.ServeMux) {
@@ -93,28 +91,9 @@ func lowerHex(s string, lo, hi int) bool {
 	return true
 }
 
-func validRefName(name string) bool {
-	if name == "" || len(name) > refNameMax || name == "@" || !utf8.ValidString(name) ||
-		strings.HasPrefix(name, "/") || strings.HasSuffix(name, "/") || strings.HasSuffix(name, ".lock") || strings.HasSuffix(name, ".") ||
-		strings.Contains(name, "..") || strings.Contains(name, "//") || strings.Contains(name, "@{") {
-		return false
-	}
-	for _, c := range name {
-		if c < 0x20 || c == 0x7f || strings.ContainsRune(" ~^:?*[\\", c) {
-			return false
-		}
-	}
-	for _, part := range strings.Split(name, "/") {
-		if strings.HasPrefix(part, ".") || strings.HasSuffix(part, ".lock") {
-			return false
-		}
-	}
-	return true
-}
-
 func refName(r *http.Request) (string, error) {
 	name := r.PathValue("name")
-	if !validRefName(name) {
+	if !refname.Valid(name) {
 		return "", store.ErrInvalid
 	}
 	return name, nil

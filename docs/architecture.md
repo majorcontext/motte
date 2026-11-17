@@ -23,7 +23,7 @@ Non-goals:
 | Store service | HTTP service, PostgreSQL index, the epoch fence. | M2 |
 | `client` | Typed Go client for callers. Public package. | M3 |
 | `testserver` | Starts a real server in a caller's test. Public package. | M3 |
-| `vfsd` and `volume` | Node daemon that serves a virtual workspace, and its volume attributes. | M4 |
+| `internal/vfs`, `cmd/motte-vfsd`, `volume` | Node daemon that serves a virtual workspace, and its public volume attributes. | M4 |
 | jj backend | `jj/`: the jj binary whose stores and working copy use the workspace daemon. Released for linux amd64 and arm64. | M5 |
 
 ## Planes
@@ -250,5 +250,104 @@ Package `testserver` runs the real server in the process of a test, on a fresh s
 
 - Traces: OTLP, with the endpoint from the environment and no vendor in the code. Span names start with `vcs.serve.` and end with the route, such as `vcs.serve.put.refs`. Requests accept W3C trace headers.
 - Metrics: Prometheus at `/metrics`, with names that start with `motte_`: `motte_http_requests_total` and `motte_http_request_duration_seconds`, by route.
-- Logs: JSON. A log line never holds a grant, a path or an object body.
+- Logs: JSON. A log line of the service never holds a grant, a path or an object body. A log line of the node daemon never holds a grant, and it carries the error text of its own process, which can name a node path.
 - Instrumentation is additive. It never changes behavior or errors.
+
+## Virtual workspace daemon
+
+`internal/vfs` is the node daemon of the virtual workspace. `cmd/motte-vfsd` runs it. It reads and writes the store plane with a `node` grant, so a workspace holds no store credential. The FUSE server and the overlay build on Linux only. On other systems `motte-vfsd` prints a message and exits 1. The daemon writes JSON logs, and `OTEL_EXPORTER_OTLP_ENDPOINT` enables trace export. A client span name is `vcs.client.` and the route, such as `vcs.client.ref.swap`.
+
+`HTTPStore` is the store client of the daemon. It sends the grant as a bearer token, injects W3C trace headers, follows no redirect, and answers 403 with `ErrGrantRefused`, which no retry passes. A 409 `vcs_generation_conflict` answer becomes `RefConflictError` with the stored ref from `details.ref`. A test drives `HTTPStore` against the real service.
+
+### Commands
+
+| Command | Meaning |
+|---|---|
+| `motte-vfsd mount` | Standalone, for a host that has `fusermount`; `csi` mounts with `mount(2)`. Serves the tree of one commit as the read-only lower layer of a kernel overlay. Needs `-api`, `-commit`, `-mnt`, `-upper` and `-ctl-sock`, and `MOTTE_VFS_GRANT` in the environment. It does not refresh the grant. |
+| `motte-vfsd csi` | The CSI node plugin. Needs `-api` and `-grant-key-file`. Flags `-driver` (default `vfs.motte.dev`), `-endpoint`, `-node-id`, `-state`, `-uid` and `-gid`. |
+| `motte-vfsd materialize` | Writes the checkout of a commit to `-dest`. A marker file records a finished checkout, and a later run changes nothing, whatever commit it names. |
+| `motte-vfsd import` | Fetches a repository with `git`, packs it and uploads it with an `import` grant (`PUT /v1/vcs/packs/{pack_id}`). `-depth 0` imports the whole history as packs of about 48 MiB and skips the ranges that the store holds. |
+
+The key file of `csi` is JSON `{"kid","key"}`. `key` is the standard base64 of an Ed25519 private key or of its 32-byte seed. The store must trust the public key for the scope `node`. The plugin signs a `node` grant for each store call. The grant names the workspace, the claim epoch and the repository of the volume attributes, and it expires after one hour.
+
+### Mount mode
+
+The FUSE mount is the read-only lower layer. Every mutating operation answers `EROFS`: `mkdir`, `symlink`, `create`, `unlink`, `rmdir`, `rename`, `setattr`, `write`, `fallocate`, and an `open` with a write flag. `fsync` answers success. Entry, attribute and negative timeouts are one hour, because the lower never changes while the mount lives. A lookup reads trees in bulk (`GET /v1/vcs/trees/{sha}`). The first read of a file reads its blob and the blobs that follow it in tree order in one batch (`POST /v1/vcs/blobs/batch`). A node cache that all workspaces on the node share keeps the blobs. The cache is keyed by SHA only: the control op `getbatch` serves a cached blob to any workspace that names its SHA, whatever its repository.
+
+`mount` refuses to start without `-upper` and `-ctl-sock`. It binds the socket before it mounts. It runs `upperdir.ProbeTrustedBeside` first and fails with a `CAP_SYS_ADMIN` error when the process cannot read `trusted.*` attributes on the file system of the upper directory. The probe uses a new sibling directory and never writes into the upper directory.
+
+The control socket lies in a directory that no other workspace can reach. The daemon refuses a directory that is open to others, creates the socket with mode 0660 and gives it to the uid and gid of the mount.
+
+### Node plugin
+
+The plugin implements the identity and node services of the CSI spec on a unix socket. The chart runs it as a privileged DaemonSet with `hostPID`, and its kubelet pods directory propagates to the host. `csi` refuses to start unless it shares the PID namespace of the node and has another mount namespace. The `CSIDriver` sets `attachRequired: false`, `podInfoOnMount: true` and the lifecycle mode `Ephemeral`. A restart of the plugin ends the mounts that it serves, so the DaemonSet updates with `OnDelete`.
+
+`NodePublishVolume` of a workspace volume runs these steps in order:
+
+1. Refuse a volume id with `,`, `:`, `\` or `/`. Read the `mountinfo` of the plugin and of one process of each other mount namespace.
+2. Run `ProbeTrustedBeside` on `<vol>/upper`.
+3. Unmount a stale overlay at the target, then a stale lower at `<vol>/lower`. `EBUSY` answers `Unavailable`. While any overlay with `upperdir=<vol>/upper` is mounted anywhere, the publish fails with `Unavailable`.
+4. Discard `upper` when it has entries and `<vol>/base` is missing or names another commit. Recreate `work`, create `upper`, and write `<vol>/base` (write `base.new`, `fsync`, rename, `fsync` of `<vol>`).
+5. Open the VFS, bind the control socket, mount the lower at `<vol>/lower`, serve the socket, and mount overlayfs at the target with `lowerdir=<vol>/lower,upperdir=<vol>/upper,workdir=<vol>/work,redirect_dir=on,metacopy=on,index=off,xino=off,nfs_export=off`.
+
+A failure in step 5 undoes the earlier steps in reverse order. A publish for a volume that the plugin serves returns OK and changes nothing. The control socket of a pod lies in `ctl/<pod UID>` of the state directory, mode 0700, owned by the uid and gid of the mount. The pod UID comes from the kubelet, so a pod cannot name the directory of another pod, and a publish without it fails. A volume with the attributes `volume=ctl` binds that directory at its target, in either publish order.
+
+`NodeUnpublishVolume` unmounts the overlay, reads the `mountinfo` again, and fails with `Unavailable` while an overlay still references `<vol>/upper`. Only then it unmounts the lower (lazily only when the plain unmount fails), stops the socket, closes the VFS, and deletes the control directory of the pod and `<vol>`. It never runs `stat` on `<vol>/lower`, because a dead FUSE answers `ENOTCONN`. The directories `upper` and `work` live on the disk of the node with the lifetime of the volume. Only `NodeUnpublishVolume` deletes them.
+
+### Volume attributes
+
+Package `volume` is the public contract between a caller and the plugin. A workspace volume has the attributes `workspace`, `epoch`, `repo`, `commit` and `runtime`. `runtime` only labels telemetry. `ParsePublication` rejects a missing workspace or repository and a commit that is not a SHA-1. The control socket volume has `volume=ctl`. The workspace sees the socket at `volume.CtlDir/volume.CtlSocket` (`/run/motte-vfs/ctl.sock`), and `MOTTE_VFS_SOCK` names it. The CSI driver name is a flag of `csi` and the chart value `driverName`.
+
+### Control protocol
+
+One JSON object for each line over the unix socket. An error answer carries `err`. A lost ref swap carries `code` `vcs_generation_conflict`, `err` and the stored `ref`. An unknown op answers `unknown op`.
+
+| op | request | answer |
+|---|---|---|
+| `get` | `sha` | `type`, `data` (base64) |
+| `put` | `type`, `data` (base64) | `sha` |
+| `putbatch` | `objects`: list of `{type, data}` | `shas`, in request order |
+| `opheads` | `expect`, `heads` (both optional) | `gen`, `heads` |
+| `refs` | `name` (optional) | `refs`: list of `{name, commit, generation}`; `ref` with `name` |
+| `swapref` | `name`, `expect`, `commit`, or `delete: true` with `expect` | `ref`, none after a delete |
+| `putop` | `type` (`operations` or `views`), `sha`, `data` (base64) | none |
+| `getop` | `type`, `sha` | `data` (base64) |
+| `getbatch` | `shas`, `max_size` (optional) | `datas` in request order; `large`: indices of blobs over `max_size`, sent without data |
+| `has` | `shas` | `present`: one bool for each name, from `POST /v1/vcs/objects/has` |
+| `changes` | none | `boot`, `token`, `base_tree`, `changes`: list of `{path, status, old_sha, old_mode, old_size, new_sha, new_mode, size}` |
+| `dirty` | none | `boot`, `token`, `base_tree`, `entries`: list of `{path, kind, exec, opaque}` |
+| `token` | none | `boot`, `token`, `base_tree` |
+| `workspace` | `sha` (the head operation), `commit`, `generation` | none |
+| `stats` | none | cache counters `blob_hits`, `blob_misses`, `tree_calls` |
+
+### Dirty set
+
+The daemon builds the dirty set from a walk of the upper directory with the `trusted.overlay.*` attributes, always against the base tree of the mount. `upperdir.Scan` applies these rules:
+
+| Upper entry | Dirty set |
+|---|---|
+| Regular file or symlink | `file` or `symlink`, with `exec` from the upper mode |
+| Fifo, socket or device that is no whiteout | Nothing when the base lacks the path, else `deleted` |
+| Whiteout | `deleted` when the base has the path |
+| Directory with `trusted.overlay.opaque=y` | `dir` with `opaque` when the base has the path; its children are new |
+| Directory that only holds entries | Nothing for the directory; its changed children |
+| Empty upper directory that the base lacks | `dir` |
+| File with `trusted.overlay.metacopy` | Nothing when it lies at its own base path, its redirect names that path and its exec bit equals the base; else `file` |
+| Entry with `trusted.overlay.redirect` | The origin is the base path in the value. The merged children are the origin subtree plus the upper children. |
+| Directory over a base file, file over a base directory | `dir` with `opaque`, or `file` |
+
+A directory that merges a base directory at another path lists every base leaf below the origin at its new path, and `Origin` names the base path of the content. The root entries `.jj` and `.git` are skipped. The result is sorted by path. A submodule is an empty directory in the mount.
+
+`OSFS` opens each directory once, one component at a time, and checks with `fstatat` and `fstat` that each opened inode is the directory that `lstat` found, so a swapped-in symlink is never followed. `changes` takes the base side from the base tree. It hashes the bytes of an upper file only when the base has its path, at most 2 MiB for each file and 64 MiB in all.
+
+### Change token
+
+`token` and `dirty` return `<boot>:<fingerprint>`. The fingerprint comes from an `lstat` walk: the entry count, the newest change time, the sum of the sizes of the regular files, the sum of the change times and the sum of the inode numbers. A walk is settled only when the newest change time is at least 50 ms older than the start of the walk. An unsettled walk returns a token that equals no other token. `ScanStable` reads the token, scans, reads the token again, and retries up to 3 times while two settled tokens differ. The daemon runs no `syncfs`. A store through a mapping that is already dirty changes no token, so a consumer forces a snapshot at intervals.
+
+### Chart and image
+
+`charts/motte-vfsd` installs the `CSIDriver` and the DaemonSet with the plugin container and the kubelet registrar. Values set the image (digest or tag), the store URL `apiURL`, the Secret of the grant key, `driverName`, `kubeletDir`, `stateDir`, `runtimeClassName`, node selector, node affinity expressions, tolerations, resources and extra environment. The release namespace needs the privileged Pod Security level. The chart creates no Secret and no namespace. `images/motte-vfsd/Dockerfile` builds the image for `linux/amd64` and `linux/arm64`. It holds the daemon and `git`. The workflow `image.yml` builds both on a pull request. On a tag `v*` it publishes `ghcr.io/majorcontext/motte-vfsd` with the tag version and with provenance and SBOM attestations.
+
+### Tests
+
+`internal/vfs` pins the daemon over an in-memory upper directory, the plugin over a fake of the mount seam, the ref and op-head wire against a fake store, and `HTTPStore` against the real service. `internal/vfs/upperdir` tests `Scan` against a model of overlayfs and, as root, against a real overlay. No Go test mounts FUSE. The harness under `internal/vfs/testdata` (`vfsfuzz`, `overlaycheck`, `overlaykit`) checks a real overlay over a running daemon and needs root, `/dev/fuse` and overlayfs. CI vets the tools and runs the tests of `overlaykit`.
