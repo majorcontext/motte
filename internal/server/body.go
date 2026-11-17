@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/majorcontext/motte/internal/gitpack"
 	"github.com/majorcontext/motte/internal/store"
 )
 
@@ -30,9 +31,14 @@ func readBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, erro
 // at most uploadReaders times the largest body limit.
 const uploadReaders = 4
 
-// receive reads an upload body under the upload deadline and reserves its length. The reader slot is held from before
+func bodyLength(n int64) int64 { return n }
+
+// packCost is the body, its decoded copy and the working memory of pack verification.
+func packCost(n int64) int64 { return n + n*3/4 + gitpack.VerifyWorkBytes }
+
+// receive reads an upload body under the upload deadline and reserves cost(len(body)) bytes. The reader slot is held from before
 // the first byte until the reservation is made. The caller releases the reservation.
-func (s *Server) receive(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, func(), error) {
+func (s *Server) receive(w http.ResponseWriter, r *http.Request, limit int64, cost func(bodyLen int64) int64) ([]byte, func(), error) {
 	select {
 	case s.readers <- struct{}{}:
 	case <-r.Context().Done():
@@ -46,7 +52,7 @@ func (s *Server) receive(w http.ResponseWriter, r *http.Request, limit int64) ([
 	if err != nil {
 		return nil, nil, err
 	}
-	release, err := s.reserve(r, int64(len(body)))
+	release, err := s.reserve(r, cost(int64(len(body))))
 	return body, release, err
 }
 

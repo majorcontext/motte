@@ -46,7 +46,7 @@ const (
 	blockSize    = 256 << 10
 	maxBlocks    = 4
 	// MemoryBudget is the bytes that requests may hold while they work, apart from the bodies that are still being read.
-	MemoryBudget = 256 << 20
+	MemoryBudget = 320 << 20
 	// ReadReserve is the bytes that a read request reserves: one object at its limit.
 	ReadReserve  = gitpack.MaxObjectBytes
 	blockTimeout = 30 * time.Second

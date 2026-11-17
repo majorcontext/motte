@@ -248,7 +248,7 @@ func decodeObjects(body []byte) ([]gitpack.Object, error) {
 }
 
 func (s *Server) putObjects(w http.ResponseWriter, r *http.Request, c call) error {
-	body, release, err := s.receive(w, r, packBodyMax)
+	body, release, err := s.receive(w, r, packBodyMax, bodyLength)
 	if err != nil {
 		return err
 	}
@@ -288,7 +288,7 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, c call) error
 }
 
 func (s *Server) importPack(w http.ResponseWriter, r *http.Request, c call) error {
-	body, release, err := s.receive(w, r, packBodyMax)
+	body, release, err := s.receive(w, r, packBodyMax, packCost)
 	if err != nil {
 		return err
 	}
@@ -327,7 +327,7 @@ func (s *Server) getOp(w http.ResponseWriter, r *http.Request, c call) error {
 }
 
 func (s *Server) putOp(w http.ResponseWriter, r *http.Request, c call) error {
-	body, release, err := s.receive(w, r, opBodyMax)
+	body, release, err := s.receive(w, r, opBodyMax, bodyLength)
 	if err != nil {
 		return err
 	}
