@@ -97,6 +97,9 @@ func consume(in io.Reader, out io.Writer) *report {
 				}
 			}
 			delete(held, key)
+			if ev.Test == "" {
+				flushPackage(out, held, ev.Package, ev.Action == "fail")
+			}
 		case "skip":
 			delete(held, key)
 		}
@@ -192,4 +195,25 @@ func summary(title string, r *report, over []string) string {
 	}
 	b.WriteString("\n")
 	return b.String()
+}
+
+// flushPackage drops the held output of every test of pkg, and prints it when
+// the package failed: a timeout or a panic fails the package without a fail
+// event for the test that printed the trace.
+func flushPackage(out io.Writer, held map[string][]string, pkg string, failed bool) {
+	keys := make([]string, 0, len(held))
+	for key := range held {
+		if strings.HasPrefix(key, pkg+"\x00") {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if failed {
+			for _, text := range held[key] {
+				_, _ = fmt.Fprint(out, text)
+			}
+		}
+		delete(held, key)
+	}
 }

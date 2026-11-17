@@ -20,3 +20,15 @@ func TestParentWhoseSubtestsAllSkipIsNotALeaf(t *testing.T) {
 		t.Fatalf("over = %q, want only TestB", over)
 	}
 }
+
+func TestPackageFailurePrintsTheOutputOfARunningTest(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"Action":"output","Package":"example.com/p","Test":"TestHang","Output":"panic: test timed out\n"}`,
+		`{"Action":"fail","Package":"example.com/p","Elapsed":600}`,
+	}, "\n")
+	var out strings.Builder
+	rep := consume(strings.NewReader(stream), &out)
+	if !rep.failed || !strings.Contains(out.String(), "panic: test timed out") {
+		t.Fatalf("failed = %v, output = %q, want the held trace printed", rep.failed, out.String())
+	}
+}
