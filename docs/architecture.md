@@ -196,6 +196,7 @@ A `repo` argument of a fenced write is the repo of the grant. It must equal the 
 ### Provided backends
 
 - `meta/postgres` is the production backend. It keeps the schema in the section Data model, applies `meta/postgres/migrations` at start under an advisory lock, and meets each write with one statement. The fence of a ref or op-heads write is a `FOR SHARE` read of the workspace row inside the statement. A report is one `UPDATE` that locks the row itself. The generation comes from the sequence `ref_generation`. `CreateRepo` is one statement that inserts the repo row and, from its `RETURNING`, the ref.
+- `meta/sqlite` is for tests and for a service that runs with no other process. It keeps the same fields in the tables of `meta/sqlite/migrations`. It uses a pure Go driver, so the service builds with CGO disabled. It opens one connection, so its writes are ordered, and one process uses one database file. Each write is one transaction of statements in which no read feeds a write. The fence is an `EXISTS` condition of the statement. The generation comes from the row `ref_generation` of the table `counters`, which the same transaction increments. Times are integer microseconds, and the heads are JSON text.
 - `bucket/gcs` and `bucket/fs` are the object backends. `gcs` writes with the precondition that the object does not exist. `fs` links a synced temporary file to its name.
 
 ### A new backend
