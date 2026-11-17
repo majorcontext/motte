@@ -25,6 +25,7 @@ import (
 
 	"github.com/majorcontext/motte/bucket"
 	"github.com/majorcontext/motte/internal/gitpack"
+	"github.com/majorcontext/motte/meta"
 )
 
 var (
@@ -65,15 +66,10 @@ func ParseRepo(s string) (Repo, error) {
 	return Repo{Prefix: prefix, Path: path}, nil
 }
 
-type PackRef struct {
-	ID    string
-	Bytes int64
-}
-
 // PackIndex lists the packs of a repo, oldest first.
 type PackIndex interface {
-	AddPack(ctx context.Context, repo Repo, packID string, bytes int64) error
-	Packs(ctx context.Context, repo Repo) ([]PackRef, error)
+	AddPack(ctx context.Context, repo, packID string, bytes int64) error
+	Packs(ctx context.Context, repo string) ([]meta.Pack, error)
 }
 
 type OpKind string
@@ -227,7 +223,7 @@ func (s *Service) putPack(ctx context.Context, repo Repo, id string, idx, pack [
 	if _, err := s.st.Create(ctx, prefix+"/"+id+".pack", pack); err != nil {
 		return err
 	}
-	return s.index.AddPack(ctx, repo, id, int64(len(pack)))
+	return s.index.AddPack(ctx, repo.String(), id, int64(len(pack)))
 }
 
 type bytesReader []byte
@@ -371,7 +367,7 @@ func (s *Service) evict() {
 	s.order = s.order[1:]
 }
 
-func (s *Service) openPack(ctx context.Context, st bucket.Store, prefix string, ref PackRef) (*openPack, error) {
+func (s *Service) openPack(ctx context.Context, st bucket.Store, prefix string, ref meta.Pack) (*openPack, error) {
 	key := prefix + "|" + ref.ID
 	s.mu.Lock()
 	if e, ok := s.open[key]; ok {
@@ -410,7 +406,7 @@ type view struct {
 	s      *Service
 	st     bucket.Store
 	prefix string
-	refs   []PackRef
+	refs   []meta.Pack
 }
 
 func (s *Service) view(ctx context.Context, repo Repo) (*view, error) {
@@ -418,7 +414,7 @@ func (s *Service) view(ctx context.Context, repo Repo) (*view, error) {
 	if err != nil {
 		return nil, err
 	}
-	refs, err := s.index.Packs(ctx, repo)
+	refs, err := s.index.Packs(ctx, repo.String())
 	if err != nil {
 		return nil, err
 	}

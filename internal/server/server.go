@@ -10,21 +10,20 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/majorcontext/motte/api"
 	"github.com/majorcontext/motte/bucket"
 	"github.com/majorcontext/motte/grant"
-	"github.com/majorcontext/motte/internal/pg"
 	"github.com/majorcontext/motte/internal/store"
+	"github.com/majorcontext/motte/meta"
 )
 
-// Config is the dependencies of a Server. New builds the index and the object service from Pool and Bucket, so
-// every composition shares one graph.
+// Config is the dependencies of a Server. New builds the object service from Meta and Bucket, so every composition
+// shares one graph.
 type Config struct {
-	Pool     *pgxpool.Pool
+	Meta     meta.Store
 	Bucket   bucket.Store
 	Verifier *grant.Verifier
 	Logger   *slog.Logger
@@ -33,7 +32,7 @@ type Config struct {
 }
 
 type Server struct {
-	index    index
+	index    meta.Store
 	objects  objects
 	verifier *grant.Verifier
 	logger   *slog.Logger
@@ -46,10 +45,9 @@ type Server struct {
 	readers  chan struct{}
 }
 
-// New returns a Server over the database of cfg.Pool and the object store cfg.Bucket.
+// New returns a Server over the metadata of cfg.Meta and the object store cfg.Bucket.
 func New(cfg Config) *Server {
-	db := &pg.DB{Pool: cfg.Pool}
-	s := &Server{index: db, objects: store.New(cfg.Bucket, db), verifier: cfg.Verifier, logger: cfg.Logger, now: cfg.Now, readers: make(chan struct{}, uploadReaders)}
+	s := &Server{index: cfg.Meta, objects: store.New(cfg.Bucket, cfg.Meta), verifier: cfg.Verifier, logger: cfg.Logger, now: cfg.Now, readers: make(chan struct{}, uploadReaders)}
 	if s.now == nil {
 		s.now = time.Now
 	}

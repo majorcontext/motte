@@ -7,8 +7,8 @@ import (
 	"syscall"
 
 	"github.com/majorcontext/motte/api"
-	"github.com/majorcontext/motte/internal/pg"
 	"github.com/majorcontext/motte/internal/store"
+	"github.com/majorcontext/motte/meta"
 )
 
 func (s *Server) writeError(w http.ResponseWriter, code api.Code, msg string, details map[string]any) {
@@ -19,20 +19,20 @@ func (s *Server) writeError(w http.ResponseWriter, code api.Code, msg string, de
 }
 
 func (s *Server) writeErr(w http.ResponseWriter, r *http.Request, err error) {
-	var refConflict *pg.RefConflict
-	var opConflict *pg.OpHeadsConflict
+	var refConflict *meta.RefConflict
+	var opConflict *meta.OpHeadsConflict
 	switch {
-	case errors.Is(err, store.ErrNotFound), errors.Is(err, pg.ErrNotFound):
+	case errors.Is(err, store.ErrNotFound), errors.Is(err, meta.ErrNotFound):
 		s.writeError(w, api.CodeNotFound, "not found", nil)
 	case errors.Is(err, store.ErrInvalid):
 		s.writeError(w, api.CodeObjectInvalid, "invalid object name or content", nil)
 	case errors.Is(err, store.ErrTooLarge):
 		s.writeError(w, api.CodeObjectTooLarge, "object too large", nil)
-	case errors.Is(err, pg.ErrClaimLost):
+	case errors.Is(err, meta.ErrClaimLost):
 		s.writeError(w, api.CodeClaimLost, "the claim epoch is not the live one", nil)
-	case errors.Is(err, pg.ErrGone):
+	case errors.Is(err, meta.ErrGone):
 		s.writeError(w, api.CodeWorkspaceDeleted, "the workspace is deleted", nil)
-	case errors.Is(err, pg.ErrWorkspaceConflict):
+	case errors.Is(err, meta.ErrWorkspaceConflict):
 		s.writeError(w, api.CodeWorkspaceConflict, "the workspace has another owner or repository", nil)
 	case errors.Is(err, errForbidden):
 		s.writeError(w, api.CodeRepoForbidden, "the repository is not readable", nil)
@@ -76,21 +76,21 @@ func logSafe(err error) string {
 // authError maps the failure of a node grant check: an unknown or deleted workspace is an unaccepted grant.
 func authError(err error) error {
 	switch {
-	case errors.Is(err, pg.ErrNotFound), errors.Is(err, pg.ErrGone):
+	case errors.Is(err, meta.ErrNotFound), errors.Is(err, meta.ErrGone):
 		return errUnauthorized
-	case errors.Is(err, pg.ErrWrongRepo):
+	case errors.Is(err, meta.ErrWrongRepo):
 		return errForbidden
 	}
 	return err
 }
 
 // ownerError is the claim check of a stored repository: a missing row or another owner is forbidden.
-func ownerError(row pg.Repo, err error, owner string) error {
-	if errors.Is(err, pg.ErrNotFound) || err == nil && row.Owner != owner {
+func ownerError(row meta.Repo, err error, owner string) error {
+	if errors.Is(err, meta.ErrNotFound) || err == nil && row.Owner != owner {
 		return errForbidden
 	}
 	return err
 }
 
 // errClaimLost is the answer to a claim below the stored epoch.
-var errClaimLost = pg.ErrClaimLost
+var errClaimLost = meta.ErrClaimLost

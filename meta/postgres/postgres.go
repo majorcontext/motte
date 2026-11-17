@@ -1,0 +1,340 @@
+// Package postgres is the PostgreSQL backend of meta.Store.
+package postgres
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/majorcontext/motte/meta"
+)
+
+// Store keeps the metadata in the schema of Pool.
+type Store struct{ Pool *pgxpool.Pool }
+
+var _ meta.Store = (*Store)(nil)
+
+// Open connects to the database at dsn and applies the migrations.
+func Open(ctx context.Context, dsn string) (*Store, error) {
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: open: %w", err)
+	}
+	if err := Migrate(ctx, pool); err != nil {
+		pool.Close()
+		return nil, err
+	}
+	return &Store{Pool: pool}, nil
+}
+
+func (s *Store) Close() { s.Pool.Close() }
+
+// Ping checks that the database answers.
+func (s *Store) Ping(ctx context.Context) error { return s.Pool.Ping(ctx) }
+
+func uniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+func (s *Store) CreateRepo(ctx context.Context, r meta.Repo, repoText, commit string) error {
+	tag, err := s.Pool.Exec(ctx, `
+		WITH created AS (
+			INSERT INTO repos (path, name, owner) VALUES ($1, $2, $3) ON CONFLICT (path) DO NOTHING RETURNING path)
+		INSERT INTO refs (repo, name, commit_sha, generation)
+		SELECT $4, 'main', $5, nextval('ref_generation') FROM created`, r.Path, r.Name, r.Owner, repoText, commit)
+	if uniqueViolation(err) {
+		return meta.ErrExists
+	}
+	if err != nil {
+		return fmt.Errorf("postgres: create repo: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return meta.ErrExists
+	}
+	return nil
+}
+
+func (s *Store) Repo(ctx context.Context, path string) (meta.Repo, error) {
+	var r meta.Repo
+	err := s.Pool.QueryRow(ctx, `SELECT path, name, owner, created_at FROM repos WHERE path = $1`, path).
+		Scan(&r.Path, &r.Name, &r.Owner, &r.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return meta.Repo{}, meta.ErrNotFound
+	}
+	if err != nil {
+		return meta.Repo{}, fmt.Errorf("postgres: read repo: %w", err)
+	}
+	return r, nil
+}
+
+func (s *Store) Repos(ctx context.Context) ([]meta.Repo, error) {
+	rows, err := s.Pool.Query(ctx, `SELECT path, name, owner, created_at FROM repos ORDER BY created_at DESC, path COLLATE "C" DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list repos: %w", err)
+	}
+	out, err := pgx.CollectRows(rows, pgx.RowToStructByPos[meta.Repo])
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list repos: %w", err)
+	}
+	return out, nil
+}
+
+func (s *Store) Claim(ctx context.Context, id string, epoch uint64, owner, repo string) (meta.Workspace, error) {
+	var w meta.Workspace
+	var stored int64
+	err := s.Pool.QueryRow(ctx, `
+		INSERT INTO workspaces (id, repo, owner, epoch) VALUES ($1, $2, $3, $4)
+		ON CONFLICT (id) DO UPDATE SET epoch = GREATEST(workspaces.epoch, EXCLUDED.epoch)
+		WHERE workspaces.deleted_at IS NULL AND workspaces.owner = EXCLUDED.owner AND workspaces.repo = EXCLUDED.repo
+		RETURNING epoch, op, snapshot`, id, repo, owner, int64(epoch)).Scan(&stored, &w.Op, &w.Snapshot)
+	if err == nil {
+		w.Epoch = uint64(stored)
+		return w, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return meta.Workspace{}, fmt.Errorf("postgres: claim: %w", err)
+	}
+	f, err := s.fence(ctx, id)
+	if err != nil {
+		return meta.Workspace{}, err
+	}
+	if f.Deleted {
+		return meta.Workspace{}, meta.ErrGone
+	}
+	return meta.Workspace{}, meta.ErrWorkspaceConflict
+}
+
+func (s *Store) fence(ctx context.Context, id string) (meta.Fence, error) {
+	var f meta.Fence
+	var epoch int64
+	err := s.Pool.QueryRow(ctx, `SELECT epoch, repo, deleted_at IS NOT NULL FROM workspaces WHERE id = $1`, id).Scan(&epoch, &f.Repo, &f.Deleted)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return meta.Fence{}, meta.ErrNotFound
+	}
+	if err != nil {
+		return meta.Fence{}, fmt.Errorf("postgres: read workspace: %w", err)
+	}
+	f.Epoch = uint64(epoch)
+	return f, nil
+}
+
+func (s *Store) Live(ctx context.Context, id string, epoch uint64, repo string) error {
+	f, err := s.fence(ctx, id)
+	if err != nil {
+		return err
+	}
+	return f.Live(epoch, repo)
+}
+
+// lost reports a failed fenced write as ErrClaimLost when the fence no longer holds. It returns nil when the fence
+// holds, so the write lost on its own condition.
+func (s *Store) lost(ctx context.Context, ws string, epoch uint64, repo string) error {
+	f, err := s.fence(ctx, ws)
+	if errors.Is(err, meta.ErrNotFound) {
+		return meta.ErrClaimLost
+	}
+	if err != nil {
+		return err
+	}
+	return f.WriteLost(epoch, repo)
+}
+
+func (s *Store) Delete(ctx context.Context, id string) error {
+	if _, err := s.Pool.Exec(ctx, `UPDATE workspaces SET deleted_at = COALESCE(deleted_at, now()) WHERE id = $1`, id); err != nil {
+		return fmt.Errorf("postgres: delete workspace: %w", err)
+	}
+	return nil
+}
+
+// guard is the fence of every write. $ws, $epoch and $repo are the parameters at the given positions.
+const guard = `SELECT id FROM workspaces WHERE id = $%d AND epoch = $%d AND repo = $%d AND deleted_at IS NULL FOR SHARE`
+
+// report is one UPDATE that takes the row lock itself: a FOR SHARE guard here would deadlock two concurrent reports.
+// A NULL repo matches the stored one.
+func (s *Store) report(ctx context.Context, ws string, epoch uint64, repo any, generation int64, prev, op, snapshot string) (bool, error) {
+	tag, err := s.Pool.Exec(ctx, `
+		UPDATE workspaces SET op = $4, snapshot = $5,
+			report_generation = COALESCE(NULLIF($6::bigint, 0), report_generation)
+		WHERE id = $1 AND epoch = $2 AND ($3::text IS NULL OR repo = $3) AND deleted_at IS NULL AND CASE WHEN $6::bigint > 0
+			THEN (report_generation IS NULL OR report_generation <= $6::bigint)
+			ELSE op = $7 END`, ws, int64(epoch), repo, op, snapshot, generation, prev)
+	if err != nil {
+		return false, fmt.Errorf("postgres: report workspace: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+func (s *Store) Report(ctx context.Context, ws string, epoch uint64, repo string, generation int64, prev, op, snapshot string) error {
+	if wrote, err := s.report(ctx, ws, epoch, repo, generation, prev, op, snapshot); wrote || err != nil {
+		return err
+	}
+	return s.lost(ctx, ws, epoch, repo)
+}
+
+func (s *Store) Flush(ctx context.Context, ws string, epoch uint64, generation int64, prev, op, snapshot string) error {
+	if wrote, err := s.report(ctx, ws, epoch, nil, generation, prev, op, snapshot); wrote || err != nil {
+		return err
+	}
+	f, err := s.fence(ctx, ws)
+	if err != nil {
+		return err
+	}
+	return f.FlushLost(epoch)
+}
+
+func (s *Store) OpHeads(ctx context.Context, ws string) (meta.OpHeads, error) {
+	var h meta.OpHeads
+	var epoch int64
+	err := s.Pool.QueryRow(ctx, `SELECT epoch, generation, heads FROM op_heads WHERE workspace_id = $1`, ws).Scan(&epoch, &h.Generation, &h.Heads)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return meta.OpHeads{}, meta.ErrNotFound
+	}
+	if err != nil {
+		return meta.OpHeads{}, fmt.Errorf("postgres: read op heads: %w", err)
+	}
+	h.Epoch = uint64(epoch)
+	return h, nil
+}
+
+func (s *Store) SwapOpHeads(ctx context.Context, ws string, epoch uint64, repo string, expect int64, heads []string) (meta.OpHeads, error) {
+	var generation int64
+	var err error
+	if expect == 0 {
+		err = s.Pool.QueryRow(ctx, `
+			INSERT INTO op_heads (workspace_id, epoch, generation, heads)
+			SELECT id, $2, 1, $4 FROM workspaces WHERE id = $1 AND epoch = $2 AND repo = $3 AND deleted_at IS NULL FOR SHARE
+			ON CONFLICT (workspace_id) DO NOTHING
+			RETURNING generation`, ws, int64(epoch), repo, heads).Scan(&generation)
+	} else {
+		err = s.Pool.QueryRow(ctx, `
+			WITH guard AS (`+fmt.Sprintf(guard, 1, 2, 3)+`)
+			UPDATE op_heads h SET epoch = $2, generation = h.generation + 1, heads = $5, updated_at = now()
+			FROM guard
+			WHERE h.workspace_id = guard.id AND h.generation = $4 AND h.epoch <= $2
+			RETURNING h.generation`, ws, int64(epoch), repo, expect, heads).Scan(&generation)
+	}
+	if err == nil {
+		return meta.OpHeads{Epoch: epoch, Generation: generation, Heads: heads}, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return meta.OpHeads{}, fmt.Errorf("postgres: swap op heads: %w", err)
+	}
+	if err := s.lost(ctx, ws, epoch, repo); err != nil {
+		return meta.OpHeads{}, err
+	}
+	cur, err := s.OpHeads(ctx, ws)
+	if errors.Is(err, meta.ErrNotFound) {
+		return meta.OpHeads{}, &meta.OpHeadsConflict{}
+	}
+	if err != nil {
+		return meta.OpHeads{}, err
+	}
+	if cur.Epoch > epoch {
+		return meta.OpHeads{}, meta.ErrClaimLost
+	}
+	return meta.OpHeads{}, &meta.OpHeadsConflict{Current: &cur}
+}
+
+func (s *Store) AddPack(ctx context.Context, repo, packID string, bytes int64) error {
+	if _, err := s.Pool.Exec(ctx, `INSERT INTO packs (repo, pack_id, bytes) VALUES ($1, $2, $3) ON CONFLICT (repo, pack_id) DO NOTHING`, repo, packID, bytes); err != nil {
+		return fmt.Errorf("postgres: add pack: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) Packs(ctx context.Context, repo string) ([]meta.Pack, error) {
+	rows, err := s.Pool.Query(ctx, `SELECT pack_id, bytes FROM packs WHERE repo = $1 ORDER BY created_at, pack_id COLLATE "C"`, repo)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list packs: %w", err)
+	}
+	out, err := pgx.CollectRows(rows, pgx.RowToStructByPos[meta.Pack])
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list packs: %w", err)
+	}
+	return out, nil
+}
+
+func (s *Store) Ref(ctx context.Context, repo, name string) (meta.Ref, error) {
+	r := meta.Ref{Name: name}
+	err := s.Pool.QueryRow(ctx, `SELECT commit_sha, generation FROM refs WHERE repo = $1 AND name = $2`, repo, name).Scan(&r.Commit, &r.Generation)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return meta.Ref{}, meta.ErrNotFound
+	}
+	if err != nil {
+		return meta.Ref{}, fmt.Errorf("postgres: read ref: %w", err)
+	}
+	return r, nil
+}
+
+func (s *Store) Refs(ctx context.Context, repo string) ([]meta.Ref, error) {
+	rows, err := s.Pool.Query(ctx, `SELECT name, commit_sha, generation FROM refs WHERE repo = $1 ORDER BY name COLLATE "C"`, repo)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list refs: %w", err)
+	}
+	out, err := pgx.CollectRows(rows, pgx.RowToStructByPos[meta.Ref])
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list refs: %w", err)
+	}
+	return out, nil
+}
+
+// SwapRef takes every generation from one sequence, so a deleted and recreated ref never repeats one.
+func (s *Store) SwapRef(ctx context.Context, ws string, epoch uint64, repo, name string, expect int64, sha string) (meta.Ref, error) {
+	var generation int64
+	var err error
+	if expect == 0 {
+		err = s.Pool.QueryRow(ctx, `
+			INSERT INTO refs (repo, name, commit_sha, generation)
+			SELECT $3, $4, $5, nextval('ref_generation') FROM workspaces
+			WHERE id = $1 AND epoch = $2 AND repo = $3 AND deleted_at IS NULL FOR SHARE
+			ON CONFLICT (repo, name) DO NOTHING
+			RETURNING generation`, ws, int64(epoch), repo, name, sha).Scan(&generation)
+	} else {
+		err = s.Pool.QueryRow(ctx, `
+			WITH guard AS (`+fmt.Sprintf(guard, 1, 2, 3)+`)
+			UPDATE refs SET commit_sha = $5, generation = nextval('ref_generation'), updated_at = now()
+			FROM guard
+			WHERE refs.repo = $3 AND refs.name = $4 AND refs.generation = $6
+			RETURNING generation`, ws, int64(epoch), repo, name, sha, expect).Scan(&generation)
+	}
+	if err == nil {
+		return meta.Ref{Name: name, Commit: sha, Generation: generation}, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return meta.Ref{}, fmt.Errorf("postgres: swap ref: %w", err)
+	}
+	return meta.Ref{}, s.refLost(ctx, ws, epoch, repo, name)
+}
+
+func (s *Store) DeleteRef(ctx context.Context, ws string, epoch uint64, repo, name string, expect int64) error {
+	tag, err := s.Pool.Exec(ctx, `
+		WITH guard AS (`+fmt.Sprintf(guard, 1, 2, 3)+`)
+		DELETE FROM refs USING guard
+		WHERE refs.repo = $3 AND refs.name = $4 AND refs.generation = $5`, ws, int64(epoch), repo, name, expect)
+	if err != nil {
+		return fmt.Errorf("postgres: delete ref: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+	return s.refLost(ctx, ws, epoch, repo, name)
+}
+
+func (s *Store) refLost(ctx context.Context, ws string, epoch uint64, repo, name string) error {
+	if err := s.lost(ctx, ws, epoch, repo); err != nil {
+		return err
+	}
+	cur, err := s.Ref(ctx, repo, name)
+	if errors.Is(err, meta.ErrNotFound) {
+		return &meta.RefConflict{}
+	}
+	if err != nil {
+		return err
+	}
+	return &meta.RefConflict{Current: &cur}
+}

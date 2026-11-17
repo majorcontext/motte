@@ -15,6 +15,7 @@ import (
 	"github.com/majorcontext/motte/grant"
 	"github.com/majorcontext/motte/internal/pgtest"
 	"github.com/majorcontext/motte/internal/server"
+	"github.com/majorcontext/motte/meta/postgres"
 )
 
 // DSNEnv is the environment variable that Start reads when it gets no DSN.
@@ -46,7 +47,7 @@ func Start(t testing.TB, dsn string) *Server {
 	cpPub, cpKey, _ := ed25519.GenerateKey(rand.Reader)
 	nodePub, nodeKey, _ := ed25519.GenerateKey(rand.Reader)
 	srv := server.New(server.Config{
-		Pool: pool, Bucket: root.Bucket("motte"),
+		Meta: &postgres.Store{Pool: pool}, Bucket: root.Bucket("motte"),
 		Verifier: grant.NewVerifier(
 			grant.Key{Kid: "cp", Public: cpPub, Scopes: []grant.Scope{grant.ScopeNode, grant.ScopeRead, grant.ScopeImport, grant.ScopeOperator}},
 			grant.Key{Kid: "node", Public: nodePub, Scopes: []grant.Scope{grant.ScopeNode}}),

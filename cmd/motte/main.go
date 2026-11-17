@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
@@ -22,8 +21,8 @@ import (
 	"github.com/majorcontext/motte/bucket/fs"
 	"github.com/majorcontext/motte/bucket/gcs"
 	"github.com/majorcontext/motte/grant"
-	"github.com/majorcontext/motte/internal/pg"
 	"github.com/majorcontext/motte/internal/server"
+	"github.com/majorcontext/motte/meta/postgres"
 )
 
 func main() {
@@ -68,19 +67,16 @@ func run(log *slog.Logger) error {
 	}
 	otel.SetTextMapPropagator(propagation.TraceContext{})
 
-	pool, err := pgxpool.New(ctx, cfg.databaseURL)
+	db, err := postgres.Open(ctx, cfg.databaseURL)
 	if err != nil {
 		return err
 	}
-	defer pool.Close()
-	if err := pg.Migrate(ctx, pool); err != nil {
-		return err
-	}
+	defer db.Close()
 	bucket, err := openBucket(ctx, cfg)
 	if err != nil {
 		return err
 	}
-	srv := server.New(server.Config{Pool: pool, Bucket: bucket, Verifier: grant.NewVerifier(cfg.keys...), Logger: log})
+	srv := server.New(server.Config{Meta: db, Bucket: bucket, Verifier: grant.NewVerifier(cfg.keys...), Logger: log})
 	hs := &http.Server{Addr: cfg.listen, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 1)
 	go func() { errc <- hs.ListenAndServe() }()
