@@ -31,6 +31,8 @@ type Config struct {
 	Now func() time.Time
 	// Events tunes the delivery and the retention of ref events. Zero values take the defaults.
 	Events EventsConfig
+	// Lands tunes the batched land. Zero values take the defaults.
+	Lands LandsConfig
 }
 
 type Server struct {
@@ -40,6 +42,8 @@ type Server struct {
 	logger   *slog.Logger
 	now      func() time.Time
 	events   EventsConfig
+	lands    LandsConfig
+	landing  landing
 	wake     chan struct{}
 
 	requests *prometheus.CounterVec
@@ -56,6 +60,8 @@ func New(cfg Config) *Server {
 		s.now = time.Now
 	}
 	s.events = cfg.Events.withDefaults()
+	s.lands = cfg.Lands.withDefaults()
+	s.landing = landing{leaders: map[meta.LandKey]*leader{}, waiters: map[landWaiter][]chan landOutcome{}}
 	if s.logger == nil {
 		s.logger = slog.New(slog.DiscardHandler)
 	}

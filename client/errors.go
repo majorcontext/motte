@@ -19,6 +19,9 @@ var (
 	ErrWorkspaceDeleted   = errors.New("motte: workspace deleted")
 	ErrRefProtected       = errors.New("motte: ref protected")
 	ErrEventsPruned       = errors.New("motte: events pruned")
+	ErrLandConflict       = errors.New("motte: land conflict")
+	ErrLandInvalid        = errors.New("motte: land invalid")
+	ErrLandTimeout        = errors.New("motte: land timeout")
 	ErrUnauthorized       = errors.New("motte: unauthorized")
 	ErrInvalidBody        = errors.New("motte: invalid body")
 	ErrInternal           = errors.New("motte: internal error")
@@ -39,6 +42,9 @@ var sentinels = map[api.Code]error{
 	api.CodeWorkspaceDeleted:   ErrWorkspaceDeleted,
 	api.CodeRefProtected:       ErrRefProtected,
 	api.CodeEventsPruned:       ErrEventsPruned,
+	api.CodeLandConflict:       ErrLandConflict,
+	api.CodeLandInvalid:        ErrLandInvalid,
+	api.CodeLandTimeout:        ErrLandTimeout,
 	api.CodeUnauthorized:       ErrUnauthorized,
 	api.CodeInvalidBody:        ErrInvalidBody,
 	api.CodeInternal:           ErrInternal,
@@ -77,4 +83,20 @@ func CurrentRef(err error) (api.Ref, bool) {
 	gen, _ := m["generation"].(json.Number)
 	n, err := gen.Int64()
 	return api.Ref{Name: name, Commit: commit, Generation: n}, err == nil
+}
+
+// ConflictPaths returns the paths that a land conflict names.
+func ConflictPaths(err error) []string {
+	var e *Error
+	if !errors.As(err, &e) || !errors.Is(err, ErrLandConflict) {
+		return nil
+	}
+	raw, _ := e.Details["paths"].([]any)
+	paths := make([]string, 0, len(raw))
+	for _, p := range raw {
+		if s, ok := p.(string); ok {
+			paths = append(paths, s)
+		}
+	}
+	return paths
 }

@@ -17,6 +17,9 @@ const (
 	CodeWorkspaceDeleted   Code = "vcs_workspace_deleted"
 	CodeRefProtected       Code = "vcs_ref_protected"
 	CodeEventsPruned       Code = "vcs_events_pruned"
+	CodeLandConflict       Code = "vcs_land_conflict"
+	CodeLandInvalid        Code = "vcs_land_invalid"
+	CodeLandTimeout        Code = "vcs_land_timeout"
 	CodeUnauthorized       Code = "unauthorized"
 	CodeInvalidBody        Code = "invalid_body"
 	CodeInternal           Code = "internal_error"
@@ -34,6 +37,9 @@ var statuses = map[Code]int{
 	CodeWorkspaceDeleted:   http.StatusGone,
 	CodeRefProtected:       http.StatusForbidden,
 	CodeEventsPruned:       http.StatusGone,
+	CodeLandConflict:       http.StatusConflict,
+	CodeLandInvalid:        http.StatusBadRequest,
+	CodeLandTimeout:        http.StatusGatewayTimeout,
 	CodeUnauthorized:       http.StatusUnauthorized,
 	CodeInvalidBody:        http.StatusBadRequest,
 	CodeInternal:           http.StatusInternalServerError,
@@ -235,6 +241,34 @@ type Event struct {
 	Generation int64  `json:"generation"`
 	Kind       string `json:"kind"`
 	Time       string `json:"time"`
+}
+
+// LandRequest is the body of POST /v1/repos/{repo}/lands. Base..Head is a linear range of commits that the repository
+// already stores. ID is optional: a repeat of an accepted ID returns the first result and never lands twice.
+type LandRequest struct {
+	ID   string `json:"id,omitempty"`
+	Ref  string `json:"ref"`
+	Base string `json:"base"`
+	Head string `json:"head"`
+}
+
+// LandedCommit is a commit of the range and the commit that replaced it on the ref.
+type LandedCommit struct {
+	Old string `json:"old"`
+	New string `json:"new"`
+}
+
+// LandResponse is the answer of a land that moved the ref, or found the head already at its tip. Tip is the commit of
+// the head after the land, and Generation is the generation of the ref move that holds it. The ref can move on
+// before the answer arrives. FastForward is set when the head already descended from the tip and the ref moved to it
+// as it is, and Commits is then empty. Else Commits maps each commit of the range to its new commit, oldest first.
+type LandResponse struct {
+	ID          string         `json:"id"`
+	Ref         string         `json:"ref"`
+	Generation  int64          `json:"generation"`
+	Tip         string         `json:"tip"`
+	FastForward bool           `json:"fast_forward"`
+	Commits     []LandedCommit `json:"commits"`
 }
 
 // Events is the answer of GET /v1/events. Cursor is opaque. A consumer passes it

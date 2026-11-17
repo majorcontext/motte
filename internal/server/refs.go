@@ -45,14 +45,8 @@ func (s *Server) moveRef(ctx context.Context, c call, w refWrite) (meta.Ref, err
 	default:
 		return meta.Ref{}, errUnauthorized
 	}
-	if scope != grant.ScopeMerge {
-		patterns, err := s.index.ProtectedRefs(ctx, repo)
-		if err != nil {
-			return meta.Ref{}, err
-		}
-		if slices.ContainsFunc(patterns, func(p string) bool { return refname.Match(p, w.Name) }) {
-			return meta.Ref{}, errProtected
-		}
+	if err := s.refProtected(ctx, scope, repo, w.Name); err != nil {
+		return meta.Ref{}, err
 	}
 	switch {
 	case w.ByCommit:
@@ -65,6 +59,22 @@ func (s *Server) moveRef(ctx context.Context, c call, w refWrite) (meta.Ref, err
 		return meta.Ref{}, s.index.DeleteRef(ctx, c.claims.WS, c.claims.Epoch, repo, w.Name, w.Expect)
 	}
 	return s.index.SwapRef(ctx, c.claims.WS, c.claims.Epoch, repo, w.Name, w.Expect, w.SHA)
+}
+
+// refProtected is errProtected when a protected pattern of the repo matches the ref and the scope may not write a
+// protected ref. A merge grant may.
+func (s *Server) refProtected(ctx context.Context, scope grant.Scope, repo, name string) error {
+	if scope == grant.ScopeMerge {
+		return nil
+	}
+	patterns, err := s.index.ProtectedRefs(ctx, repo)
+	if err != nil {
+		return err
+	}
+	if slices.ContainsFunc(patterns, func(p string) bool { return refname.Match(p, name) }) {
+		return errProtected
+	}
+	return nil
 }
 
 // scopeKind is the writer kind that the event of a commit-compared write records.

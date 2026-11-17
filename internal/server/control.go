@@ -19,6 +19,7 @@ func (s *Server) registerControlPlane(mux *http.ServeMux) {
 	s.handle(mux, "POST /v1/workspaces/{id}/flush", s.flush, grant.ScopeOperator)
 	s.handle(mux, "DELETE /v1/workspaces/{id}", s.deleteWorkspace, grant.ScopeOperator)
 	s.registerRefPolicy(mux)
+	s.registerLands(mux)
 	s.registerEvents(mux)
 }
 

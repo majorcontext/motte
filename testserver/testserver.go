@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/majorcontext/motte/bucket"
 	"github.com/majorcontext/motte/bucket/fs"
 	"github.com/majorcontext/motte/client"
 	"github.com/majorcontext/motte/grant"
@@ -30,6 +31,11 @@ type Server struct {
 	URL string
 	// Pool reaches the schema of the server, for a test that sets up a state no route can make. StartLocal leaves it nil.
 	Pool *pgxpool.Pool
+	// Meta, Bucket and Verifier are the state and the keys of the server, for a test that runs a second replica on them
+	// or sets up a state no route can make.
+	Meta     meta.Store
+	Bucket   bucket.Store
+	Verifier *grant.Verifier
 	// Operator is the control-plane signer.
 	Operator grant.Signer
 	// Node is the node signer.
@@ -69,16 +75,15 @@ func run(t testing.TB, store meta.Store) *Server {
 	}
 	cpPub, cpKey, _ := ed25519.GenerateKey(rand.Reader)
 	nodePub, nodeKey, _ := ed25519.GenerateKey(rand.Reader)
-	srv := server.New(server.Config{
-		Meta: store, Bucket: root.Bucket("motte"),
-		Verifier: grant.NewVerifier(
-			grant.Key{Kid: "cp", Public: cpPub, Scopes: []grant.Scope{grant.ScopeNode, grant.ScopeRead, grant.ScopeWrite, grant.ScopeImport, grant.ScopeOperator, grant.ScopeMerge}},
-			grant.Key{Kid: "node", Public: nodePub, Scopes: []grant.Scope{grant.ScopeNode}}),
-	})
+	bkt := root.Bucket("motte")
+	verifier := grant.NewVerifier(
+		grant.Key{Kid: "cp", Public: cpPub, Scopes: []grant.Scope{grant.ScopeNode, grant.ScopeRead, grant.ScopeWrite, grant.ScopeImport, grant.ScopeOperator, grant.ScopeMerge}},
+		grant.Key{Kid: "node", Public: nodePub, Scopes: []grant.Scope{grant.ScopeNode}})
+	srv := server.New(server.Config{Meta: store, Bucket: bkt, Verifier: verifier})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return &Server{
-		URL: ts.URL, Operator: grant.Signer{Kid: "cp", Key: cpKey}, Node: grant.Signer{Kid: "node", Key: nodeKey},
+		URL: ts.URL, Meta: store, Bucket: bkt, Verifier: verifier, Operator: grant.Signer{Kid: "cp", Key: cpKey}, Node: grant.Signer{Kid: "node", Key: nodeKey},
 		Expire: time.Now().Add(time.Hour),
 	}
 }
