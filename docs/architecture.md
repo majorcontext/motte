@@ -264,10 +264,10 @@ Package `testserver` runs the real server in the process of a test, on a fresh s
 - `service.type` (default `ClusterIP`), `service.loadBalancerIP` and `service.annotations`, so a caller can ask for an internal load balancer.
 - `database.dsnSecret`, the name and key of an existing Secret that holds the PostgreSQL DSN.
 - `bucket.kind` and `bucket.url`. An `fs` bucket is an `emptyDir` volume, for tests only, and the chart rejects it with more than 1 replica.
-- `trustedKeys`, a list of `{kid, key, scopes}`, or `trustedKeysConfigMap`, an existing ConfigMap that holds the JSON list.
+- `trustedKeys`, a list of `{kid, key, scopes}`, `trustedKeysConfigMap`, an existing ConfigMap that holds the JSON list, or `trustedKeysSecret`, the name and key of an existing Secret that holds it. The Deployment sets `MOTTE_TRUSTED_KEYS` from the one source that is set. The chart fails to render when none or more than one is set.
 - `otlpEndpoint`, optional, and `extraEnv`.
 
-The chart creates no Secret and no namespace. A release needs `database.dsnSecret.name`, `bucket.url` and one source of trusted keys. CI runs `helm lint` and `helm template` over the files in `charts/motte/ci`.
+The chart creates no Secret and no namespace. A release needs `database.dsnSecret.name`, `bucket.url` and exactly one source of trusted keys. CI runs `helm lint` and `helm template` over the files in `charts/motte/ci`.
 
 ## Virtual workspace daemon
 

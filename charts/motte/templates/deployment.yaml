@@ -2,7 +2,8 @@
 {{- $bucket := required "bucket.url is required" .Values.bucket.url -}}
 {{- if not (has .Values.bucket.kind (list "gcs" "fs")) }}{{ fail "bucket.kind must be gcs or fs" }}{{ end -}}
 {{- if and (eq .Values.bucket.kind "fs") (gt (int .Values.replicas) 1) }}{{ fail "bucket.kind fs needs replicas 1" }}{{ end -}}
-{{- if not (or .Values.trustedKeys .Values.trustedKeysConfigMap.name) }}{{ fail "trustedKeys or trustedKeysConfigMap.name is required" }}{{ end -}}
+{{- $keySources := add (ternary 1 0 (not (empty .Values.trustedKeys))) (ternary 1 0 (not (empty .Values.trustedKeysConfigMap.name))) (ternary 1 0 (not (empty .Values.trustedKeysSecret.name))) -}}
+{{- if ne (int $keySources) 1 }}{{ fail "set exactly one of trustedKeys, trustedKeysConfigMap.name and trustedKeysSecret.name" }}{{ end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -65,6 +66,11 @@ spec:
                 configMapKeyRef:
                   name: {{ .Values.trustedKeysConfigMap.name }}
                   key: {{ .Values.trustedKeysConfigMap.key }}
+              {{- else if .Values.trustedKeysSecret.name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.trustedKeysSecret.name }}
+                  key: {{ .Values.trustedKeysSecret.key }}
               {{- else }}
               value: {{ toJson .Values.trustedKeys | quote }}
               {{- end }}
