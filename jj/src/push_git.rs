@@ -191,16 +191,18 @@ impl Git {
     }
 
     /// Pushes all updates atomically. `push.negotiate` makes git find the commits that origin
-    /// already has, so a base that is not a branch tip stays out of the pack. `--no-thin` keeps
-    /// git from reading a delta base blob that the blob-less transport repo lacks.
+    /// already has, so a base that is not a branch tip stays out of the pack. `pack.window=0`
+    /// stops delta search, so the pack holds full blobs and git never reads a delta base that the
+    /// blob-less transport repo lacks. Over smart HTTP `--no-thin` has no effect.
     pub fn push(&self, updates: &[Update]) -> Result<Finished, Fail> {
         let mut args = [
             "-c",
             "push.negotiate=true",
+            "-c",
+            "pack.window=0",
             "push",
             "--porcelain",
             "--atomic",
-            "--no-thin",
         ]
         .map(str::to_owned)
         .to_vec();

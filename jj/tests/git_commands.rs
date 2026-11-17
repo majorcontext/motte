@@ -5,7 +5,8 @@
 mod common;
 
 use std::collections::BTreeMap;
-use std::io::Write as _;
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -105,6 +106,94 @@ impl Origin {
     }
 }
 
+/// Serves the bare repositories under `root` over smart HTTP with `git http-backend`, as a git
+/// host does. Returns the base URL. The thread ends with the test process.
+fn serve_http(root: &Path) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let root = root.to_owned();
+    std::thread::spawn(move || {
+        for conn in listener.incoming().flatten() {
+            let root = root.clone();
+            std::thread::spawn(move || cgi(conn, &root));
+        }
+    });
+    url
+}
+
+fn cgi(conn: TcpStream, root: &Path) {
+    let mut reader = BufReader::new(conn.try_clone().unwrap());
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    let mut parts = line.split_whitespace();
+    let (method, target) = (parts.next().unwrap(), parts.next().unwrap());
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let mut cmd = Command::new("git");
+    cmd.arg("http-backend")
+        .env("GIT_PROJECT_ROOT", root)
+        .env("GIT_HTTP_EXPORT_ALL", "1")
+        .env("REMOTE_USER", "t")
+        .env("REQUEST_METHOD", method)
+        .env("PATH_INFO", path)
+        .env("QUERY_STRING", query);
+    let mut length = 0;
+    loop {
+        let mut header = String::new();
+        reader.read_line(&mut header).unwrap();
+        let Some((name, value)) = header.trim().split_once(':') else {
+            break;
+        };
+        let value = value.trim();
+        match name.to_ascii_lowercase().as_str() {
+            "content-length" => length = value.parse().unwrap(),
+            "content-type" => {
+                cmd.env("CONTENT_TYPE", value);
+            }
+            "content-encoding" => {
+                cmd.env("HTTP_CONTENT_ENCODING", value);
+            }
+            "git-protocol" => {
+                cmd.env("GIT_PROTOCOL", value);
+            }
+            _ => {}
+        }
+    }
+    cmd.env("CONTENT_LENGTH", length.to_string());
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body).unwrap();
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let writer = std::thread::spawn(move || stdin.write_all(&body));
+    let out = child.wait_with_output().unwrap().stdout;
+    drop(writer.join());
+    let split = out.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+    let head = String::from_utf8_lossy(&out[..split]);
+    let status = head
+        .lines()
+        .find_map(|l| l.strip_prefix("Status: "))
+        .unwrap_or("200 OK");
+    let mut conn = conn;
+    let mut resp = format!("HTTP/1.1 {status}\r\n").into_bytes();
+    for l in head.lines().filter(|l| !l.starts_with("Status:")) {
+        resp.extend_from_slice(format!("{l}\r\n").as_bytes());
+    }
+    let payload = &out[split + 4..];
+    resp.extend_from_slice(
+        format!(
+            "Content-Length: {}\r\nConnection: close\r\n\r\n",
+            payload.len()
+        )
+        .as_bytes(),
+    );
+    resp.extend_from_slice(payload);
+    drop(conn.write_all(&resp));
+}
+
 struct Setup {
     f: Fixture,
     ws: Workspace,
@@ -148,6 +237,24 @@ fn a_git_push_sends_the_new_commit_to_origin_and_records_the_bookmark() {
     assert_eq!(s.origin.tip("feature"), commit, "origin holds the commit");
     let listed = s.f.jj(&s.ws.mount, &["bookmark", "list", "-a", "feature"]);
     assert!(listed.contains("@origin: "), "{listed}");
+}
+
+#[test]
+fn a_git_push_over_smart_http_edits_a_file_without_the_old_blob() {
+    let s = Setup::new();
+    git(&s.origin.dir, &["config", "http.receivepack", "true"], None);
+    let base = serve_http(s.f.dir.path());
+    let commit = s.bookmark("feature", "one");
+    let key = format!("url.{base}/origin.git.insteadOf");
+    let env = [
+        ("GIT_CONFIG_COUNT", "1"),
+        ("GIT_CONFIG_KEY_0", key.as_str()),
+        ("GIT_CONFIG_VALUE_0", URL),
+    ];
+    let (ok, text) =
+        s.f.jj_try(&s.ws.mount, &["motte", "push", "-b", "feature"], &env);
+    assert!(ok, "{text}");
+    assert_eq!(s.origin.tip("feature"), commit, "origin holds the commit");
 }
 
 #[test]
