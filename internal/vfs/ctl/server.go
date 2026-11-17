@@ -100,7 +100,7 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn) {
 		var rq request
 		switch {
 		case tooLong:
-			ans = failure{Err: "ctl: the request line is longer than the limit", Code: CodeLineTooLong}
+			ans = newFailure(CodeLineTooLong, "ctl: the request line is longer than the limit")
 		case json.Unmarshal(line, &rq) != nil:
 			ans = invalid("ctl: the request is not a JSON object")
 		default:
@@ -192,7 +192,7 @@ func (s *Server) handle(ctx context.Context, rq request) any {
 			return serveWorkspace(ctx, st, rq)
 		}
 	}
-	return failure{Err: "unknown op", Code: CodeUnknownOp}
+	return newFailure(CodeUnknownOp, "unknown op")
 }
 
 func nonNil[T any](s []T) []T {

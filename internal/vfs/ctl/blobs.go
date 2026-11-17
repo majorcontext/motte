@@ -12,7 +12,7 @@ import (
 // maxBlobBatch matches the byte limit of one blob batch of the store.
 const maxBlobBatch = 16 << 20
 
-var tooLarge = failure{Err: "ctl: getbatch passes the batch byte limit", Code: CodeObjectTooLarge}
+var tooLarge = newFailure(CodeObjectTooLarge, "ctl: getbatch passes the batch byte limit")
 
 // getBlobs answers getbatch: the data of each blob, in request order. A blob larger than maxSize, when set, is
 // listed in Large with no data. A batch over maxBlobBatch fails as too large, so the caller splits it.
@@ -50,7 +50,7 @@ func (s *Server) getBlobs(ctx context.Context, names []string, maxSize int64) an
 			return storeFail(err)
 		}
 		if len(got) != len(missing) {
-			return failure{Err: fmt.Sprintf("ctl: store answered %d of %d blobs", len(got), len(missing)), Code: CodeStoreUnavailable}
+			return newFailure(CodeStoreUnavailable, fmt.Sprintf("ctl: store answered %d of %d blobs", len(got), len(missing)))
 		}
 		for j, i := range at {
 			if !r.skip(i, int64(len(got[j])), maxSize) {

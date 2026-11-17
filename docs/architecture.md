@@ -339,7 +339,7 @@ Package `volume` is the public contract between a caller and the plugin. A works
 
 The daemon answers each line of the unix socket with one line. A request is a JSON object with `op`, the fields of the op, and an optional `traceparent`. A request line over 64 MiB is answered with the code `line_too_long`, and the connection stays open. The daemon closes every connection when its mount ends.
 
-A success answer holds exactly the fields that the table names. A field is never omitted, and a list is `[]` when it is empty. An answer with no fields is `{}`. An error answer is `{"err", "code"}`, with `ref` on a lost ref swap. `err` is for people. A consumer branches on `code`:
+A success answer holds exactly the fields that the table names. A field is never omitted, and a list is `[]` when it is empty. An answer with no fields is `{}`. An error answer is `{"err", "code"}`, with `ref` on a lost ref swap. `err` is for people, and a consumer branches on `code`. The `err` text always contains the `code` text, except for `unknown_op`, whose text is `unknown op`. A shim released before `code` matches these substrings (`too_large`, `unknown op`, `not found`, `vcs_claim_lost`, `vcs_generation_conflict`, `vcs_not_found`), so a daemon keeps them for as long as such a shim is deployed. The codes:
 
 | code | Cause |
 |---|---|

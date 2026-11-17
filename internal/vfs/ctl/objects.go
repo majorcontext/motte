@@ -120,7 +120,8 @@ func (s *Server) putObjects(ctx context.Context, in []api.Object) ([]string, *fa
 			return nil, &f
 		}
 		if len(data) > gitpack.MaxObjectBytes {
-			return nil, &failure{Err: fmt.Sprintf("ctl: an object is over %d bytes", gitpack.MaxObjectBytes), Code: CodeObjectTooLarge}
+			f := newFailure(CodeObjectTooLarge, fmt.Sprintf("ctl: an object is over %d bytes", gitpack.MaxObjectBytes))
+			return nil, &f
 		}
 		objs[i] = gitpack.Object{Type: t, Data: data}
 		shas[i] = gitpack.Hash(t, data).String()

@@ -179,8 +179,12 @@ func TestControlProtocolFixtures(t *testing.T) {
 				if err := json.Unmarshal(s.Answer, &want); err != nil {
 					t.Fatal(err)
 				}
-				if got := d.send(line); !match(got, want) {
+				got := d.send(line)
+				if !match(got, want) {
 					t.Errorf("%s: request %s\n got  %v\n want %s", s.Name, line, got, s.Answer)
+				}
+				if code, _ := got["code"].(string); code != "" && code != "unknown_op" && !strings.Contains(got["err"].(string), code) {
+					t.Errorf("%s: err %q lacks its code %q, which a released shim matches in the text", s.Name, got["err"], code)
 				}
 			}
 		})

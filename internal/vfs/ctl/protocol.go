@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/majorcontext/motte/api"
 	"github.com/majorcontext/motte/client"
@@ -50,20 +51,30 @@ type failure struct {
 	Ref  *api.Ref `json:"ref,omitempty"`
 }
 
-func invalid(format string, a ...any) failure {
-	return failure{Err: fmt.Sprintf(format, a...), Code: CodeInvalidRequest}
+// newFailure builds an error answer. The text always contains the code, because a released shim matches the text
+// of an answer (such as "too_large" or "vcs_claim_lost") and ignores the code. Only unknown_op keeps its own text.
+func newFailure(code Code, msg string) failure {
+	if code != CodeUnknownOp && !strings.Contains(msg, string(code)) {
+		msg += " (" + string(code) + ")"
+	}
+	return failure{Err: msg, Code: code}
 }
 
-func internal(err error) failure { return failure{Err: err.Error(), Code: CodeInternal} }
+func invalid(format string, a ...any) failure {
+	return newFailure(CodeInvalidRequest, fmt.Sprintf(format, a...))
+}
+
+func internal(err error) failure { return newFailure(CodeInternal, err.Error()) }
 
 // storeFail answers an error of a store call: the code of the store answer, or store_unavailable when the call
 // got no answer.
 func storeFail(err error) failure {
-	f := failure{Err: err.Error(), Code: CodeStoreUnavailable}
+	code := CodeStoreUnavailable
 	var ce *client.Error
 	if errors.As(err, &ce) && ce.Code != "" {
-		f.Code = Code(ce.Code)
+		code = Code(ce.Code)
 	}
+	f := newFailure(code, err.Error())
 	if errors.Is(err, client.ErrGenerationConflict) {
 		if ref, ok := client.CurrentRef(err); ok {
 			f.Ref = &ref
