@@ -325,6 +325,43 @@ func (s *Store) DeleteRef(ctx context.Context, ws string, epoch uint64, repo, na
 	return s.refLost(ctx, ws, epoch, repo, name)
 }
 
+// UpdateRef compares on the commit of the ref instead of its generation.
+func (s *Store) UpdateRef(ctx context.Context, repo, name, old, new string) (meta.Ref, error) {
+	var generation int64
+	var err error
+	switch {
+	case new == "":
+		var tag pgconn.CommandTag
+		if tag, err = s.Pool.Exec(ctx, `DELETE FROM refs WHERE repo = $1 AND name = $2 AND commit_sha = $3`, repo, name, old); err == nil && tag.RowsAffected() == 0 {
+			err = pgx.ErrNoRows
+		}
+	case old == "":
+		err = s.Pool.QueryRow(ctx, `
+			INSERT INTO refs (repo, name, commit_sha, generation) VALUES ($1, $2, $3, nextval('ref_generation'))
+			ON CONFLICT (repo, name) DO NOTHING
+			RETURNING generation`, repo, name, new).Scan(&generation)
+	default:
+		err = s.Pool.QueryRow(ctx, `
+			UPDATE refs SET commit_sha = $3, generation = nextval('ref_generation'), updated_at = now()
+			WHERE repo = $1 AND name = $2 AND commit_sha = $4
+			RETURNING generation`, repo, name, new, old).Scan(&generation)
+	}
+	if err == nil {
+		return meta.Ref{Name: name, Commit: new, Generation: generation}, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return meta.Ref{}, fmt.Errorf("postgres: update ref: %w", err)
+	}
+	cur, err := s.Ref(ctx, repo, name)
+	switch {
+	case errors.Is(err, meta.ErrNotFound):
+		return meta.Ref{}, &meta.RefConflict{}
+	case err != nil:
+		return meta.Ref{}, err
+	}
+	return meta.Ref{}, &meta.RefConflict{Current: &cur}
+}
+
 func (s *Store) refLost(ctx context.Context, ws string, epoch uint64, repo, name string) error {
 	if err := s.lost(ctx, ws, epoch, repo); err != nil {
 		return err

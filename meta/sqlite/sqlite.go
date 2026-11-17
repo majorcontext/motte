@@ -392,6 +392,57 @@ func (s *Store) DeleteRef(ctx context.Context, ws string, epoch uint64, repo, na
 	return s.refLost(ctx, ws, epoch, repo, name)
 }
 
+// UpdateRef compares on the commit of the ref instead of its generation.
+func (s *Store) UpdateRef(ctx context.Context, repo, name, old, new string) (meta.Ref, error) {
+	var generation int64
+	err := inTx(ctx, s.db, func(tx *sql.Tx) error {
+		switch {
+		case new == "":
+			res, err := tx.ExecContext(ctx, `DELETE FROM refs WHERE repo = ?1 AND name = ?2 AND commit_sha = ?3`, repo, name, old)
+			if err != nil {
+				return err
+			}
+			if n, err := res.RowsAffected(); err != nil || n == 0 {
+				if err == nil {
+					err = sql.ErrNoRows
+				}
+				return err
+			}
+			return nil
+		case old == "":
+			if _, err := tx.ExecContext(ctx, bumpGeneration); err != nil {
+				return err
+			}
+			return tx.QueryRowContext(ctx, `
+				INSERT INTO refs (repo, name, commit_sha, generation, updated_at)
+				VALUES (?1, ?2, ?3, `+nextGeneration+`, ?4)
+				ON CONFLICT (repo, name) DO NOTHING
+				RETURNING generation`, repo, name, new, micros()).Scan(&generation)
+		}
+		if _, err := tx.ExecContext(ctx, bumpGeneration); err != nil {
+			return err
+		}
+		return tx.QueryRowContext(ctx, `
+			UPDATE refs SET commit_sha = ?3, generation = `+nextGeneration+`, updated_at = ?5
+			WHERE repo = ?1 AND name = ?2 AND commit_sha = ?4
+			RETURNING generation`, repo, name, new, old, micros()).Scan(&generation)
+	})
+	if err == nil {
+		return meta.Ref{Name: name, Commit: new, Generation: generation}, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return meta.Ref{}, fmt.Errorf("sqlite: update ref: %w", err)
+	}
+	cur, err := s.Ref(ctx, repo, name)
+	switch {
+	case errors.Is(err, meta.ErrNotFound):
+		return meta.Ref{}, &meta.RefConflict{}
+	case err != nil:
+		return meta.Ref{}, err
+	}
+	return meta.Ref{}, &meta.RefConflict{Current: &cur}
+}
+
 func (s *Store) refLost(ctx context.Context, ws string, epoch uint64, repo, name string) error {
 	if err := s.lost(ctx, ws, epoch, repo); err != nil {
 		return err

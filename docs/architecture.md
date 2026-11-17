@@ -194,6 +194,7 @@ Every method that writes is one atomic unit. The unit is one conditional stateme
 | `SwapRef(ws, epoch, repo, name, 0, sha)` | The fence holds and the ref is absent. | Inserts the ref with a new generation. | `ErrClaimLost`, else `*RefConflict` with the stored ref as `Current`. |
 | `SwapRef(ws, epoch, repo, name, expect, sha)` | The fence holds and the stored generation is `expect`. | Sets the commit and a new generation. | `ErrClaimLost`, else `*RefConflict` with `Current` nil when the ref is absent. |
 | `DeleteRef(ws, epoch, repo, name, expect)` | The fence holds and the stored generation is `expect`. | Deletes the ref. | As `SwapRef`. |
+| `UpdateRef(repo, name, old, new)` | No fence. The stored commit is `old`, or the ref is absent when `old` is empty. | Creates the ref when `old` is empty, deletes it when `new` is empty, else sets the commit. Every write takes a new generation. | `*RefConflict` with the stored ref as `Current`, nil when the ref is absent. |
 | `AddPack(repo, id, bytes)` | No pack row has the repo and id. | Inserts the row with the creation time. | None. A repeat changes nothing and keeps the first `bytes`. |
 | `Packs(repo)` | None. | Lists the packs of the repo, oldest first, then by id. | None. |
 

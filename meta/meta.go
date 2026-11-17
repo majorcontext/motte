@@ -126,6 +126,12 @@ type Store interface {
 	// fence holds, with the errors of SwapRef.
 	DeleteRef(ctx context.Context, ws string, epoch uint64, repo, name string, expect int64) error
 
+	// UpdateRef is the ref write of a direct push, with no workspace and no
+	// fence. It moves ref name from commit old to commit new. An empty old
+	// creates the ref and an empty new deletes it. A ref whose commit is not
+	// old is *RefConflict. Every write takes a new generation.
+	UpdateRef(ctx context.Context, repo, name, old, new string) (Ref, error)
+
 	// AddPack records a pack once. A repeat is a no-op.
 	AddPack(ctx context.Context, repo, packID string, bytes int64) error
 	// Packs lists the packs of a repo, oldest first, ties by id.
