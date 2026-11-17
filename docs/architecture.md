@@ -348,8 +348,8 @@ A success answer holds exactly the fields that the table names. A field is never
 | `line_too_long` | The request line is over 64 MiB. |
 | `store_unavailable` | The store call got no answer, or an answer that is no wire error. |
 | `internal_error` | The daemon failed on its own side, such as a read of the upper directory. |
-| `vcs_object_too_large` | An object is over 16 MiB, or a `getbatch` answer would pass 16 MiB. The store refuses an object over 16 MiB. |
-| `vcs_not_found`, `vcs_generation_conflict`, `vcs_claim_lost`, `vcs_object_invalid`, `vcs_repo_forbidden`, `vcs_workspace_conflict`, `vcs_workspace_deleted`, `vcs_not_configured`, `unauthorized`, `invalid_body` | The wire code of the store answer. |
+| `vcs_object_too_large` | An object is over 16 MiB, or a `getbatch` answer would pass 16 MiB, or the store answers 413 (see Limits and memory). |
+| `vcs_not_found`, `vcs_generation_conflict`, `vcs_claim_lost`, `vcs_object_invalid`, `vcs_repo_forbidden`, `vcs_workspace_conflict`, `vcs_workspace_deleted`, `unauthorized`, `invalid_body`, `method_not_allowed` | The wire code of the store answer. |
 
 | op | request | answer |
 |---|---|---|
