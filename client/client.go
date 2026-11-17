@@ -22,6 +22,10 @@ import (
 // DefaultBudget is the time limit of one call unless WithBudget sets another.
 const DefaultBudget = 2 * time.Second
 
+// DefaultLandBudget is the time limit of a Land call unless WithBudget sets another. It is above the 30 seconds that
+// the server waits for a land.
+const DefaultLandBudget = 35 * time.Second
+
 const errorBodyMax = 1 << 20
 
 // GrantFunc returns the bearer grant of one call. The client calls it before each request.
@@ -34,12 +38,14 @@ type Client struct {
 	grant  GrantFunc
 	http   *http.Client
 	budget time.Duration
+	// set is true after WithBudget.
+	set bool
 }
 
 type Option func(*Client)
 
 // WithBudget sets the time limit of one call. Zero or less removes the limit; a deadline on the call context still applies.
-func WithBudget(d time.Duration) Option { return func(c *Client) { c.budget = d } }
+func WithBudget(d time.Duration) Option { return func(c *Client) { c.budget, c.set = d, true } }
 
 // WithHTTPClient sets the transport. The client still follows no redirect.
 func WithHTTPClient(h *http.Client) Option { return func(c *Client) { c.http = h } }
@@ -62,9 +68,13 @@ func StaticGrant(token string) GrantFunc {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, in, out any) error {
-	if c.budget > 0 {
+	return c.doWithin(ctx, c.budget, method, path, in, out)
+}
+
+func (c *Client) doWithin(ctx context.Context, budget time.Duration, method, path string, in, out any) error {
+	if budget > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, c.budget)
+		ctx, cancel = context.WithTimeout(ctx, budget)
 		defer cancel()
 	}
 	token, err := c.grant(ctx)
@@ -321,6 +331,21 @@ func (c *Client) ProtectedRefs(ctx context.Context, repo string) ([]string, erro
 	var out api.ProtectedRefs
 	err := c.do(ctx, http.MethodGet, "/v1/repos"+segs(repo, "protected-refs"), nil, &out)
 	return out.Patterns, err
+}
+
+// Land lands the commits base..head of req on the ref of req. repo is the repository text of the grant, and the grant
+// has the merge scope, or the write scope for an unprotected ref. The call waits for the result, at most
+// DefaultLandBudget unless WithBudget sets another. A conflict is ErrLandConflict and ConflictPaths returns its paths.
+// An invalid range is ErrLandInvalid, a land that the server did not end in time is ErrLandTimeout, and a repeat of
+// the same ID then returns the result once it exists.
+func (c *Client) Land(ctx context.Context, repo string, req api.LandRequest) (api.LandResponse, error) {
+	budget := c.budget
+	if !c.set {
+		budget = DefaultLandBudget
+	}
+	var out api.LandResponse
+	err := c.doWithin(ctx, budget, http.MethodPost, "/v1/repos"+segs(repo, "lands"), req, &out)
+	return out, err
 }
 
 // Events returns up to limit ref events after cursor, and the cursor to pass next. An empty cursor starts at the

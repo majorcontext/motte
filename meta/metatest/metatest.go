@@ -55,7 +55,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 	} {
 		t.Run(c.name, func(t *testing.T) { c.fn(t, newStore(t)) })
 	}
-	for _, c := range policyCases {
+	for _, c := range append(policyCases, landCases...) {
 		t.Run(c.name, func(t *testing.T) { c.fn(t, newStore(t)) })
 	}
 }

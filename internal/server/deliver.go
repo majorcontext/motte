@@ -83,7 +83,9 @@ func (s *Server) Run(ctx context.Context) error {
 	var pruned time.Time
 	defer wg.Wait()
 	for {
-		if now := s.events.Clock.Now(); pruned.IsZero() || now.Sub(pruned) >= pruneEvery {
+		now := s.events.Clock.Now()
+		s.sweepLands(ctx, pruned.IsZero() || now.Sub(pruned) >= pruneEvery)
+		if pruned.IsZero() || now.Sub(pruned) >= pruneEvery {
 			if err := s.index.PruneEvents(ctx, now.Add(-s.events.Retention)); err != nil && ctx.Err() == nil {
 				s.logger.ErrorContext(ctx, "event prune failed", "error", logSafe(err))
 			}
