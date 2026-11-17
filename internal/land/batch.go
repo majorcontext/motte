@@ -12,11 +12,12 @@ import (
 	"github.com/majorcontext/motte/internal/gitpack"
 )
 
+// MaxChangedPaths is the most distinct leaves that one land may change.
+var MaxChangedPaths = 100000
+
 const (
 	// MaxCommits is the longest range that one land takes.
 	MaxCommits = 1000
-	// MaxChangedPaths is the most leaves that one land may change.
-	MaxChangedPaths = 100000
 	// MaxLoggedPaths is the most paths that a log row keeps. A land that changes more is logged as overflow.
 	MaxLoggedPaths = 1000
 	// MaxRewriteBytes is the most new object data that one land may write.
@@ -212,7 +213,7 @@ func (b *Batch) fastForward(ctx context.Context, head, headTree gitpack.SHA) (La
 	if err != nil {
 		return Landed{}, err
 	}
-	paths, err := b.collect(ctx, tip.Tree, headTree)
+	paths, err := b.collect(ctx, tip.Tree, headTree, true)
 	if err != nil {
 		return Landed{}, err
 	}
@@ -230,39 +231,57 @@ func (l *Landed) setPaths(paths []string) {
 }
 
 // collect returns the sorted leaf paths that differ between two trees.
-func (b *Batch) collect(ctx context.Context, a, c gitpack.SHA) ([]string, error) {
-	var paths []string
-	err := b.diff(ctx, a, c, "", func(ch Change) error {
-		if len(paths) == MaxChangedPaths {
+func (b *Batch) collect(ctx context.Context, a, c gitpack.SHA, strict bool) ([]string, error) {
+	set := newPathSet(strict)
+	err := b.diff(ctx, a, c, "", func(ch Change) error { return set.add(ch.Path) })
+	return set.sorted(), err
+}
+
+// pathSet counts the distinct changed paths. A strict set refuses a path that is not UTF-8, because a log row keeps it.
+type pathSet struct {
+	seen   map[string]struct{}
+	strict bool
+}
+
+func newPathSet(strict bool) *pathSet { return &pathSet{seen: map[string]struct{}{}, strict: strict} }
+
+func (p *pathSet) add(path string) error {
+	if p.strict && !utf8.ValidString(path) {
+		return Invalid("a changed path is not valid UTF-8")
+	}
+	if _, ok := p.seen[path]; !ok {
+		if len(p.seen) == MaxChangedPaths {
 			return ErrTooLarge
 		}
-		paths = append(paths, ch.Path)
-		return nil
-	})
-	slices.Sort(paths)
-	return slices.Compact(paths), err
+		p.seen[path] = struct{}{}
+	}
+	return nil
+}
+
+func (p *pathSet) sorted() []string {
+	out := make([]string, 0, len(p.seen))
+	for path := range p.seen {
+		out = append(out, path)
+	}
+	slices.Sort(out)
+	return out
 }
 
 func (b *Batch) rebase(ctx context.Context, base gitpack.SHA, baseCommit Commit, chain []link, when time.Time) (Landed, error) {
 	changes := make([][]Change, len(chain))
-	var paths []string
+	set := newPathSet(true)
 	parent := baseCommit.Tree
 	for i, l := range chain {
 		err := b.diff(ctx, parent, l.c.Tree, "", func(ch Change) error {
-			if len(paths) == MaxChangedPaths || !utf8.ValidString(ch.Path) {
-				return pathError(ch.Path)
-			}
 			changes[i] = append(changes[i], ch)
-			paths = append(paths, ch.Path)
-			return nil
+			return set.add(ch.Path)
 		})
 		if err != nil {
 			return Landed{}, err
 		}
 		parent = l.c.Tree
 	}
-	slices.Sort(paths)
-	paths = slices.Compact(paths)
+	paths := set.sorted()
 	if hits, err := b.conflicts(ctx, base, paths); err != nil || len(hits) > 0 {
 		if err == nil {
 			err = &ConflictError{Paths: hits}
@@ -292,13 +311,6 @@ func (b *Batch) rebase(ctx context.Context, base gitpack.SHA, baseCommit Commit,
 	out.New = prev
 	out.setPaths(paths)
 	return out, nil
-}
-
-func pathError(path string) error {
-	if utf8.ValidString(path) {
-		return ErrTooLarge
-	}
-	return Invalid("a changed path is not valid UTF-8")
 }
 
 // conflicts returns the paths that changed since base and clash with the paths of the change.
@@ -368,7 +380,7 @@ func (b *Batch) before(ctx context.Context, base gitpack.SHA, emit func(string))
 		if err != nil {
 			return false, err
 		}
-		paths, err := b.collect(ctx, from.Tree, to.Tree)
+		paths, err := b.collect(ctx, from.Tree, to.Tree, false)
 		if err != nil && !errors.Is(err, ErrTooLarge) {
 			return false, err
 		}

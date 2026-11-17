@@ -178,3 +178,31 @@ func TestARangeThatCannotLandIsInvalid(t *testing.T) {
 		}
 	}
 }
+
+func TestFastForwardRefusesAPathThatIsNotUTF8(t *testing.T) {
+	m := mem{}
+	base := m.commit(gitpack.SHA{}, m.tree(map[string]string{"a": "1"}), "")
+	head := m.commit(base, m.tree(map[string]string{"a": "1", "\xff": "1"}), "")
+	var inv Invalid
+	if _, err := m.batch(base).Land(context.Background(), base, head, time.Unix(1, 0)); !errors.As(err, &inv) {
+		t.Fatalf("err = %v, want Invalid: a log row cannot keep the path", err)
+	}
+}
+
+func TestTheLimitCountsDistinctPaths(t *testing.T) {
+	defer func(n int) { MaxChangedPaths = n }(MaxChangedPaths)
+	MaxChangedPaths = 3
+	m := mem{}
+	files := func(v string) map[string]string { return map[string]string{"a": v, "b": v, "c": v} }
+	base := m.commit(gitpack.SHA{}, m.tree(files("0")), "")
+	tip := m.commit(base, m.tree(map[string]string{"a": "0", "b": "0", "c": "0", "z": "z"}), "")
+	one := m.commit(base, m.tree(files("1")), "")
+	two := m.commit(one, m.tree(files("2")), "")
+	if _, err := m.batch(tip).Land(context.Background(), base, two, time.Unix(1, 0)); err != nil {
+		t.Fatalf("two commits that edit the same 3 paths: %v", err)
+	}
+	four := m.commit(two, m.tree(map[string]string{"a": "2", "b": "2", "c": "2", "d": "1"}), "")
+	if _, err := m.batch(base).Land(context.Background(), base, four, time.Unix(1, 0)); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("4 distinct paths: err = %v, want ErrTooLarge", err)
+	}
+}

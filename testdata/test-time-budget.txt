@@ -9,5 +9,5 @@ leaf 10
 package default 10
 
 
-# The git tests run the real git binary, and the contract tests start a PostgreSQL schema each. The land tests race 200 agents on each backend.
-package internal/server 30
+# The git tests run the real git binary, and the contract tests start a PostgreSQL schema each.
+package internal/server 20
