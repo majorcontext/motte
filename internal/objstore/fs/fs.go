@@ -208,7 +208,7 @@ func (b bucket) GetRange(_ context.Context, key string, off, n int64) ([]byte, e
 	if off >= a.Size {
 		return nil, nil
 	}
-	if n < 0 || off+n > a.Size {
+	if n < 0 || n > a.Size-off {
 		n = a.Size - off
 	}
 	out := make([]byte, n)

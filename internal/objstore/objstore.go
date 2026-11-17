@@ -97,10 +97,10 @@ func (m *Memory) GetRange(ctx context.Context, key string, off, n int64) ([]byte
 	if off >= int64(len(d)) {
 		return nil, nil
 	}
-	if n < 0 {
+	if n < 0 || n > int64(len(d))-off {
 		return d[off:], nil
 	}
-	return d[off:min(off+n, int64(len(d)))], nil
+	return d[off : off+n], nil
 }
 
 // Keys lists the stored keys.
