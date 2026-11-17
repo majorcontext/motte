@@ -25,7 +25,7 @@ const (
 
 var ctx = context.Background()
 
-// Run runs the suite. newStore returns an empty store for one test.
+// Run runs the suite. newStore returns an empty store for one test; cases run in parallel, so each store is its own.
 func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 	for _, c := range []struct {
 		name string
@@ -53,10 +53,16 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"refs list by name within a repo", refsList},
 		{"packs list oldest first and add once", packs},
 	} {
-		t.Run(c.name, func(t *testing.T) { c.fn(t, newStore(t)) })
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			c.fn(t, newStore(t))
+		})
 	}
 	for _, c := range append(policyCases, landCases...) {
-		t.Run(c.name, func(t *testing.T) { c.fn(t, newStore(t)) })
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			c.fn(t, newStore(t))
+		})
 	}
 }
 

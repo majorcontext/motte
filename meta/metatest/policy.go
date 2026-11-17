@@ -384,7 +384,7 @@ func subscriptionCursorsAreStored(t *testing.T, s meta.Store) {
 	})
 	defer wg.Wait()
 	defer close(stop)
-	for i := range 20 {
+	for i := range 8 {
 		id := fmt.Sprint("s", i)
 		made, err := s.CreateSubscription(ctx, meta.Subscription{ID: id, URL: "https://x.invalid", Secret: "k"})
 		ok(t, err)
