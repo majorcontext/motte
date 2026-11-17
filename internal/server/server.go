@@ -6,12 +6,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"net/http"
-	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -134,15 +134,15 @@ func decodeBody(r *http.Request, limit int, out any) error {
 	return nil
 }
 
-// logSafe drops the paths of a filesystem error, which a log line must not hold.
+// logSafe names an error by its type chain and its innermost cause, which a log line may hold. The message of a
+// wrapper can carry a path or a URL, so it stays out.
 func logSafe(err error) string {
-	var pe *fs.PathError
-	if errors.As(err, &pe) {
-		return pe.Op + ": " + pe.Err.Error()
+	root := err
+	for u := errors.Unwrap(root); u != nil; u = errors.Unwrap(u) {
+		root = u
 	}
-	var le *os.LinkError
-	if errors.As(err, &le) {
-		return le.Op + ": " + le.Err.Error()
+	if _, ok := root.(syscall.Errno); ok {
+		return fmt.Sprintf("%T: %v", err, root)
 	}
-	return err.Error()
+	return fmt.Sprintf("%T: %T", err, root)
 }
