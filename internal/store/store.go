@@ -21,6 +21,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 
 	"github.com/majorcontext/motte/bucket"
@@ -240,10 +241,10 @@ func (s *Service) putPack(ctx context.Context, repo Repo, id string, idx, pack [
 	if err != nil {
 		return err
 	}
-	if _, err := s.st.Create(ctx, prefix+"/"+id+".idx", idx); err != nil {
-		return err
-	}
-	if _, err := s.st.Create(ctx, prefix+"/"+id+".pack", pack); err != nil {
+	var g errgroup.Group
+	g.Go(func() error { _, err := s.st.Create(ctx, prefix+"/"+id+".idx", idx); return err })
+	g.Go(func() error { _, err := s.st.Create(ctx, prefix+"/"+id+".pack", pack); return err })
+	if err := g.Wait(); err != nil {
 		return err
 	}
 	return s.index.AddPack(ctx, repo.String(), id, int64(len(pack)))
@@ -477,9 +478,27 @@ func (v *view) size(ctx context.Context, sha gitpack.SHA) (int64, error) {
 }
 
 func (v *view) get(ctx context.Context, sha gitpack.SHA) (gitpack.Type, []byte, error) {
+	return v.getSized(ctx, sha, nil)
+}
+
+// getSized is get that tells before the size of the object, from the pack header, so a caller can reserve memory
+// before the object is inflated.
+func (v *view) getSized(ctx context.Context, sha gitpack.SHA, before func(size int64) error) (gitpack.Type, []byte, error) {
 	p, err := v.find(ctx, sha)
 	if err != nil {
 		return 0, nil, err
+	}
+	if before != nil {
+		n, _, err := p.Size(sha)
+		if errors.Is(err, gitpack.ErrNotFound) {
+			return 0, nil, ErrNotFound
+		}
+		if err != nil {
+			return 0, nil, err
+		}
+		if err := before(n); err != nil {
+			return 0, nil, err
+		}
 	}
 	t, d, depth, err := p.GetDepth(sha)
 	statsFrom(ctx).object(len(d), depth)
@@ -516,6 +535,12 @@ func (s *Service) Reader(ctx context.Context, repo Repo) (*Reader, error) {
 
 func (r *Reader) Get(ctx context.Context, sha gitpack.SHA) (gitpack.Type, []byte, error) {
 	return r.v.get(ctx, sha)
+}
+
+// GetSized is Get that calls before with the size of the object before it reads the object. An error of before stops
+// the read.
+func (r *Reader) GetSized(ctx context.Context, sha gitpack.SHA, before func(size int64) error) (gitpack.Type, []byte, error) {
+	return r.v.getSized(ctx, sha, before)
 }
 
 // Has reports for each sha whether the repo holds it, from the pack indexes only.
