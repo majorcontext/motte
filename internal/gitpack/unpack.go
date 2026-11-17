@@ -136,6 +136,15 @@ func resolveEntries(ctx context.Context, entries []*unpacked, byOff map[int64]*u
 		}
 	}
 	var total int64
+	for _, e := range entries {
+		if e.done {
+			total += int64(len(e.data))
+		}
+	}
+	if total > MaxUnpackBytes {
+		return nil, ErrTooLarge
+	}
+	var missing error
 	apply := func(e *unpacked, baseType Type, base []byte) error {
 		out, err := applyDelta(base, e.data)
 		if err != nil {
@@ -171,7 +180,10 @@ func resolveEntries(ctx context.Context, entries []*unpacked, byOff map[int64]*u
 			case e.delta == 7 && base == nil && useExternal:
 				t, data, err := external(e.baseName)
 				if err != nil {
-					return nil, err
+					if missing == nil {
+						missing = err
+					}
+					continue
 				}
 				if err := apply(e, t, data); err != nil {
 					return nil, err
@@ -190,6 +202,9 @@ func resolveEntries(ctx context.Context, entries []*unpacked, byOff map[int64]*u
 	objs := make([]Object, len(entries))
 	for i, e := range entries {
 		if !e.done {
+			if missing != nil {
+				return nil, missing
+			}
 			return nil, ErrCorrupt
 		}
 		objs[i] = Object{Type: e.t, Data: e.data}

@@ -2,7 +2,6 @@ package server
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"errors"
 	"net/http"
@@ -171,15 +170,7 @@ func (s *Server) gitRefs(ctx context.Context, repo store.Repo) ([]gitproto.Ref, 
 
 // gitBody reads a request body of at most limit bytes, inflated when the client compressed it, and reserves cost.
 func (s *Server) gitBody(w http.ResponseWriter, r *http.Request, limit int64, cost func(int64) int64) ([]byte, func(), error) {
-	if r.Header.Get("Content-Encoding") == "gzip" {
-		zr, err := gzip.NewReader(r.Body)
-		if err != nil {
-			return nil, nil, errBody
-		}
-		defer func() { _ = zr.Close() }()
-		r.Body = zr
-	}
-	return s.receive(w, r, limit, cost)
+	return s.receiveEncoded(w, r, limit, cost, true)
 }
 
 func (s *Server) gitService(w http.ResponseWriter, r *http.Request, c call) error {

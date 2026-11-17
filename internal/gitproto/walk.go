@@ -289,6 +289,9 @@ func (c *collector) walkTree(root gitpack.SHA, seen map[gitpack.SHA]struct{}, ad
 			return errMalformed
 		}
 		err = forEachEntry(data, func(mode uint32, child gitpack.SHA) {
+			if c.tracked() {
+				return
+			}
 			switch {
 			case mode == 0o160000:
 			case mode == 0o40000:
@@ -299,6 +302,9 @@ func (c *collector) walkTree(root gitpack.SHA, seen map[gitpack.SHA]struct{}, ad
 		})
 		if err != nil {
 			return err
+		}
+		if c.tracked() {
+			return ErrTooLarge
 		}
 	}
 	return nil
