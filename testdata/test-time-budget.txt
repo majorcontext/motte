@@ -9,6 +9,9 @@ leaf 10
 package default 10
 
 
-# The limit tests move 16 MiB objects and a 5 MiB tree through JSON under the race
-# detector; each test stays under the leaf budget, and the package takes 17 s on two CPUs.
-package internal/server 20
+# The limit tests move a 16 MiB object, a 16 MiB + 1 body and a 5 MiB tree through
+# JSON under the race detector, at the real limits of the service.
+package internal/server 30
+test internal/server TestLargestObjectIsStored 15
+test internal/server TestLargeTreeIsRead 15
+test internal/server TestBodyOverTheLimitAnswersTooLarge 15

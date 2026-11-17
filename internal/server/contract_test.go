@@ -350,7 +350,6 @@ func TestGrantWithoutTheBearerSchemeIsRefused(t *testing.T) {
 }
 
 func TestBodyOverTheLimitAnswersTooLarge(t *testing.T) {
-	t.Parallel()
 	e := newEnv(t)
 	e.want(e.claim("ws1", 1, repoText), 200, "")
 	r := e.call("POST", "/v1/vcs/objects/has", e.readGrant(repoText), map[string]any{"shas": []string{strings.Repeat("a", 1<<20)}})
@@ -391,7 +390,6 @@ func TestUnknownRouteAndMethodUseTheErrorEnvelope(t *testing.T) {
 }
 
 func TestLargestObjectIsStored(t *testing.T) {
-	t.Parallel()
 	e := newEnv(t)
 	e.want(e.claim("ws1", 1, repoText), 200, "")
 	node := e.Client(e.nodeGrant("ws1", 1), client.WithBudget(30*time.Second))
@@ -401,7 +399,6 @@ func TestLargestObjectIsStored(t *testing.T) {
 }
 
 func TestLargeTreeIsRead(t *testing.T) {
-	t.Parallel()
 	e := newEnv(t)
 	e.want(e.claim("ws1", 1, repoText), 200, "")
 	ctx := context.Background()
@@ -420,7 +417,6 @@ func TestLargeTreeIsRead(t *testing.T) {
 }
 
 func TestObjectsBodyStartingWithAHugeTokenAnswersTooLarge(t *testing.T) {
-	t.Parallel()
 	e := newEnv(t)
 	e.want(e.claim("ws1", 1, repoText), 200, "")
 	req, _ := http.NewRequest("POST", e.url+"/v1/vcs/objects", strings.NewReader(`"`+strings.Repeat("a", 25<<20)+`"`))
