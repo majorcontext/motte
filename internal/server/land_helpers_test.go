@@ -161,8 +161,9 @@ func parentsOf(text string) []string {
 
 func eachBackend(t *testing.T, fn func(t *testing.T, l *landEnv)) {
 	t.Run("sqlite", func(t *testing.T) {
+		t.Parallel()
 		ts := testserver.StartLocal(t)
 		fn(t, newLandEnv(t, &env{Server: ts, t: t, url: ts.URL, cp: ts.Operator, node: ts.Node}))
 	})
-	t.Run("postgres", func(t *testing.T) { fn(t, newLandEnv(t, newEnv(t))) })
+	t.Run("postgres", func(t *testing.T) { t.Parallel(); fn(t, newLandEnv(t, newEnv(t))) })
 }

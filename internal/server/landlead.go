@@ -58,7 +58,17 @@ func (s *Server) leadingHere(key meta.LandKey) bool {
 	return ok && l.holding.Load()
 }
 
-// stopLead unregisters l unless a kick came in since the last claim.
+// dropLead unregisters l at a terminal exit. A pending wake is dropped with it: the next poll of a waiting request
+// starts a new leader.
+func (s *Server) dropLead(key meta.LandKey, l *leader) {
+	s.landing.mu.Lock()
+	defer s.landing.mu.Unlock()
+	if s.landing.leaders[key] == l {
+		delete(s.landing.leaders, key)
+	}
+}
+
+// stopLead unregisters a kick came in since the last claim.
 func (s *Server) stopLead(key meta.LandKey, l *leader) bool {
 	s.landing.mu.Lock()
 	defer s.landing.mu.Unlock()
@@ -82,7 +92,7 @@ func (s *Server) lead(key meta.LandKey, l *leader) {
 			if !errors.Is(err, meta.ErrLeaseHeld) {
 				s.logger.ErrorContext(ctx, "land claim failed", "error", logSafe(err))
 			}
-			s.stopLead(key, l)
+			s.dropLead(key, l)
 			return
 		}
 		if len(items) == 0 {
@@ -102,7 +112,7 @@ func (s *Server) lead(key meta.LandKey, l *leader) {
 		err = s.landBatch(ctx, key, owner, items)
 		switch {
 		case errors.Is(err, errLeaseLost):
-			s.stopLead(key, l)
+			s.dropLead(key, l)
 			return
 		case err != nil && fails+1 >= landFailures:
 			s.failLands(ctx, key, owner, items)
@@ -141,6 +151,7 @@ func (s *Server) failLands(ctx context.Context, key meta.LandKey, owner string, 
 	}
 	if err := s.index.FinishLands(ctx, key.Repo, key.Ref, owner, s.events.Clock.Now(), done); err != nil {
 		s.logger.ErrorContext(ctx, "land failure not recorded", "error", logSafe(err))
+		return
 	}
 	for _, it := range items {
 		s.tellLand(landWaiter{key.Repo, it.ID}, landOutcome{Code: api.CodeInternal, Message: "the land failed: ask again with a new id"})
@@ -304,8 +315,9 @@ func (b *batchRun) land(ctx context.Context, batch *land.Batch, it meta.LandItem
 		resp.Commits = append(resp.Commits, api.LandedCommit{Old: c.Old.String(), New: c.New.String()})
 	}
 	if l.Noop {
+		moved := batch.Tip().String() != ref.Commit
 		resp.Generation = ref.Generation
-		b.end(it, landOutcome{Land: resp}, false)
+		b.end(it, landOutcome{Land: resp}, moved)
 		return nil
 	}
 	paths := l.Paths

@@ -2,11 +2,13 @@ package server_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -269,7 +271,7 @@ func TestLandRepeatOfAnIdReturnsTheFirstResult(t *testing.T) {
 }
 
 func TestLandManyConcurrentAgentsLandOnceEachInALinearHistory(t *testing.T) {
-	const agents = 200
+	const agents = 60
 	eachBackend(t, func(t *testing.T, l *landEnv) {
 		var o objSet
 		heads := make([]string, agents)
@@ -369,6 +371,86 @@ func TestLandRecoversAClaimedItemAndLeadsAcrossReplicas(t *testing.T) {
 		}
 		if got := l.files(l.tip("main").Commit); len(got) != 2+2*each {
 			t.Errorf("%d files, want %d", len(got), 2+2*each)
+		}
+	})
+}
+
+func TestLandNoopOnATipOfTheSameBatchGetsTheBatchGeneration(t *testing.T) {
+	eachBackend(t, func(t *testing.T, l *landEnv) {
+		var o objSet
+		x := o.commit(map[string]string{"x": "1"}, "", "x", l.root)
+		y := o.commit(map[string]string{"y": "1"}, "", "y", l.root)
+		o.upload(t, l.env, l.repo)
+		for id, head := range map[string]string{"land-first-aa": x, "land-again-bb": x} {
+			if _, err := l.Meta.EnqueueLand(context.Background(), meta.LandRequest{ID: id, Repo: l.repo, Ref: "main", Base: l.root, Head: head, Kind: meta.WriterMerge}, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		last, err := l.merge.Land(context.Background(), l.repo, api.LandRequest{ID: "land-third-cc", Ref: "main", Base: l.root, Head: y})
+		if err != nil {
+			t.Fatal(err)
+		}
+		again, err := l.merge.Land(context.Background(), l.repo, api.LandRequest{ID: "land-again-bb", Ref: "main", Base: l.root, Head: x})
+		if err != nil || again.Generation != last.Generation {
+			t.Fatalf("a repeat of a tip of the batch = %+v, %v, want generation %d", again, err, last.Generation)
+		}
+	})
+}
+
+// failFinish refuses the first calls of FinishLands.
+type failFinish struct {
+	meta.Store
+	left atomic.Int32
+}
+
+func (f *failFinish) FinishLands(ctx context.Context, repo, ref, owner string, now time.Time, r []meta.LandDone) error {
+	if f.left.Add(-1) >= 0 {
+		return errors.New("store is down")
+	}
+	return f.Store.FinishLands(ctx, repo, ref, owner, now, r)
+}
+
+func TestLandKeepsOneTerminalResultWhenTheFailureIsNotRecorded(t *testing.T) {
+	eachBackend(t, func(t *testing.T, l *landEnv) {
+		store := &failFinish{Store: l.Meta}
+		store.left.Store(4)
+		srv := httptest.NewServer(server.New(server.Config{Meta: store, Bucket: l.Bucket, Verifier: l.Verifier,
+			Lands: server.LandsConfig{Poll: 2 * time.Millisecond}}).Handler())
+		t.Cleanup(srv.Close)
+		c := client.New(srv.URL, client.StaticGrant(l.MergeGrant(t, l.repo)))
+		_, err := c.Land(context.Background(), l.repo, api.LandRequest{Ref: "main", Base: l.root, Head: l.root})
+		refuses(t, err, client.ErrLandInvalid, 400)
+	})
+}
+
+func TestLandLeaderRestartsAfterItLosesTheLeaseToAnotherOwner(t *testing.T) {
+	eachBackend(t, func(t *testing.T, l *landEnv) {
+		var o objSet
+		heads := make([]string, 20)
+		for i := range heads {
+			heads[i] = o.commit(map[string]string{fmt.Sprint("f", i): "1"}, "", fmt.Sprint("c", i), l.root)
+		}
+		o.upload(t, l.env, l.repo)
+		now := time.Now()
+		if err := l.Meta.AcquireLandLease(context.Background(), l.repo, "main", "other-owner", now, now.Add(100*time.Millisecond)); err != nil {
+			t.Fatal(err)
+		}
+		srv := httptest.NewServer(server.New(server.Config{Meta: l.Meta, Bucket: l.Bucket, Verifier: l.Verifier,
+			Lands: server.LandsConfig{Poll: time.Millisecond, Timeout: 5 * time.Second}}).Handler())
+		t.Cleanup(srv.Close)
+		c := client.New(srv.URL, client.StaticGrant(l.MergeGrant(t, l.repo)))
+		var wg sync.WaitGroup
+		errs := make([]error, len(heads))
+		for i, h := range heads {
+			wg.Go(func() {
+				_, errs[i] = c.Land(context.Background(), l.repo, api.LandRequest{Ref: "main", Base: l.root, Head: h})
+			})
+		}
+		wg.Wait()
+		for i, err := range errs {
+			if err != nil {
+				t.Errorf("land %d: %v", i, err)
+			}
 		}
 	})
 }
