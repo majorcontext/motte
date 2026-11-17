@@ -67,7 +67,10 @@ func (s *Server) Handler() http.Handler {
 }
 
 func bearerToken(r *http.Request) string {
-	tok, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok {
+		return ""
+	}
 	return tok
 }
 

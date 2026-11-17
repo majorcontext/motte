@@ -380,6 +380,7 @@ func TestGrantScopeRefusals(t *testing.T) {
 		{"read grant claims", "PUT", "/v1/workspaces/ws1/claim", read, map[string]any{}, 401, "unauthorized"},
 		{"node key signs an operator grant", "GET", "/v1/repos", nodeKeyOperator, nil, 401, "unauthorized"},
 		{"expired grant", "GET", "/v1/vcs/refs", expired, nil, 401, "unauthorized"},
+		{"grant without the Bearer scheme", "GET", "/v1/vcs/refs", "", nil, 401, "unauthorized"},
 		{"no grant", "GET", "/v1/vcs/refs", "", nil, 401, "unauthorized"},
 		{"node grant of another repo", "GET", "/v1/vcs/refs", nodeOther, nil, 403, "vcs_repo_forbidden"},
 		{"node grant of the control key is valid", "GET", "/v1/vcs/refs", cpNode, nil, 200, ""},
