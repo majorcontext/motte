@@ -45,12 +45,16 @@ type collector struct {
 	queue   commitQueue
 	// live counts the queued commits that are not unint.
 	live int
-	skip map[gitpack.SHA]struct{}
-	sent map[gitpack.SHA]struct{}
-	out  []gitpack.SHA
+	// parentRefs counts the parent names that the parsed commits keep.
+	parentRefs int
+	skip       map[gitpack.SHA]struct{}
+	sent       map[gitpack.SHA]struct{}
+	out        []gitpack.SHA
 }
 
-func (c *collector) tracked() bool { return len(c.skip)+len(c.sent)+len(c.commits) > MaxTracked }
+func (c *collector) tracked() bool {
+	return len(c.skip)+len(c.sent)+len(c.commits)+c.parentRefs > MaxTracked
+}
 
 func parseCommit(sha gitpack.SHA, data []byte) (*commitNode, bool) {
 	n := &commitNode{sha: sha}
@@ -108,6 +112,9 @@ func (c *collector) adopt(sha gitpack.SHA, data []byte) (*commitNode, error) {
 		return nil, errNotCommit
 	}
 	c.commits[sha] = n
+	if c.parentRefs += len(n.parents); c.tracked() {
+		return nil, ErrTooLarge
+	}
 	return n, nil
 }
 

@@ -32,6 +32,8 @@ func pushCost(n int64) int64 {
 	return n + 3*gitpack.MaxUnpackBytes + 4*gitpack.MaxObjectBytes + gitpack.VerifyWorkBytes
 }
 
+var errProtocolV2 = gitproto.RequestError("protocol v2 is required: use git 2.26 or later")
+
 func (s *Server) registerGit(mux *http.ServeMux) {
 	scopes := []grant.Scope{grant.ScopeRead, grant.ScopeWrite}
 	s.register(mux, "GET /git/{path...}", s.gitInfoRefs, scopes, gitToken, gitChallenge)
@@ -123,7 +125,7 @@ func (s *Server) gitInfoRefs(w http.ResponseWriter, r *http.Request, c call) err
 	switch r.URL.Query().Get("service") {
 	case "git-upload-pack":
 		if protocolVersion(r) != "2" {
-			return gitproto.RequestError("protocol v2 is required: use git 2.26 or later")
+			return errProtocolV2
 		}
 		gitHeaders(w, "application/x-git-upload-pack-advertisement")
 		return gitproto.AdvertiseUpload(w)
@@ -201,6 +203,9 @@ func (s *Server) abortAfterHeaders(w http.ResponseWriter, r *http.Request, err e
 }
 
 func (s *Server) uploadPack(w http.ResponseWriter, r *http.Request, c call) error {
+	if protocolVersion(r) != "2" {
+		return errProtocolV2
+	}
 	body, release, err := s.gitBody(w, r, fetchBodyMax, func(int64) int64 { return fetchReserve })
 	if err != nil {
 		return err

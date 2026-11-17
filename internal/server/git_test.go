@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"bytes"
+	"compress/zlib"
 	"context"
 	"crypto/sha1"
 	"crypto/sha256"
@@ -121,19 +122,44 @@ func TestGitPushRules(t *testing.T) {
 		t.Errorf("deleted branch is listed: %q", got)
 	}
 	line := fmt.Sprintf("%s %s refs/heads/main\x00report-status\n", strings.Repeat("1", 40), head)
-	sum := sha1.Sum([]byte("PACK\x00\x00\x00\x02\x00\x00\x00\x00"))
-	body := fmt.Sprintf("%04x%s0000PACK\x00\x00\x00\x02\x00\x00\x00\x00%s", len(line)+4, line, sum[:])
-	req, _ := http.NewRequest("POST", g.remote(g.path, write)+"/git-receive-pack", strings.NewReader(body))
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
+	if reply := g.rawPush(write, line, emptyPack()); !strings.Contains(reply, "ng refs/heads/main stale info") {
+		t.Errorf("stale old value reply = %q", reply)
 	}
+	thin := fmt.Sprintf("%s %s refs/heads/thin\x00report-status\n", strings.Repeat("0", 40), head)
+	reply := g.rawPush(write, thin, thinPackOnAbsentBase())
+	if !strings.Contains(reply, "unpack invalid pack") || !strings.Contains(reply, "ng refs/heads/thin unpacker error") {
+		t.Errorf("thin pack on an absent base reply = %q", reply)
+	}
+}
+
+func emptyPack() string {
+	head := "PACK\x00\x00\x00\x02\x00\x00\x00\x00"
+	sum := sha1.Sum([]byte(head))
+	return head + string(sum[:])
+}
+
+// thinPackOnAbsentBase is a pack of one ref delta on a base that no repository holds.
+func thinPackOnAbsentBase() string {
+	var z bytes.Buffer
+	zw := zlib.NewWriter(&z)
+	_, _ = zw.Write([]byte{5, 3, 3, 'a', 'b', 'c'})
+	_ = zw.Close()
+	head := "PACK\x00\x00\x00\x02\x00\x00\x00\x01" + string([]byte{0x76}) + strings.Repeat("\x09", 20) + z.String()
+	sum := sha1.Sum([]byte(head))
+	return head + string(sum[:])
+}
+
+func (g *gitEnv) rawPush(token, command, pack string) string {
+	g.t.Helper()
+	body := fmt.Sprintf("%04x%s0000%s", len(command)+4, command, pack)
+	resp, err := http.Post(g.remote(g.path, token)+"/git-receive-pack", "application/x-git-receive-pack-request", strings.NewReader(body))
+	if err != nil {
+		g.t.Fatal(err)
+	}
+	defer resp.Body.Close()
 	var reply bytes.Buffer
 	_, _ = reply.ReadFrom(resp.Body)
-	resp.Body.Close()
-	if !strings.Contains(reply.String(), "ng refs/heads/main stale info") {
-		t.Errorf("stale old value reply = %q", reply.String())
-	}
+	return reply.String()
 }
 
 func TestGitAuthorization(t *testing.T) {
@@ -146,6 +172,13 @@ func TestGitAuthorization(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 401 || !strings.HasPrefix(resp.Header.Get("WWW-Authenticate"), "Basic") {
 		t.Errorf("no grant: %d %q, want 401 with a Basic challenge", resp.StatusCode, resp.Header.Get("WWW-Authenticate"))
+	}
+	post, err := http.NewRequest("POST", g.remote(g.path, g.readGrant(g.text))+"/git-upload-pack", strings.NewReader("0014command=ls-refs\n00010000"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp, err := http.DefaultClient.Do(post); err != nil || resp.StatusCode != 400 {
+		t.Errorf("upload-pack without protocol v2: %v, %v, want 400", resp, err)
 	}
 	scratch := t.TempDir()
 	g.git(scratch, false, "clone", "-q", g.url+"/git/native/"+g.path+".git", filepath.Join(scratch, "x"))

@@ -221,7 +221,7 @@ func (s *Service) ReceivePack(ctx context.Context, repo Repo, pack []byte) error
 	}
 	objs, err := gitpack.Unpack(ctx, pack, func(sha gitpack.SHA) (gitpack.Type, []byte, error) { return v.get(ctx, sha) })
 	switch {
-	case errors.Is(err, gitpack.ErrCorrupt):
+	case errors.Is(err, gitpack.ErrCorrupt), errors.Is(err, ErrNotFound):
 		return ErrInvalid
 	case errors.Is(err, gitpack.ErrTooLarge):
 		return ErrTooLarge
