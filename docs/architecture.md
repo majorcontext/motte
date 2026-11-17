@@ -49,9 +49,23 @@ The service applies its embedded migrations at start, under a PostgreSQL advisor
 
 - An object has at most 16 MiB (`gitpack.MaxObjectBytes`). A put of a larger object, and a read of a larger object in an imported pack, answer 413 `vcs_object_too_large`. A caller must not store a file above 16 MiB.
 - The service reads a request body completely before it takes memory for the request. A body above its route limit answers 413 `vcs_object_too_large`, whatever its content. The limits are 1 MiB for a JSON route, 8 MiB of base64 data plus 1 KiB for `PUT /v1/vcs/ops/{kind}/{id}` (the data limit is 8 MiB before encoding), and 96 MiB plus 4 KiB for `POST /v1/vcs/objects` and `PUT /v1/vcs/packs/{pack_id}`. The upload routes allow 2 minutes to read the body.
-- At most 4 upload bodies are read or wait for a reservation at one time. An upload takes one of the 4 reader slots before it reads the first byte and gives it back after it reserves memory, so a fifth upload waits. A read request takes no reader slot, so a slow upload never blocks a read. Memory for bodies is at most 4 times 96 MiB plus the 320 MiB budget, and the pack cache adds up to 256 MiB.
+- At most 4 upload bodies are read or wait for a reservation at one time. An upload takes one of the 4 reader slots before it reads the first byte and gives it back after it reserves memory, so a fifth upload waits. A read request takes no reader slot, so a slow upload never blocks a read.
+- A tree object has at most 2 MiB. A read of a larger tree answers 413 `vcs_object_too_large`. A bulk tree read stops adding trees once it holds 2 MiB of tree data.
 - A put has at most 100000 objects and 64 MiB of object data. A blob batch or a `has` call names at most 4096 SHAs, and a blob batch returns at most 16 MiB.
-- The service keeps a memory budget of 320 MiB for requests at work. A read request reserves 16 MiB. A request with a body reserves the length of the body. A pack import reserves the length of the body, 3/4 of it again for the decoded pack and index, and 96 MiB for pack verification (32 MiB of cached bases plus the objects of one delta step), at most 264 MiB. Apart from the reader slots, the budget is the only limit on concurrency: no request excludes the others, and a slow sender holds no reservation because the body is read before the reservation.
+- The service keeps a memory budget of 512 MiB for requests at work. A request reserves the peak of its live buffers before it allocates them, and waits while the budget is spent. A reservation never exceeds the budget. Apart from the reader slots, the budget is the only limit on concurrency: no request excludes the others, and a slow sender holds no reservation because the body is read before the reservation. B is the length of the body. The peak of each route comes from its code path:
+
+| Route | Reservation | At the largest request |
+|---|---|---|
+| `POST /v1/vcs/objects` | B, the decoded objects (3B/4), the pack body and the pack (each 3B/4 plus 2 percent), and 80 MiB for the decoder: B + 2.5B + 80 MiB | 416 MiB |
+| `PUT /v1/vcs/packs/{pack_id}` | the body, the two base64 strings, the decoded pack and index, and pack verification: 3B + 96 MiB | 384 MiB |
+| `PUT /v1/vcs/ops/{kind}/{id}` | the body, the Data string and the decoded op: 3B | 32 MiB |
+| `GET /v1/vcs/objects/{sha}`, `POST /v1/vcs/blobs/batch` | 16 MiB of data, its base64 text and an encoder buffer that doubled once: 80 MiB | 80 MiB |
+| `GET /v1/vcs/trees/{sha}` | 4 MiB of tree data at 8 bytes for each byte in views and JSON, 16 MiB of slack: 48 MiB | 48 MiB |
+| `GET /v1/vcs/commits/{sha}` | a delta, its base and its result, 3 objects: 48 MiB | 48 MiB |
+| `GET /v1/vcs/ops/{kind}/{id}` | 8 MiB of data, its base64 text and the encoder buffer: 40 MiB | 40 MiB |
+| `POST /v1/vcs/objects/has` | 1 MiB | 1 MiB |
+
+  `POST /v1/vcs/objects` reads its JSON through a decoder that refuses 24 MiB of unparsed text, so one element cannot grow the buffer: it answers 413 `vcs_object_too_large`. The memory of the process is at most 4 times 96 MiB for bodies in the reader slots, plus the 512 MiB budget, plus the 256 MiB pack cache: 1152 MiB. The chart default request is 1536Mi.
 - A lookup of a SHA reads the pack indexes of the repository, newest pack first, and a SHA that no pack holds reads every index. The cost grows linearly with the number of packs of a repository. The service accepts this cost: it never compacts packs.
 
 ### Store plane
@@ -268,7 +282,7 @@ Package `testserver` runs the real server in the process of a test, on a fresh s
 
 `charts/motte` installs a `Deployment` (2 replicas by default), a `ServiceAccount` and a `Service`. The pod runs as non-root with a read-only root file system. The probes use `/health` and `/ready`, and `/metrics` is on the service port. Values set:
 
-- The image (digest or tag), `replicas`, `resources` (default request 1Gi of memory, which covers the bound in Limits and memory), node selector, tolerations and affinity.
+- The image (digest or tag), `replicas`, `resources` (default request 1536Mi of memory, which covers the bound in Limits and memory), node selector, tolerations and affinity.
 - `serviceAccount.create` (default `true`), `serviceAccount.name` and `serviceAccount.annotations`, for workload identity. With `create` false the chart makes no `ServiceAccount` and the pod uses the account that `serviceAccount.name` names, or the release name when it is empty.
 - `listenPort` (default 8080), the container port. It sets `MOTTE_LISTEN`.
 - `prometheusAnnotations` (default `true`), which adds the `prometheus.io` scrape annotations for `/metrics`, and `podAnnotations`, more annotations for the pod.

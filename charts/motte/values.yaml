@@ -59,7 +59,7 @@ prometheusAnnotations: true
 resources:
   requests:
     cpu: 100m
-    memory: 1Gi
+    memory: 1536Mi
 
 nodeSelector: {}
 tolerations: []

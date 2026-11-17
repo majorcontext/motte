@@ -100,7 +100,7 @@ func refName(r *http.Request) (string, error) {
 }
 
 func (s *Server) getCommit(w http.ResponseWriter, r *http.Request, c call) error {
-	release, err := s.reserve(r, store.ReadReserve)
+	release, err := s.reserve(r, reserveCommit)
 	if err != nil {
 		return err
 	}
@@ -118,7 +118,7 @@ func (s *Server) getCommit(w http.ResponseWriter, r *http.Request, c call) error
 }
 
 func (s *Server) getTrees(w http.ResponseWriter, r *http.Request, c call) error {
-	release, err := s.reserve(r, store.ReadReserve)
+	release, err := s.reserve(r, reserveTrees)
 	if err != nil {
 		return err
 	}
@@ -154,7 +154,7 @@ func (s *Server) getBlobs(w http.ResponseWriter, r *http.Request, c call) error 
 	if err := decodeBody(w, r, smallBodyMax, &req); err != nil {
 		return err
 	}
-	release, err := s.reserve(r, store.ReadReserve)
+	release, err := s.reserve(r, reserveObject)
 	if err != nil {
 		return err
 	}
@@ -180,7 +180,7 @@ func (s *Server) hasObjects(w http.ResponseWriter, r *http.Request, c call) erro
 	if err := decodeBody(w, r, smallBodyMax, &req); err != nil {
 		return err
 	}
-	release, err := s.reserve(r, store.ReadReserve)
+	release, err := s.reserve(r, reserveHas)
 	if err != nil {
 		return err
 	}
@@ -197,10 +197,36 @@ func (s *Server) hasObjects(w http.ResponseWriter, r *http.Request, c call) erro
 	return nil
 }
 
+// aheadReader hands the decoder short reads and fails with store.ErrTooLarge when the decoder holds more than
+// decodeWindow bytes of unparsed text, so one huge element cannot grow its buffer.
+type aheadReader struct {
+	r   io.Reader
+	dec *json.Decoder
+	n   int64
+}
+
+func (a *aheadReader) Read(p []byte) (int, error) {
+	n, err := a.r.Read(p[:min(len(p), 64<<10)])
+	a.n += int64(n)
+	if a.n-a.dec.InputOffset() > decodeWindow {
+		return n, store.ErrTooLarge
+	}
+	return n, err
+}
+
+func decodeFailure(err error) error {
+	if errors.Is(err, store.ErrTooLarge) {
+		return store.ErrTooLarge
+	}
+	return store.ErrInvalid
+}
+
 // decodeObjects reads {"objects":[...]} one object at a time, so a body full
 // of empty objects is refused at the object limit before it is decoded.
 func decodeObjects(body []byte) ([]gitpack.Object, error) {
-	dec := json.NewDecoder(bytes.NewReader(body))
+	ahead := &aheadReader{r: bytes.NewReader(body)}
+	dec := json.NewDecoder(ahead)
+	ahead.dec = dec
 	var objs []gitpack.Object
 	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
 		return nil, store.ErrInvalid
@@ -208,12 +234,12 @@ func decodeObjects(body []byte) ([]gitpack.Object, error) {
 	for dec.More() {
 		key, err := dec.Token()
 		if err != nil {
-			return nil, store.ErrInvalid
+			return nil, decodeFailure(err)
 		}
 		if key != "objects" {
 			var skip json.RawMessage
 			if err := dec.Decode(&skip); err != nil {
-				return nil, store.ErrInvalid
+				return nil, decodeFailure(err)
 			}
 			continue
 		}
@@ -226,7 +252,7 @@ func decodeObjects(body []byte) ([]gitpack.Object, error) {
 			}
 			var o api.Object
 			if err := dec.Decode(&o); err != nil {
-				return nil, store.ErrInvalid
+				return nil, decodeFailure(err)
 			}
 			data, err := unb64(o.Data)
 			if err != nil {
@@ -248,7 +274,7 @@ func decodeObjects(body []byte) ([]gitpack.Object, error) {
 }
 
 func (s *Server) putObjects(w http.ResponseWriter, r *http.Request, c call) error {
-	body, release, err := s.receive(w, r, packBodyMax, bodyLength)
+	body, release, err := s.receive(w, r, packBodyMax, objectsCost)
 	if err != nil {
 		return err
 	}
@@ -270,7 +296,7 @@ func (s *Server) putObjects(w http.ResponseWriter, r *http.Request, c call) erro
 }
 
 func (s *Server) getObject(w http.ResponseWriter, r *http.Request, c call) error {
-	release, err := s.reserve(r, store.ReadReserve)
+	release, err := s.reserve(r, reserveObject)
 	if err != nil {
 		return err
 	}
@@ -313,7 +339,7 @@ func (s *Server) importPack(w http.ResponseWriter, r *http.Request, c call) erro
 }
 
 func (s *Server) getOp(w http.ResponseWriter, r *http.Request, c call) error {
-	release, err := s.reserve(r, store.ReadReserve)
+	release, err := s.reserve(r, reserveOp)
 	if err != nil {
 		return err
 	}
@@ -327,7 +353,7 @@ func (s *Server) getOp(w http.ResponseWriter, r *http.Request, c call) error {
 }
 
 func (s *Server) putOp(w http.ResponseWriter, r *http.Request, c call) error {
-	body, release, err := s.receive(w, r, opBodyMax, bodyLength)
+	body, release, err := s.receive(w, r, opBodyMax, opCost)
 	if err != nil {
 		return err
 	}

@@ -40,15 +40,14 @@ const (
 	// MaxBlobBatchBytes bounds the blobs that one batch read returns.
 	MaxBlobBatchBytes = 16 << 20
 	// MaxBatch bounds the objects of one put.
-	MaxBatch     = 100000
-	maxTreeBytes = gitpack.MaxObjectBytes
+	MaxBatch = 100000
+	// MaxTreeBytes bounds one tree object, and the tree bytes that one bulk read returns before it stops.
+	MaxTreeBytes = 2 << 20
 	maxOpenBytes = 256 << 20
 	blockSize    = 256 << 10
 	maxBlocks    = 4
 	// MemoryBudget is the bytes that requests may hold while they work, apart from the bodies that are still being read.
-	MemoryBudget = 320 << 20
-	// ReadReserve is the bytes that a read request reserves: one object at its limit.
-	ReadReserve  = gitpack.MaxObjectBytes
+	MemoryBudget = 512 << 20
 	blockTimeout = 30 * time.Second
 )
 
@@ -559,17 +558,21 @@ func (s *Service) TreeBulk(ctx context.Context, repo Repo, sha gitpack.SHA, maxE
 	}
 	var out []Tree
 	queue := []gitpack.SHA{sha}
-	total := 0
-	for len(queue) > 0 && (len(out) == 0 || total < maxEntries) {
+	total, bytesRead := 0, 0
+	for len(queue) > 0 && (len(out) == 0 || total < maxEntries && bytesRead < MaxTreeBytes) {
 		cur := queue[0]
 		queue = queue[1:]
 		t, d, err := v.get(ctx, cur)
 		if err != nil {
 			return nil, err
 		}
-		if t != gitpack.Tree || len(d) > maxTreeBytes {
+		if t != gitpack.Tree {
 			return nil, ErrInvalid
 		}
+		if len(d) > MaxTreeBytes {
+			return nil, ErrTooLarge
+		}
+		bytesRead += len(d)
 		tree, err := v.parseTree(ctx, cur, d)
 		if err != nil {
 			return nil, err

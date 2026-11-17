@@ -14,6 +14,16 @@ type Object struct {
 	Data []byte
 }
 
+// BuildSize bounds the bytes of the pack body of objs: zlib stores an incompressible object with 5 bytes of overhead
+// for each 64 KiB block, and each object adds a header and a zlib frame of at most 32 bytes.
+func BuildSize(objs []Object) int {
+	n := 1024
+	for _, o := range objs {
+		n += len(o.Data) + len(o.Data)/64 + 32
+	}
+	return n
+}
+
 // Build writes objects as a pack without deltas, and its v2 index. The
 // returned names are the object names in the order of objs. An object that
 // repeats an earlier one is stored once.
@@ -24,6 +34,7 @@ func Build(objs []Object) (pack, idx []byte, names []SHA) {
 		off  uint32
 	}
 	var body bytes.Buffer
+	body.Grow(BuildSize(objs))
 	var entries []entry
 	seen := map[SHA]bool{}
 	names = make([]SHA, len(objs))
@@ -50,6 +61,7 @@ func Build(objs []Object) (pack, idx []byte, names []SHA) {
 		entries = append(entries, entry{name: names[i], crc: crc32.ChecksumIEEE(body.Bytes()[start:]), off: uint32(12 + start)})
 	}
 	var p bytes.Buffer
+	p.Grow(12 + body.Len() + 20)
 	p.WriteString("PACK")
 	_ = binary.Write(&p, binary.BigEndian, uint32(2))
 	_ = binary.Write(&p, binary.BigEndian, uint32(len(entries)))

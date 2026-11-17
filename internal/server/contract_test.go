@@ -353,7 +353,7 @@ func TestBodyOverTheLimitAnswersTooLarge(t *testing.T) {
 	e.want(e.claim("ws1", 1, repoText), 200, "")
 	r := e.call("POST", "/v1/vcs/objects/has", e.readGrant(repoText), map[string]any{"shas": []string{strings.Repeat("a", 1<<20)}})
 	e.want(r, 413, "vcs_object_too_large")
-	_, err := e.Client(e.nodeGrant("ws1", 1)).PutObjects(context.Background(), []client.Object{{Type: "blob", Data: make([]byte, gitpack.MaxObjectBytes+1)}})
+	_, err := e.Client(e.nodeGrant("ws1", 1), client.WithBudget(30*time.Second)).PutObjects(context.Background(), []client.Object{{Type: "blob", Data: make([]byte, gitpack.MaxObjectBytes+1)}})
 	refuses(t, err, client.ErrObjectTooLarge, 413)
 }
 
@@ -386,4 +386,20 @@ func TestUnknownRouteAndMethodUseTheErrorEnvelope(t *testing.T) {
 	e := newEnv(t)
 	e.want(e.call("GET", "/v1/nothing", e.operator(), nil), 404, "vcs_not_found")
 	e.want(e.call("DELETE", "/v1/repos", e.operator(), nil), 405, "method_not_allowed")
+}
+
+func TestLargestObjectIsStoredAndOversizeTreeIsRefusedOnRead(t *testing.T) {
+	e := newEnv(t)
+	e.want(e.claim("ws1", 1, repoText), 200, "")
+	ctx := context.Background()
+	node := e.Client(e.nodeGrant("ws1", 1), client.WithBudget(30*time.Second))
+	if _, err := node.PutObjects(ctx, []client.Object{{Type: "blob", Data: make([]byte, gitpack.MaxObjectBytes)}}); err != nil {
+		t.Fatalf("object at the limit: %v", err)
+	}
+	shas, err := node.PutObjects(ctx, []client.Object{{Type: "tree", Data: make([]byte, 3<<20)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = e.Client(e.readGrant(repoText)).Trees(ctx, shas[0], 0)
+	refuses(t, err, client.ErrObjectTooLarge, 413)
 }
