@@ -72,7 +72,7 @@ func run(t testing.TB, store meta.Store) *Server {
 	srv := server.New(server.Config{
 		Meta: store, Bucket: root.Bucket("motte"),
 		Verifier: grant.NewVerifier(
-			grant.Key{Kid: "cp", Public: cpPub, Scopes: []grant.Scope{grant.ScopeNode, grant.ScopeRead, grant.ScopeWrite, grant.ScopeImport, grant.ScopeOperator}},
+			grant.Key{Kid: "cp", Public: cpPub, Scopes: []grant.Scope{grant.ScopeNode, grant.ScopeRead, grant.ScopeWrite, grant.ScopeImport, grant.ScopeOperator, grant.ScopeMerge}},
 			grant.Key{Kid: "node", Public: nodePub, Scopes: []grant.Scope{grant.ScopeNode}}),
 	})
 	ts := httptest.NewServer(srv.Handler())
@@ -124,6 +124,12 @@ func (s *Server) WriteGrant(t testing.TB, repo string) string {
 func (s *Server) ImportGrant(t testing.TB, repo string) string {
 	t.Helper()
 	return s.Mint(t, s.Operator, grant.Claims{Scope: grant.ScopeImport, Repo: repo})
+}
+
+// MergeGrant mints a merge grant.
+func (s *Server) MergeGrant(t testing.TB, repo string) string {
+	t.Helper()
+	return s.Mint(t, s.Operator, grant.Claims{Scope: grant.ScopeMerge, Repo: repo})
 }
 
 // Client returns a client that sends token on every call.

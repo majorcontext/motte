@@ -9,6 +9,7 @@ Goal: motte stores the repositories of coding agents and the state of their virt
 Non-goals:
 
 - No git dumb HTTP, web UI, review or pull-request model, access lists, or users.
+- No policy about review or merging. The store keeps protected ref patterns and ref events, and the caller decides what they mean.
 - No multi-region store. One store serves all callers.
 - No compaction or deletion of packs, and no purge of deleted workspaces.
 
@@ -89,17 +90,17 @@ A Go test starts the same composition with `testserver.StartLocal`, which needs 
 | `GET /v1/vcs/trees/{sha}` | `node`, `read` |
 | `GET /v1/vcs/objects/{sha}` | `node`, `read` |
 | `POST /v1/vcs/blobs/batch` | `node`, `read` |
-| `GET /v1/vcs/refs`, `GET /v1/vcs/refs/{name...}` | `node`, `read` |
+| `GET /v1/vcs/refs`, `GET /v1/vcs/refs/{name...}` | `node`, `read`, `merge` |
 | `POST /v1/vcs/objects/has` | `node`, `read`, `import` |
 | `POST /v1/vcs/objects` | `node` |
 | `PUT /v1/vcs/ops/{kind}/{id}` | `node` |
 | `GET /v1/vcs/ops/{kind}/{id}` | `node` |
 | `GET /v1/vcs/op-heads`, `PUT /v1/vcs/op-heads` | `node` |
 | `PUT /v1/vcs/workspace` | `node` |
-| `PUT /v1/vcs/refs/{name...}`, `DELETE /v1/vcs/refs/{name...}` | `node` |
+| `PUT /v1/vcs/refs/{name...}`, `DELETE /v1/vcs/refs/{name...}` | `node`, `merge` |
 | `PUT /v1/vcs/packs/{pack_id}` | `import` |
 
-A ref route serves any repository, whether or not it has a `repos` row.
+A ref route serves any repository, whether or not it has a `repos` row. See Protected refs for the ref write rules of the `node` and `merge` scopes.
 
 ### Git smart HTTP
 
@@ -132,6 +133,47 @@ Ordinary `git` clones, fetches and pushes a repository over HTTPS. The routes ne
 | `PUT /v1/workspaces/{id}/claim` with `{epoch, owner, repo}` returns `{epoch, op, snapshot}` | `operator` |
 | `POST /v1/workspaces/{id}/flush` with `{epoch, generation, prev, op, snapshot}` | `operator` |
 | `DELETE /v1/workspaces/{id}` | `operator` |
+| `PUT /v1/repos/{repo}/protected-refs` with `{patterns}` replaces the list and answers 200 with `{patterns}`. `GET` of the same path returns it. `{repo}` is the repository text, with `/` as `%2F`. | `operator` |
+| `GET /v1/events?after=<seq>&limit=<n>` returns `{events}` | `operator` |
+| `POST /v1/subscriptions` with `{url, secret, repo}` answers 201 with the subscription | `operator` |
+| `GET /v1/subscriptions` lists the subscriptions, oldest first | `operator` |
+| `DELETE /v1/subscriptions/{id}` answers 204 | `operator` |
+
+### Protected refs
+
+Policy about which ref is special belongs to the caller. The store keeps one list of protected ref patterns for each repository text, and it applies one rule. A pattern is a ref name, or a prefix that ends in `*`: `release/*` matches every ref that starts with `release/`, and `*` matches every ref. A list has at most 100 patterns. A new repository has an empty list, so `main` is not protected.
+
+- A ref write is a create, a swap or a delete on a `PUT` or `DELETE` of `/v1/vcs/refs/{name...}`. A single function of the server, `writeRefAs`, performs every ref write. Any other route that moves a ref must call it.
+- A `node` grant writes a ref under its epoch fence, as before. When the ref name matches a pattern of the repository of the grant, the write answers 403 `vcs_ref_protected` and changes nothing. The check runs before the write.
+- A `merge` grant writes any ref of its repository, protected or not, with no workspace. A merge write is a compare-and-swap on the ref generation: `PUT` with `{expect, commit}` where `expect` 0 creates the ref, and `DELETE` with `?expect=`. No epoch is read or checked. A lost swap answers 409 `vcs_generation_conflict` with the stored ref in `details.ref`, as for a `node` write. A `merge` grant also reads refs through the two `GET` ref routes.
+- `read`, `import` and `operator` grants move no ref.
+- Setting the list is not ordered with a ref write that has already passed its check. A write that starts after the `PUT` of the list returns sees the new list.
+- The list names no workspace and needs no `repos` row. The pattern text is checked with the ref name rule. The check of `{repo}` is the repository text rule.
+
+### Ref events
+
+Every create, swap and delete of a ref appends one event in the same unit as the ref write, including the `main` that repository creation writes. See Contract of meta.Store. An event has these fields:
+
+| Field | Meaning |
+|---|---|
+| `seq` | Positive and unique. Events are visible in `seq` order, so a consumer that keeps its last `seq` loses none. |
+| `repo`, `ref` | Repository text and ref name. |
+| `old`, `new` | Commit before and after. `old` is empty for a create and `new` is empty for a delete. |
+| `generation` | Generation of the ref after the write. For a delete, the generation that the ref had. |
+| `kind` | `node`, `merge` or `operator`: the scope of the grant that wrote the ref. The event never holds a grant. |
+| `time` | RFC 3339 time of the write, from the clock of the backend. |
+
+`GET /v1/events?after=N&limit=M` returns the events with `seq` above `N`, oldest first, up to `M`. `after` defaults to 0, and `limit` to 100 and is at most 1000. The route is for a consumer that was down. The main path is delivery to a subscription.
+
+Retention: the store keeps an event for `MOTTE_EVENT_RETENTION`, 14 days by default. A server removes older events every hour and keeps the highest removed `seq`. A read with `after` below that value answers 410 `vcs_events_pruned`, and the consumer must read the refs again. A subscription whose cursor falls below that value stops delivering and logs an error. The operator deletes it and creates it again.
+
+Delivery is push, at least once:
+
+- An operator registers a subscription with `POST /v1/subscriptions`: a receiver `url` (http or https, with a host and no user information, at most 2048 bytes), a `secret` of 16 to 256 bytes, and an optional `repo` filter. Its cursor starts at the newest event, so it gets no history. The store keeps the secret and never returns it.
+- Every server replica runs the delivery worker. A worker delivers a subscription only while it holds its lease. The lease is columns of the subscription row, taken by one conditional write. It is 30 seconds, and the holder renews it before each event and while it waits. A replica that crashes loses the lease when it expires, and another replica takes over from the stored cursor. All waits and lease times use the injected `internal/clock`.
+- The worker reads events above the cursor and sends them one at a time, in `seq` order. It skips an event that the `repo` filter excludes, and it moves the cursor past it. One request is `POST` of the JSON event to the `url`, with `Content-Type: application/json`. `X-Motte-Sequence` is the `seq`. `X-Motte-Signature` is `sha256=` and the lowercase hex HMAC-SHA256 of the exact request body under the secret. The request has a limit of 10 seconds, and the worker follows no redirect.
+- A 2xx answer acknowledges the event, and the worker then raises the stored cursor. Any other answer, or no answer, makes the worker send the same event again after a wait of 1 second, doubled after each attempt, up to 5 minutes. The worker sends no later event first. A crash between the answer and the cursor write repeats one event, so a receiver must treat a repeated `seq` as a repeat.
+- A log line of delivery names the subscription, the `seq`, the status and the type of an error. It never holds the URL, the secret or the body.
 
 ## Data model
 
@@ -364,7 +406,7 @@ Authorization happens at claim time. For a repository that the store keeps (it h
 
 The path prefix `/v1` is additive. New fields and new routes are allowed, and clients ignore unknown fields. A breaking change gets `/v2`, served beside `/v1`. The module is tagged with semantic versions.
 
-Wire error codes keep their `vcs_` text: `vcs_claim_lost`, `vcs_generation_conflict`, `vcs_not_found`, `vcs_object_invalid`, `vcs_object_too_large`, `vcs_repo_forbidden`, `vcs_workspace_conflict`, `vcs_workspace_deleted`. Three codes have no prefix: `unauthorized` (401), `invalid_body` (400) and `internal_error` (500). `method_not_allowed` (405) answers a method that its path does not serve. A panic in a handler is logged with its stack and answers 500 `internal_error` when the handler sent no status yet. The error body is `{"error":{"code","message","details"}}`. A conflict on a ref carries the stored ref in `details.ref`.
+Wire error codes keep their `vcs_` text: `vcs_claim_lost`, `vcs_events_pruned` (410), `vcs_generation_conflict`, `vcs_not_found`, `vcs_object_invalid`, `vcs_object_too_large`, `vcs_ref_protected` (403), `vcs_repo_forbidden`, `vcs_workspace_conflict`, `vcs_workspace_deleted`. Three codes have no prefix: `unauthorized` (401), `invalid_body` (400) and `internal_error` (500). `method_not_allowed` (405) answers a method that its path does not serve. A panic in a handler is logged with its stack and answers 500 `internal_error` when the handler sent no status yet. The error body is `{"error":{"code","message","details"}}`. A conflict on a ref carries the stored ref in `details.ref`.
 
 ## Client
 
@@ -373,10 +415,11 @@ Package `client` has one typed method for each route of both planes. A `Client` 
 - Each call has a time budget of 2 seconds, which `WithBudget` changes. A deadline on the call context that is earlier than the budget wins.
 - The client injects the W3C trace context of the call context into the request headers.
 - The client follows no redirect. A 3xx answer is the error `ErrRedirect`, and the grant goes to no other host.
-- A failure answer is an `*Error` with the HTTP status, the wire code, the message and the details. `errors.Is` matches the sentinel of the code: `ErrNotFound`, `ErrGenerationConflict`, `ErrClaimLost`, `ErrObjectInvalid`, `ErrObjectTooLarge`, `ErrRepoForbidden`, `ErrWorkspaceConflict`, `ErrWorkspaceDeleted`, `ErrUnauthorized`, `ErrInvalidBody` and `ErrInternal`. A failure answer with no wire error body is `ErrUnexpected`.
+- A failure answer is an `*Error` with the HTTP status, the wire code, the message and the details. `errors.Is` matches the sentinel of the code: `ErrNotFound`, `ErrGenerationConflict`, `ErrClaimLost`, `ErrObjectInvalid`, `ErrObjectTooLarge`, `ErrRefProtected`, `ErrEventsPruned`, `ErrRepoForbidden`, `ErrWorkspaceConflict`, `ErrWorkspaceDeleted`, `ErrUnauthorized`, `ErrInvalidBody` and `ErrInternal`. A failure answer with no wire error body is `ErrUnexpected`.
 - `CurrentRef` returns the stored ref that a ref generation conflict carries.
+- `SwapRef` and `DeleteRef` serve a `node` client and a `merge` client. `SetProtectedRefs`, `ProtectedRefs`, `Events`, `CreateSubscription`, `Subscriptions` and `DeleteSubscription` serve an `operator` client.
 
-Package `testserver` runs the real server in the process of a test, on a fresh schema of the PostgreSQL database that the caller names (or `MOTTE_TEST_DATABASE_URL`) and a temporary filesystem bucket. It skips the test when no DSN is set. It returns the base URL, the pool of its schema (for a test that sets up a state no route can make), the control-plane and node signers, and helpers that mint operator, node, read, write and import grants.
+Package `testserver` runs the real server in the process of a test, on a fresh schema of the PostgreSQL database that the caller names (or `MOTTE_TEST_DATABASE_URL`) and a temporary filesystem bucket. It skips the test when no DSN is set. It returns the base URL, the pool of its schema (for a test that sets up a state no route can make), the control-plane and node signers, and helpers that mint operator, node, read, write, import and merge grants. It does not run the delivery worker.
 
 ## Observability
 

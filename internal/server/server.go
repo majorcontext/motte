@@ -29,6 +29,8 @@ type Config struct {
 	Logger   *slog.Logger
 	// Now is the clock of grant expiry and the root commit. It defaults to time.Now.
 	Now func() time.Time
+	// Events tunes the delivery and the retention of ref events. Zero values take the defaults.
+	Events EventsConfig
 }
 
 type Server struct {
@@ -37,6 +39,7 @@ type Server struct {
 	verifier *grant.Verifier
 	logger   *slog.Logger
 	now      func() time.Time
+	events   EventsConfig
 
 	requests *prometheus.CounterVec
 	latency  *prometheus.HistogramVec
@@ -51,6 +54,7 @@ func New(cfg Config) *Server {
 	if s.now == nil {
 		s.now = time.Now
 	}
+	s.events = cfg.Events.withDefaults()
 	if s.logger == nil {
 		s.logger = slog.New(slog.DiscardHandler)
 	}
