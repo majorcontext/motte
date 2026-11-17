@@ -250,7 +250,7 @@ Package `testserver` runs the real server in the process of a test, on a fresh s
 
 - Traces: OTLP, with the endpoint from the environment and no vendor in the code. Span names start with `vcs.serve.` and end with the route, such as `vcs.serve.put.refs`. Requests accept W3C trace headers.
 - Metrics: Prometheus at `/metrics`, with names that start with `motte_`: `motte_http_requests_total` and `motte_http_request_duration_seconds`, by route.
-- Logs: JSON. A log line never holds a grant, a path or an object body.
+- Logs: JSON. A log line of the service never holds a grant, a path or an object body. A log line of the node daemon never holds a grant, and it carries the error text of its own process, which can name a node path.
 - Instrumentation is additive. It never changes behavior or errors.
 
 ## Virtual workspace daemon
@@ -317,7 +317,7 @@ One JSON object for each line over the unix socket. An error answer carries `err
 | `changes` | none | `boot`, `token`, `base_tree`, `changes`: list of `{path, status, old_sha, old_mode, old_size, new_sha, new_mode, size}` |
 | `dirty` | none | `boot`, `token`, `base_tree`, `entries`: list of `{path, kind, exec, opaque}` |
 | `token` | none | `boot`, `token`, `base_tree` |
-| `workspace` | `op`, `commit`, `generation` | none |
+| `workspace` | `sha` (the head operation), `commit`, `generation` | none |
 | `stats` | none | cache counters `blob_hits`, `blob_misses`, `tree_calls` |
 
 ### Dirty set

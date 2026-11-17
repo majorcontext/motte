@@ -30,8 +30,8 @@ const (
 	historyChunkObjects = 100_000
 	historyRangeObjects = 150_000
 	hasBatch            = 4096
-	// omitBlobs leaves out the blobs that the store refuses for their size: a commit whose tree names one
-	// still imports, and reading that file fails.
+	// omitBlobs leaves out the blobs that the store refuses for their size. The store cannot list a tree
+	// that names one, so a commit with such a tree imports but does not mount.
 	omitBlobs = "--filter=blob:limit=16777217"
 )
 
