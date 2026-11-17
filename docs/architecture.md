@@ -50,7 +50,6 @@ The service applies its embedded migrations at start, under a PostgreSQL advisor
 - An object has at most 16 MiB (`gitpack.MaxObjectBytes`). A put of a larger object, and a read of a larger object in an imported pack, answer 413 `vcs_object_too_large`. A caller must not store a file above 16 MiB.
 - The service reads a request body completely before it takes memory for the request. A body above its route limit answers 413 `vcs_object_too_large`, whatever its content. The limits are 1 MiB for a JSON route, 8 MiB of base64 data plus 1 KiB for `PUT /v1/vcs/ops/{kind}/{id}` (the data limit is 8 MiB before encoding), and 96 MiB plus 4 KiB for `POST /v1/vcs/objects` and `PUT /v1/vcs/packs/{pack_id}`. The upload routes allow 2 minutes to read the body.
 - At most 4 upload bodies are read or wait for a reservation at one time. An upload takes one of the 4 reader slots before it reads the first byte and gives it back after it reserves memory, so a fifth upload waits. A read request takes no reader slot, so a slow upload never blocks a read.
-- A tree object has at most 2 MiB. A read of a larger tree answers 413 `vcs_object_too_large`. A bulk tree read stops adding trees once it holds 2 MiB of tree data.
 - A put has at most 100000 objects and 64 MiB of object data. A blob batch or a `has` call names at most 4096 SHAs, and a blob batch returns at most 16 MiB.
 - The service keeps a memory budget of 512 MiB for requests at work. A request reserves the peak of its live buffers before it allocates them, and waits while the budget is spent. A reservation never exceeds the budget. Apart from the reader slots, the budget is the only limit on concurrency: no request excludes the others, and a slow sender holds no reservation because the body is read before the reservation. B is the length of the body. The peak of each route comes from its code path:
 
@@ -60,7 +59,7 @@ The service applies its embedded migrations at start, under a PostgreSQL advisor
 | `PUT /v1/vcs/packs/{pack_id}` | the body, the two base64 strings, the decoded pack and index, and pack verification: 3B + 96 MiB | 384 MiB |
 | `PUT /v1/vcs/ops/{kind}/{id}` | the body, the Data string and the decoded op: 3B | 32 MiB |
 | `GET /v1/vcs/objects/{sha}`, `POST /v1/vcs/blobs/batch` | 16 MiB of data, its base64 text and an encoder buffer that doubled once: 80 MiB | 80 MiB |
-| `GET /v1/vcs/trees/{sha}` | 4 MiB of tree data at 8 bytes for each byte in views and JSON, 16 MiB of slack: 48 MiB | 48 MiB |
+| `GET /v1/vcs/trees/{sha}` | 48 MiB at first. Before it reads a tree, the request reads the size from the pack index and, when 8 times the tree bytes read so far plus 16 MiB exceeds what it holds, releases its reservation and takes the larger one. It never holds one reservation while it waits for another. A reservation above the budget waits for the whole budget and does not fail. | 48 MiB, or 8 times the tree bytes plus 16 MiB |
 | `GET /v1/vcs/commits/{sha}` | a delta, its base and its result, 3 objects: 48 MiB | 48 MiB |
 | `GET /v1/vcs/ops/{kind}/{id}` | 8 MiB of data, its base64 text and the encoder buffer: 40 MiB | 40 MiB |
 | `POST /v1/vcs/objects/has` | 1 MiB | 1 MiB |

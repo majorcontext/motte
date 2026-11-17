@@ -40,9 +40,8 @@ const (
 	// MaxBlobBatchBytes bounds the blobs that one batch read returns.
 	MaxBlobBatchBytes = 16 << 20
 	// MaxBatch bounds the objects of one put.
-	MaxBatch = 100000
-	// MaxTreeBytes bounds one tree object, and the tree bytes that one bulk read returns before it stops.
-	MaxTreeBytes = 2 << 20
+	MaxBatch     = 100000
+	maxTreeBytes = gitpack.MaxObjectBytes
 	maxOpenBytes = 256 << 20
 	blockSize    = 256 << 10
 	maxBlocks    = 4
@@ -445,6 +444,19 @@ func (v *view) find(ctx context.Context, sha gitpack.SHA) (*gitpack.Pack, error)
 	return nil, ErrNotFound
 }
 
+// size is the inflated size of sha, from the pack header.
+func (v *view) size(ctx context.Context, sha gitpack.SHA) (int64, error) {
+	p, err := v.find(ctx, sha)
+	if err != nil {
+		return 0, err
+	}
+	n, _, err := p.Size(sha)
+	if errors.Is(err, gitpack.ErrNotFound) {
+		return 0, ErrNotFound
+	}
+	return n, err
+}
+
 func (v *view) get(ctx context.Context, sha gitpack.SHA) (gitpack.Type, []byte, error) {
 	p, err := v.find(ctx, sha)
 	if err != nil {
@@ -550,18 +562,28 @@ type Tree struct {
 }
 
 // TreeBulk returns a tree and its subtrees breadth first, until the entries
-// returned reach maxEntries. Blob entries carry their size.
-func (s *Service) TreeBulk(ctx context.Context, repo Repo, sha gitpack.SHA, maxEntries int) ([]Tree, error) {
+// returned reach maxEntries. Blob entries carry their size. Before it reads a
+// tree, it calls grow with the tree bytes of the trees read so far and this
+// one, taken from the pack index.
+func (s *Service) TreeBulk(ctx context.Context, repo Repo, sha gitpack.SHA, maxEntries int, grow func(treeBytes int64) error) ([]Tree, error) {
 	v, err := s.view(ctx, repo)
 	if err != nil {
 		return nil, err
 	}
 	var out []Tree
 	queue := []gitpack.SHA{sha}
-	total, bytesRead := 0, 0
-	for len(queue) > 0 && (len(out) == 0 || total < maxEntries && bytesRead < MaxTreeBytes) {
+	total, held := 0, int64(0)
+	for len(queue) > 0 && (len(out) == 0 || total < maxEntries) {
 		cur := queue[0]
 		queue = queue[1:]
+		size, err := v.size(ctx, cur)
+		if err != nil {
+			return nil, err
+		}
+		held += size
+		if err := grow(held); err != nil {
+			return nil, err
+		}
 		t, d, err := v.get(ctx, cur)
 		if err != nil {
 			return nil, err
@@ -569,10 +591,9 @@ func (s *Service) TreeBulk(ctx context.Context, repo Repo, sha gitpack.SHA, maxE
 		if t != gitpack.Tree {
 			return nil, ErrInvalid
 		}
-		if len(d) > MaxTreeBytes {
-			return nil, ErrTooLarge
+		if len(d) > maxTreeBytes {
+			return nil, ErrInvalid
 		}
-		bytesRead += len(d)
 		tree, err := v.parseTree(ctx, cur, d)
 		if err != nil {
 			return nil, err

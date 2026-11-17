@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptrace"
@@ -388,7 +389,7 @@ func TestUnknownRouteAndMethodUseTheErrorEnvelope(t *testing.T) {
 	e.want(e.call("DELETE", "/v1/repos", e.operator(), nil), 405, "method_not_allowed")
 }
 
-func TestLargestObjectIsStoredAndOversizeTreeIsRefusedOnRead(t *testing.T) {
+func TestLargestObjectIsStoredAndALargeTreeIsRead(t *testing.T) {
 	e := newEnv(t)
 	e.want(e.claim("ws1", 1, repoText), 200, "")
 	ctx := context.Background()
@@ -396,10 +397,16 @@ func TestLargestObjectIsStoredAndOversizeTreeIsRefusedOnRead(t *testing.T) {
 	if _, err := node.PutObjects(ctx, []client.Object{{Type: "blob", Data: make([]byte, gitpack.MaxObjectBytes)}}); err != nil {
 		t.Fatalf("object at the limit: %v", err)
 	}
-	shas, err := node.PutObjects(ctx, []client.Object{{Type: "tree", Data: make([]byte, 3<<20)}})
+	var tree bytes.Buffer
+	for i := 0; tree.Len() < 5<<20; i++ {
+		fmt.Fprintf(&tree, "160000 e%07d\x00%s", i, strings.Repeat("a", 20))
+	}
+	shas, err := node.PutObjects(ctx, []client.Object{{Type: "tree", Data: tree.Bytes()}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = e.Client(e.readGrant(repoText)).Trees(ctx, shas[0], 0)
-	refuses(t, err, client.ErrObjectTooLarge, 413)
+	trees, err := e.Client(e.readGrant(repoText), client.WithBudget(30*time.Second)).Trees(ctx, shas[0], 100000)
+	if err != nil || len(trees.Trees) != 1 || len(trees.Trees[0].Entries) < 100000 {
+		t.Fatalf("tree over 4 MiB: %v %v", len(trees.Trees), err)
+	}
 }

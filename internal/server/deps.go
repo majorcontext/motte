@@ -33,7 +33,7 @@ type index interface {
 type objects interface {
 	Reserve(ctx context.Context, bytes int64) (release func(), err error)
 	Commit(ctx context.Context, repo store.Repo, sha gitpack.SHA) (gitpack.SHA, time.Time, error)
-	TreeBulk(ctx context.Context, repo store.Repo, sha gitpack.SHA, maxEntries int) ([]store.Tree, error)
+	TreeBulk(ctx context.Context, repo store.Repo, sha gitpack.SHA, maxEntries int, grow func(treeBytes int64) error) ([]store.Tree, error)
 	Blobs(ctx context.Context, repo store.Repo, shas []gitpack.SHA) ([][]byte, error)
 	Has(ctx context.Context, repo store.Repo, shas []gitpack.SHA) ([]bool, error)
 	Get(ctx context.Context, repo store.Repo, sha gitpack.SHA) (gitpack.Type, []byte, error)
