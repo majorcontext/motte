@@ -22,7 +22,7 @@ import (
 // DefaultBudget is the time limit of one call unless WithBudget sets another.
 const DefaultBudget = 2 * time.Second
 
-const bodyMax = 64 << 20
+const errorBodyMax = 1 << 20
 
 // GrantFunc returns the bearer grant of one call. The client calls it before each request.
 type GrantFunc func(ctx context.Context) (string, error)
@@ -93,20 +93,19 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		return err
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, bodyMax))
-	if err != nil {
-		return err
-	}
 	switch {
 	case resp.StatusCode >= 300 && resp.StatusCode < 400:
 		return &Error{Status: resp.StatusCode, cause: ErrRedirect}
 	case resp.StatusCode >= 400:
+		raw, err := io.ReadAll(io.LimitReader(resp.Body, errorBodyMax))
+		if err != nil {
+			return err
+		}
 		return decodeError(resp.StatusCode, raw)
-	}
-	if out == nil || len(raw) == 0 {
+	case out == nil || resp.StatusCode == http.StatusNoContent:
 		return nil
 	}
-	return json.Unmarshal(raw, out)
+	return json.NewDecoder(resp.Body).Decode(out)
 }
 
 func decodeError(status int, raw []byte) error {
