@@ -6,8 +6,8 @@ use jj_lib::backend::CommitId;
 use jj_lib::index::Index;
 use motte_jj::ctl::{CtlClient, HASH_KIND, ObjectStore as _, StoreError};
 
-use crate::WALK_LIMIT;
-use crate::push::{Fail, Outcome};
+use crate::init_cmd::WALK_LIMIT;
+use crate::push::{Fail, Outcome, store_fail};
 
 /// Most objects, and bytes, that one `putbatch` carries.
 const BATCH_OBJECTS: usize = 64;
@@ -27,13 +27,6 @@ pub enum Walk {
 pub struct Stored {
     pub objects: u64,
     pub bytes: u64,
-}
-
-fn store_fail(e: StoreError) -> Fail {
-    Fail::new(
-        Outcome::Network,
-        format!("the daemon cannot take the objects: {e}"),
-    )
 }
 
 /// An object of the transport repo, if there is one, or else of the daemon, which holds what
@@ -57,7 +50,7 @@ fn read(
     match ctl.get(id) {
         Ok((_, data)) => Ok(Some((data, false))),
         Err(StoreError::NotFound(_)) => Ok(None),
-        Err(e) => Err(store_fail(e)),
+        Err(e) => Err(store_fail(e, "fetched")),
     }
 }
 
@@ -211,7 +204,9 @@ impl Writer<'_> {
     fn flush(&mut self) -> Result<(), Fail> {
         let batch: Vec<(Kind, &[u8])> =
             self.queue.iter().map(|(k, d)| (*k, d.as_slice())).collect();
-        self.ctl.put_many(&batch).map_err(store_fail)?;
+        self.ctl
+            .put_many(&batch)
+            .map_err(|e| store_fail(e, "fetched"))?;
         self.queue.clear();
         self.queued = 0;
         Ok(())
@@ -226,7 +221,7 @@ impl Writer<'_> {
                 Outcome::Network,
                 format!("origin did not send object {id}"),
             )),
-            Err(e) => Err(store_fail(e)),
+            Err(e) => Err(store_fail(e, "fetched")),
         }
     }
 

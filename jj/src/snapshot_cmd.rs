@@ -19,7 +19,8 @@ use motte_jj::wc::{FORCE_FULL, LAST_SNAPSHOT, syncfs};
 use serde::Serialize;
 
 use crate::command_lock::try_exclusive;
-use crate::{cmd_err, publish};
+use crate::publish_cmd::publish;
+use crate::{cmd_err, daemon};
 
 /// The head operation of the last publish that the control plane took, with what the daemon showed
 /// before that snapshot began, in the repo dir beside `op_store`: `<op> <token> <base_tree>`.
@@ -89,8 +90,7 @@ async fn snapshot(
         return Err(cmd_err("this repo has no native backend"));
     }
     let before = ws.repo().operation().id().hex();
-    let sock = std::env::var("MOTTE_VFS_SOCK").map_err(|_| cmd_err("set MOTTE_VFS_SOCK"))?;
-    let ctl = CtlClient::new(sock);
+    let ctl = daemon(ws.repo_path()).map_err(cmd_err)?;
     let mount = ws.workspace().workspace_root().to_owned();
     syncfs(&mount).map_err(|e| cmd_err(format!("syncfs on the mount failed: {e}")))?;
     let pre = ctl.token().map_err(cmd_err)?;
@@ -163,8 +163,7 @@ fn still_clean(ctl: &CtlClient, recorded: &TokenReply) -> Result<bool, motte_jj:
     Ok(t.settled() && t.token == recorded.token && t.base_tree == recorded.base_tree)
 }
 
-/// Reads `<op> <token> <base_tree>`; a file without all three skips nothing, and neither does one in
-/// an older format, whose second field is a generation that no token equals.
+/// Reads `<op> <token> <base_tree>`; a file without all three skips nothing.
 fn parse_published(text: &str) -> Option<Published> {
     let mut fields = text.split_whitespace();
     let (op, token, base_tree) = (fields.next()?, fields.next()?, fields.next()?);

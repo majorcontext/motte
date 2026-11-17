@@ -6,8 +6,9 @@ use jj_lib::ref_name::{RefName, RemoteName};
 use jj_lib::repo::ReadonlyRepo;
 use motte_jj::ctl::{CtlClient, RefInfo, RefSwap};
 
-use crate::native_push::{read_ref, store_fail};
-use crate::push::{self, Fail, Outcome, REMOTE};
+use crate::daemon;
+use crate::native_push::read_ref;
+use crate::push::{self, Fail, Outcome, REMOTE, store_fail};
 use crate::repo_config::Native;
 use std::io::Write as _;
 
@@ -20,10 +21,7 @@ pub async fn delete(
     names: &[String],
     native: &Native,
 ) -> Result<(), Fail> {
-    let ctl = CtlClient::new(
-        std::env::var("MOTTE_VFS_SOCK")
-            .map_err(|_| Fail::new(Outcome::Refused, "set MOTTE_VFS_SOCK"))?,
-    );
+    let ctl = daemon(ws.repo_path()).map_err(|e| Fail::new(Outcome::Refused, e))?;
     let repo = ws.repo().clone();
     for name in names {
         let kind = if *name == native.default_branch {

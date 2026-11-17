@@ -12,8 +12,9 @@ use jj_lib::repo::Repo as _;
 use motte_jj::ctl::CtlClient;
 use motte_jj::trace;
 
-use crate::WALK_LIMIT;
+use crate::daemon;
 use crate::fetch_objects::{self, Walk};
+use crate::init_cmd::WALK_LIMIT;
 use crate::native_fetch;
 use crate::push::{self, Fail, Outcome, REMOTE};
 use crate::push_git::Git;
@@ -74,10 +75,7 @@ async fn fetch(ui: &mut Ui, helper: &CommandHelper, args: &FetchArgs) -> Result<
             "this workspace has no origin; it has no GitHub repository",
         )
     })?;
-    let ctl = CtlClient::new(
-        std::env::var("MOTTE_VFS_SOCK")
-            .map_err(|_| Fail::new(Outcome::Refused, "set MOTTE_VFS_SOCK"))?,
-    );
+    let ctl = daemon(ws.repo_path()).map_err(|e| Fail::new(Outcome::Refused, e))?;
     let repo = ws.repo().clone();
 
     push::claim(&ctl, "fetched")?;
@@ -252,6 +250,61 @@ pub(crate) async fn record(
     gone: &[String],
 ) -> Result<(), Fail> {
     let mut tx = ws.start_transaction();
+    add_tips(&mut tx, tips, shallow).await?;
+    let mut lines = vec![];
+    for (name, previous) in wanted.iter().zip(old) {
+        let Some(tip) = tips.iter().find(|t| &t.name == name) else {
+            lines.push(format!("{name}: up to date"));
+            continue;
+        };
+        let before = previous.target.as_normal();
+        lines.push(format!(
+            "{name}: {} -> {}",
+            before.map_or_else(|| "new".to_owned(), |c| short(&c.hex())),
+            short(&tip.id.hex())
+        ));
+        let state = if previous.target.is_absent() {
+            RemoteRefState::Tracked
+        } else {
+            previous.state
+        };
+        let symbol = RefName::new(name).to_remote_symbol(RemoteName::new(REMOTE));
+        tx.repo_mut().set_remote_bookmark(
+            symbol,
+            RemoteRef {
+                target: RefTarget::normal(tip.id.clone()),
+                state,
+            },
+        );
+        if state == RemoteRefState::Tracked {
+            follow_local(ui, &mut tx, name, tip, before).await?;
+        }
+    }
+    for name in gone {
+        let symbol = RefName::new(name).to_remote_symbol(RemoteName::new(REMOTE));
+        tx.repo_mut().set_remote_bookmark(
+            symbol,
+            RemoteRef {
+                target: RefTarget::absent(),
+                state: RemoteRefState::New,
+            },
+        );
+        lines.push(format!("{name}: deleted on {REMOTE}"));
+    }
+    tx.finish(ui, format!("fetch {} from {REMOTE}", names(tips, gone)))
+        .await?;
+    for line in lines {
+        writeln!(ui.stdout(), "{line}").map_err(CommandError::from)?;
+    }
+    Ok(())
+}
+
+/// Records the shallow roots and makes each fetched tip a head.
+async fn add_tips(
+    tx: &mut jj_cli::cli_util::WorkspaceCommandTransaction<'_>,
+    tips: &[Tip],
+    shallow: &[gix::ObjectId],
+) -> Result<(), Fail> {
     if !shallow.is_empty() {
         let ids: Vec<CommitId> = shallow
             .iter()
@@ -279,75 +332,42 @@ pub(crate) async fn record(
         .add_heads(&commits)
         .await
         .map_err(|e| Fail::new(Outcome::Refused, e.to_string()))?;
-    let mut lines = vec![];
-    for (name, previous) in wanted.iter().zip(old) {
-        let Some(tip) = tips.iter().find(|t| &t.name == name) else {
-            lines.push(format!("{name}: up to date"));
-            continue;
-        };
-        let before = previous.target.as_normal();
-        lines.push(format!(
-            "{name}: {} -> {}",
-            before.map_or_else(|| "new".to_owned(), |c| short(&c.hex())),
-            short(&tip.id.hex())
-        ));
-        let state = if previous.target.is_absent() {
-            RemoteRefState::Tracked
-        } else {
-            previous.state
-        };
-        let symbol = RefName::new(name).to_remote_symbol(RemoteName::new(REMOTE));
-        tx.repo_mut().set_remote_bookmark(
-            symbol,
-            RemoteRef {
-                target: RefTarget::normal(tip.id.clone()),
-                state,
-            },
-        );
-        if state != RemoteRefState::Tracked {
-            continue;
-        }
-        let local = tx
+    Ok(())
+}
+
+/// Moves the local bookmark of a tracked `NAME@origin` to the tip when its target is the old
+/// `NAME@origin` and the move is a fast-forward, and warns when it stays elsewhere.
+async fn follow_local(
+    ui: &mut Ui,
+    tx: &mut jj_cli::cli_util::WorkspaceCommandTransaction<'_>,
+    name: &str,
+    tip: &Tip,
+    before: Option<&CommitId>,
+) -> Result<(), Fail> {
+    let local = tx
+        .repo()
+        .view()
+        .get_local_bookmark(RefName::new(name))
+        .clone();
+    let follows = match (before, local.as_normal()) {
+        (None, _) => local.is_absent(),
+        (Some(b), Some(l)) if b == l => tx
             .repo()
-            .view()
-            .get_local_bookmark(RefName::new(name))
-            .clone();
-        let follows = match (before, local.as_normal()) {
-            (None, _) => local.is_absent(),
-            (Some(b), Some(l)) if b == l => tx
-                .repo()
-                .index()
-                .is_ancestor(b, &tip.id)
-                .await
-                .unwrap_or(false),
-            _ => false,
-        };
-        if follows {
-            tx.repo_mut()
-                .set_local_bookmark_target(RefName::new(name), RefTarget::normal(tip.id.clone()));
-        } else if local.as_normal() != Some(&tip.id) {
-            writeln!(
-                ui.warning_default(),
-                "bookmark {name} is not at {name}@{REMOTE}; run jj rebase -d {name}@{REMOTE} or jj bookmark set"
-            )
-            .map_err(CommandError::from)?;
-        }
-    }
-    for name in gone {
-        let symbol = RefName::new(name).to_remote_symbol(RemoteName::new(REMOTE));
-        tx.repo_mut().set_remote_bookmark(
-            symbol,
-            RemoteRef {
-                target: RefTarget::absent(),
-                state: RemoteRefState::New,
-            },
-        );
-        lines.push(format!("{name}: deleted on {REMOTE}"));
-    }
-    tx.finish(ui, format!("fetch {} from {REMOTE}", names(tips, gone)))
-        .await?;
-    for line in lines {
-        writeln!(ui.stdout(), "{line}").map_err(CommandError::from)?;
+            .index()
+            .is_ancestor(b, &tip.id)
+            .await
+            .unwrap_or(false),
+        _ => false,
+    };
+    if follows {
+        tx.repo_mut()
+            .set_local_bookmark_target(RefName::new(name), RefTarget::normal(tip.id.clone()));
+    } else if local.as_normal() != Some(&tip.id) {
+        writeln!(
+            ui.warning_default(),
+            "bookmark {name} is not at {name}@{REMOTE}; run jj rebase -d {name}@{REMOTE} or jj bookmark set"
+        )
+        .map_err(CommandError::from)?;
     }
     Ok(())
 }

@@ -38,10 +38,12 @@ opentelemetry_sdk = { version = "=0.33.1", default-features = false, features = 
 opentelemetry-otlp = { version = "=0.33.1", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
 
 
-
 [dev-dependencies]
 rand = "0.9"
 rand_chacha = "0.9"
 
 [profile.release]
 debug = 1
+
+[lints.clippy]
+too_many_lines = "warn"

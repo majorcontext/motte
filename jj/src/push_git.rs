@@ -191,7 +191,8 @@ impl Git {
     }
 
     /// Pushes all updates atomically. `push.negotiate` makes git find the commits that origin
-    /// already has, so a base that is not a branch tip stays out of the pack.
+    /// already has, so a base that is not a branch tip stays out of the pack. `--no-thin` keeps
+    /// git from reading a delta base blob that the blob-less transport repo lacks.
     pub fn push(&self, updates: &[Update]) -> Result<Finished, Fail> {
         let mut args = [
             "-c",
@@ -199,6 +200,7 @@ impl Git {
             "push",
             "--porcelain",
             "--atomic",
+            "--no-thin",
         ]
         .map(str::to_owned)
         .to_vec();
