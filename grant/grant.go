@@ -19,14 +19,15 @@ type Scope string
 const (
 	ScopeNode     Scope = "node"
 	ScopeRead     Scope = "read"
+	ScopeWrite    Scope = "write"
 	ScopeImport   Scope = "import"
 	ScopeOperator Scope = "operator"
 )
 
-// Valid reports whether s is one of the four scopes.
+// Valid reports whether s is one of the five scopes.
 func (s Scope) Valid() bool {
 	switch s {
-	case ScopeNode, ScopeRead, ScopeImport, ScopeOperator:
+	case ScopeNode, ScopeRead, ScopeWrite, ScopeImport, ScopeOperator:
 		return true
 	}
 	return false
@@ -51,7 +52,7 @@ func (c Claims) valid() bool {
 	switch c.Scope {
 	case ScopeNode:
 		return c.WS != "" && c.Epoch != 0 && c.Repo != ""
-	case ScopeRead, ScopeImport:
+	case ScopeRead, ScopeWrite, ScopeImport:
 		return c.Repo != ""
 	case ScopeOperator:
 		return true
