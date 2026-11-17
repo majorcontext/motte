@@ -37,6 +37,7 @@ var (
 const (
 	WriterNode     = "node"
 	WriterMerge    = "merge"
+	WriterWrite    = "write"
 	WriterOperator = "operator"
 )
 
@@ -186,8 +187,9 @@ type Store interface {
 	// UpdateRef is the ref write of a direct push, with no workspace and no
 	// fence. It moves ref name from commit old to commit new. An empty old
 	// creates the ref and an empty new deletes it. A ref whose commit is not
-	// old is *RefConflict. Every write takes a new generation.
-	UpdateRef(ctx context.Context, repo, name, old, new string) (Ref, error)
+	// old is *RefConflict. Every write takes a new generation and appends one
+	// event of the writer kind, WriterWrite or WriterMerge.
+	UpdateRef(ctx context.Context, repo, name, old, new, kind string) (Ref, error)
 
 	// MergeRef is SwapRef without a workspace fence: it needs only the
 	// stored generation to be expect. The event kind is WriterMerge.

@@ -518,29 +518,29 @@ func oneRefSwapWins(t *testing.T, s meta.Store) {
 }
 
 func updateRefRules(t *testing.T, s meta.Store) {
-	_, err := s.UpdateRef(ctx, repoText, "x", commitA, commitB)
+	_, err := s.UpdateRef(ctx, repoText, "x", commitA, commitB, meta.WriterWrite)
 	if c := refConflict(t, err); c.Current != nil {
 		t.Errorf("update of a missing ref carries %+v, want nil", c.Current)
 	}
 	if c := refConflict(t, deleteVia(s, "x", commitA)); c.Current != nil {
 		t.Errorf("delete of a missing ref carries %+v, want nil", c.Current)
 	}
-	first, err := s.UpdateRef(ctx, repoText, "x", "", commitA)
+	first, err := s.UpdateRef(ctx, repoText, "x", "", commitA, meta.WriterWrite)
 	if err != nil || first.Name != "x" || first.Commit != commitA || first.Generation <= 0 {
 		t.Fatalf("create = %+v, %v", first, err)
 	}
-	_, err = s.UpdateRef(ctx, repoText, "x", "", commitB)
+	_, err = s.UpdateRef(ctx, repoText, "x", "", commitB, meta.WriterWrite)
 	if c := refConflict(t, err); c.Current == nil || *c.Current != first {
 		t.Errorf("create over a ref carries %+v, want %+v", c.Current, first)
 	}
-	_, err = s.UpdateRef(ctx, repoText, "x", commitB, commitB)
+	_, err = s.UpdateRef(ctx, repoText, "x", commitB, commitB, meta.WriterWrite)
 	if c := refConflict(t, err); c.Current == nil || *c.Current != first {
 		t.Errorf("stale update carries %+v, want %+v", c.Current, first)
 	}
 	if c := refConflict(t, deleteVia(s, "x", commitB)); c.Current == nil || *c.Current != first {
 		t.Errorf("stale delete carries %+v, want %+v", c.Current, first)
 	}
-	second, err := s.UpdateRef(ctx, repoText, "x", commitA, commitB)
+	second, err := s.UpdateRef(ctx, repoText, "x", commitA, commitB, meta.WriterWrite)
 	if err != nil || second.Commit != commitB || second.Generation == first.Generation {
 		t.Fatalf("update = %+v, %v", second, err)
 	}
@@ -550,28 +550,28 @@ func updateRefRules(t *testing.T, s meta.Store) {
 	ok(t, deleteVia(s, "x", commitB))
 	_, err = s.Ref(ctx, repoText, "x")
 	is(t, err, meta.ErrNotFound)
-	third, err := s.UpdateRef(ctx, repoText, "x", "", commitA)
+	third, err := s.UpdateRef(ctx, repoText, "x", "", commitA, meta.WriterWrite)
 	if err != nil || third.Generation <= second.Generation {
 		t.Errorf("recreate = %+v, %v, want a generation above %d", third, err, second.Generation)
 	}
 }
 
 func deleteVia(s meta.Store, name, old string) error {
-	_, err := s.UpdateRef(ctx, repoText, name, old, "")
+	_, err := s.UpdateRef(ctx, repoText, name, old, "", meta.WriterWrite)
 	return err
 }
 
 func oneRefUpdateWins(t *testing.T, s meta.Store) {
 	isConflict := func(err error) bool { var c *meta.RefConflict; return errors.As(err, &c) }
 	errs := race(func(i int) error {
-		_, err := s.UpdateRef(ctx, repoText, "x", "", fmt.Sprintf("%040x", i))
+		_, err := s.UpdateRef(ctx, repoText, "x", "", fmt.Sprintf("%040x", i), meta.WriterWrite)
 		return err
 	})
 	onlyOneWins(t, errs, isConflict)
 	cur, err := s.Ref(ctx, repoText, "x")
 	ok(t, err)
 	errs = race(func(i int) error {
-		_, err := s.UpdateRef(ctx, repoText, "x", cur.Commit, fmt.Sprintf("%040x", i+100))
+		_, err := s.UpdateRef(ctx, repoText, "x", cur.Commit, fmt.Sprintf("%040x", i+100), meta.WriterWrite)
 		return err
 	})
 	onlyOneWins(t, errs, isConflict)

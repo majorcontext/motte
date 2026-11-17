@@ -19,6 +19,7 @@ var policyCases = []struct {
 	{"every ref write appends one event in its unit", eventPerWrite},
 	{"event sequence is gap free in each partition for a concurrent reader", eventSequenceGapFree},
 	{"each partition has its own counter", eventPartitions},
+	{"update ref appends one event of its writer kind", updateRefEvents},
 	{"pruned events refuse an older cursor in their partition", eventPrune},
 	{"protected refs are kept for each repo", protectedRefs},
 	{"subscriptions start at the newest event", subscriptions},
@@ -335,4 +336,33 @@ func leaseExclusive(t *testing.T, s meta.Store) {
 		_, err := s.AcquireLease(ctx, "s2", 7, fmt.Sprint("o", i), now, until)
 		return err
 	}), func(err error) bool { return err == meta.ErrLeaseHeld })
+}
+
+func updateRefEvents(t *testing.T, s meta.Store) {
+	made, err := s.UpdateRef(ctx, repoText, "x", "", commitA, meta.WriterWrite)
+	ok(t, err)
+	_, err = s.UpdateRef(ctx, repoText, "x", commitB, commitA, meta.WriterWrite)
+	refConflict(t, err)
+	moved, err := s.UpdateRef(ctx, repoText, "x", commitA, commitB, meta.WriterMerge)
+	ok(t, err)
+	_, err = s.UpdateRef(ctx, repoText, "x", commitB, "", meta.WriterWrite)
+	ok(t, err)
+	_, err = s.UpdateRef(ctx, repoText, "x", commitB, "", meta.WriterWrite)
+	refConflict(t, err)
+	want := []meta.Event{
+		{Repo: repoText, Ref: "x", New: commitA, Generation: made.Generation, Kind: meta.WriterWrite},
+		{Repo: repoText, Ref: "x", Old: commitA, New: commitB, Generation: moved.Generation, Kind: meta.WriterMerge},
+		{Repo: repoText, Ref: "x", Old: commitB, Generation: moved.Generation, Kind: meta.WriterWrite},
+	}
+	got := refEvents(t, s, repoText, "x")
+	if len(got) != len(want) {
+		t.Fatalf("events = %+v, want %d: a lost compare-and-swap has none", got, len(want))
+	}
+	for i, w := range want {
+		g := got[i]
+		g.Partition, g.Seq, g.At = 0, 0, time.Time{}
+		if g != w {
+			t.Errorf("event %d = %+v, want %+v", i, g, w)
+		}
+	}
 }

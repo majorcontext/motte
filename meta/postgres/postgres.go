@@ -403,32 +403,46 @@ func (s *Store) deleteRef(ctx context.Context, w writer, ws string, epoch uint64
 	return s.refLost(ctx, w, ws, epoch, repo, name)
 }
 
-// UpdateRef compares on the commit of the ref instead of its generation.
-func (s *Store) UpdateRef(ctx context.Context, repo, name, old, new string) (meta.Ref, error) {
+// UpdateRef compares on the commit of the ref instead of its generation. The write and its event commit together.
+func (s *Store) UpdateRef(ctx context.Context, repo, name, old, new, kind string) (meta.Ref, error) {
 	var generation int64
-	var err error
-	switch {
-	case new == "":
-		var tag pgconn.CommandTag
-		if tag, err = s.Pool.Exec(ctx, `DELETE FROM refs WHERE repo = $1 AND name = $2 AND commit_sha = $3`, repo, name, old); err == nil && tag.RowsAffected() == 0 {
-			err = pgx.ErrNoRows
+	wrote, err := s.withEvent(ctx, meta.Partition(repo, name), func(tx pgx.Tx, seq int64) (bool, error) {
+		part := meta.Partition(repo, name)
+		var err error
+		switch {
+		case new == "":
+			err = tx.QueryRow(ctx, `
+				WITH gone AS (DELETE FROM refs WHERE repo = $1 AND name = $2 AND commit_sha = $3 RETURNING generation)
+				INSERT INTO events (partition, seq, repo, ref, old_commit, new_commit, generation, kind)
+				SELECT $6::int, $5::bigint, $1::text, $2::text, $3::text, '', gone.generation, $4::text FROM gone
+				RETURNING generation`, repo, name, old, kind, seq, part).Scan(&generation)
+		case old == "":
+			err = tx.QueryRow(ctx, `
+				WITH moved AS (
+					INSERT INTO refs (repo, name, commit_sha, generation) VALUES ($1, $2, $3, nextval('ref_generation'))
+					ON CONFLICT (repo, name) DO NOTHING RETURNING generation)
+				INSERT INTO events (partition, seq, repo, ref, old_commit, new_commit, generation, kind)
+				SELECT $6::int, $5::bigint, $1::text, $2::text, '', $3::text, moved.generation, $4::text FROM moved
+				RETURNING generation`, repo, name, new, kind, seq, part).Scan(&generation)
+		default:
+			err = tx.QueryRow(ctx, `
+				WITH moved AS (
+					UPDATE refs SET commit_sha = $4, generation = nextval('ref_generation'), updated_at = now()
+					WHERE repo = $1 AND name = $2 AND commit_sha = $3 RETURNING generation)
+				INSERT INTO events (partition, seq, repo, ref, old_commit, new_commit, generation, kind)
+				SELECT $7::int, $6::bigint, $1::text, $2::text, $3::text, $4::text, moved.generation, $5::text FROM moved
+				RETURNING generation`, repo, name, old, new, kind, seq, part).Scan(&generation)
 		}
-	case old == "":
-		err = s.Pool.QueryRow(ctx, `
-			INSERT INTO refs (repo, name, commit_sha, generation) VALUES ($1, $2, $3, nextval('ref_generation'))
-			ON CONFLICT (repo, name) DO NOTHING
-			RETURNING generation`, repo, name, new).Scan(&generation)
-	default:
-		err = s.Pool.QueryRow(ctx, `
-			UPDATE refs SET commit_sha = $3, generation = nextval('ref_generation'), updated_at = now()
-			WHERE repo = $1 AND name = $2 AND commit_sha = $4
-			RETURNING generation`, repo, name, new, old).Scan(&generation)
-	}
-	if err == nil {
-		return meta.Ref{Name: name, Commit: new, Generation: generation}, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return err == nil, err
+	})
+	if err != nil {
 		return meta.Ref{}, fmt.Errorf("postgres: update ref: %w", err)
+	}
+	if wrote {
+		return meta.Ref{Name: name, Commit: new, Generation: generation}, nil
 	}
 	cur, err := s.Ref(ctx, repo, name)
 	switch {

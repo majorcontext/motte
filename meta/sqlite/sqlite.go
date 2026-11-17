@@ -474,40 +474,39 @@ func (s *Store) deleteRef(ctx context.Context, w writer, ws string, epoch uint64
 	return s.refLost(ctx, w, ws, epoch, repo, name)
 }
 
-// UpdateRef compares on the commit of the ref instead of its generation.
-func (s *Store) UpdateRef(ctx context.Context, repo, name, old, new string) (meta.Ref, error) {
+// UpdateRef compares on the commit of the ref instead of its generation. Its event insert has the condition of the
+// write and runs first, as in swapRef.
+func (s *Store) UpdateRef(ctx context.Context, repo, name, old, new, kind string) (meta.Ref, error) {
 	var generation int64
 	err := inTx(ctx, s.db, func(tx *sql.Tx) error {
-		switch {
-		case new == "":
-			res, err := tx.ExecContext(ctx, `DELETE FROM refs WHERE repo = ?1 AND name = ?2 AND commit_sha = ?3`, repo, name, old)
-			if err != nil {
-				return err
-			}
-			if n, err := res.RowsAffected(); err != nil || n == 0 {
-				if err == nil {
-					err = sql.ErrNoRows
-				}
-				return err
-			}
-			return nil
-		case old == "":
-			if _, err := tx.ExecContext(ctx, bumpGeneration); err != nil {
-				return err
-			}
-			return tx.QueryRowContext(ctx, `
-				INSERT INTO refs (repo, name, commit_sha, generation, updated_at)
-				VALUES (?1, ?2, ?3, `+nextGeneration+`, ?4)
-				ON CONFLICT (repo, name) DO NOTHING
-				RETURNING generation`, repo, name, new, micros()).Scan(&generation)
-		}
+		part := meta.Partition(repo, name)
+		args := []any{repo, name, old, new, micros(), kind, part}
 		if _, err := tx.ExecContext(ctx, bumpGeneration); err != nil {
 			return err
 		}
-		return tx.QueryRowContext(ctx, `
-			UPDATE refs SET commit_sha = ?3, generation = `+nextGeneration+`, updated_at = ?5
-			WHERE repo = ?1 AND name = ?2 AND commit_sha = ?4
-			RETURNING generation`, repo, name, new, old, micros()).Scan(&generation)
+		const insert = `INSERT INTO events (partition, seq, repo, ref, old_commit, new_commit, generation, kind, at) `
+		seq := nextSeq("?7")
+		var event, write string
+		switch {
+		case new == "":
+			event = insert + `SELECT ?7, ` + seq + `, ?1, ?2, ?3, '', generation, ?6, ?5 FROM refs WHERE repo = ?1 AND name = ?2 AND commit_sha = ?3`
+			write = `DELETE FROM refs WHERE repo = ?1 AND name = ?2 AND commit_sha = ?3 RETURNING generation`
+		case old == "":
+			event = insert + `SELECT ?7, ` + seq + `, ?1, ?2, '', ?4, ` + nextGeneration + `, ?6, ?5 WHERE NOT EXISTS (SELECT 1 FROM refs WHERE repo = ?1 AND name = ?2)`
+			write = `INSERT INTO refs (repo, name, commit_sha, generation, updated_at) VALUES (?1, ?2, ?4, ` + nextGeneration + `, ?5)
+				ON CONFLICT (repo, name) DO NOTHING RETURNING generation`
+		default:
+			event = insert + `SELECT ?7, ` + seq + `, ?1, ?2, ?3, ?4, ` + nextGeneration + `, ?6, ?5 FROM refs WHERE repo = ?1 AND name = ?2 AND commit_sha = ?3`
+			write = `UPDATE refs SET commit_sha = ?4, generation = ` + nextGeneration + `, updated_at = ?5
+				WHERE repo = ?1 AND name = ?2 AND commit_sha = ?3 RETURNING generation`
+		}
+		if _, err := tx.ExecContext(ctx, event, args...); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, bumpSeq, part); err != nil {
+			return err
+		}
+		return tx.QueryRowContext(ctx, write, args...).Scan(&generation)
 	})
 	if err == nil {
 		return meta.Ref{Name: name, Commit: new, Generation: generation}, nil
