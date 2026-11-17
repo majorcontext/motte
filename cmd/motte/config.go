@@ -68,6 +68,11 @@ func parseKeys(text string) ([]grant.Key, error) {
 		if err != nil || len(pub) != ed25519.PublicKeySize || k.Kid == "" || len(k.Scopes) == 0 {
 			return nil, fmt.Errorf("MOTTE_TRUSTED_KEYS entry %d is not a kid, an Ed25519 public key and scopes", i)
 		}
+		for _, sc := range k.Scopes {
+			if !sc.Valid() {
+				return nil, fmt.Errorf("MOTTE_TRUSTED_KEYS entry %d has the unknown scope %q", i, sc)
+			}
+		}
 		keys[i] = grant.Key{Kid: k.Kid, Public: pub, Scopes: k.Scopes}
 	}
 	return keys, nil
