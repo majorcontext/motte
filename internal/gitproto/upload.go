@@ -224,20 +224,11 @@ func (u *Upload) fetch(ctx context.Context, w io.Writer, args []string) error {
 	}
 	ready := req.done || len(common) > 0
 	pw := pktline.NewWriter(w)
-	if !req.done {
+	if !ready {
 		pw.Linef("acknowledgments\n")
-		if len(common) == 0 {
-			pw.Linef("NAK\n")
-		}
-		for _, sha := range common {
-			pw.Linef("ACK %s\n", sha)
-		}
-		if !ready {
-			pw.Flush()
-			return pw.Err()
-		}
-		pw.Linef("ready\n")
-		pw.Delim()
+		pw.Linef("NAK\n")
+		pw.Flush()
+		return pw.Err()
 	}
 	c := &collector{objs: u.Objects, ctx: ctx, blobNone: req.blobNone}
 	shas, err := c.collect(req.wants, common)
@@ -246,6 +237,14 @@ func (u *Upload) fetch(ctx context.Context, w io.Writer, args []string) error {
 			return RequestError("an object of the fetch is missing")
 		}
 		return err
+	}
+	if !req.done {
+		pw.Linef("acknowledgments\n")
+		for _, sha := range common {
+			pw.Linef("ACK %s\n", sha)
+		}
+		pw.Linef("ready\n")
+		pw.Delim()
 	}
 	pw.Linef("packfile\n")
 	bw := bufio.NewWriterSize(pktline.SideBand(pw), pktline.MaxData-1)

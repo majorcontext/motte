@@ -7,8 +7,11 @@ import (
 	"crypto/sha1"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"testing"
 )
+
+var zw = zlib.NewWriter(nil)
 
 func packEntry(typ byte, size int, extra, data []byte) []byte {
 	var b bytes.Buffer
@@ -21,7 +24,7 @@ func packEntry(typ byte, size int, extra, data []byte) []byte {
 	}
 	b.WriteByte(c)
 	b.Write(extra)
-	zw := zlib.NewWriter(&b)
+	zw.Reset(&b)
 	_, _ = zw.Write(data)
 	_ = zw.Close()
 	return b.Bytes()
@@ -90,5 +93,34 @@ func TestUnpackCountsWholeObjectsInTheResolvedTotal(t *testing.T) {
 	}
 	if _, err := Unpack(context.Background(), packOf(entries...), nil); !errors.Is(err, ErrTooLarge) {
 		t.Errorf("err = %v, want ErrTooLarge", err)
+	}
+}
+
+func TestUnpackResolvesALongDependentFirstChain(t *testing.T) {
+	const n = 60000
+	ext := []byte("external base")
+	extName := Hash(Blob, ext)
+	results := make([][]byte, n)
+	names := make([]SHA, n)
+	for i := range n {
+		results[i] = []byte(fmt.Sprintf("object %d", i))
+		names[i] = Hash(Blob, results[i])
+	}
+	entries := make([][]byte, 0, n)
+	for i := n - 1; i >= 0; i-- {
+		base, baseLen := extName, len(ext)
+		if i > 0 {
+			base, baseLen = names[i-1], len(results[i-1])
+		}
+		entries = append(entries, refDelta(base, baseLen, results[i]))
+	}
+	objs, err := Unpack(context.Background(), packOf(entries...), func(s SHA) (Type, []byte, error) {
+		if s != extName {
+			return 0, nil, ErrNotFound
+		}
+		return Blob, ext, nil
+	})
+	if err != nil || len(objs) != n || !bytes.Equal(objs[0].Data, results[n-1]) {
+		t.Fatalf("objects = %d, err = %v", len(objs), err)
 	}
 }

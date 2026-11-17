@@ -254,8 +254,8 @@ func (c *collector) add(sha gitpack.SHA) {
 	}
 }
 
-// walkTree records the tree and what it holds in seen, once for each object. A tree that seen holds is not read
-// again. add, when set, takes each new object in place of seen.
+// walkTree records the tree and what it holds in seen, once for each object. A tree is recorded when it is queued, so
+// the queue holds each tree once and counts toward the bound. add, when set, takes each new object in place of seen.
 func (c *collector) walkTree(root gitpack.SHA, seen map[gitpack.SHA]struct{}, add func(gitpack.SHA)) error {
 	record := func(sha gitpack.SHA) bool {
 		if _, ok := seen[sha]; ok {
@@ -271,16 +271,13 @@ func (c *collector) walkTree(root gitpack.SHA, seen map[gitpack.SHA]struct{}, ad
 		}
 		return true
 	}
+	if !record(root) {
+		return nil
+	}
 	stack := []gitpack.SHA{root}
 	for len(stack) > 0 {
 		sha := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
-		if !record(sha) {
-			continue
-		}
-		if c.tracked() {
-			return ErrTooLarge
-		}
 		t, data, err := c.objs.Get(c.ctx, sha)
 		if err != nil {
 			return err
@@ -295,7 +292,9 @@ func (c *collector) walkTree(root gitpack.SHA, seen map[gitpack.SHA]struct{}, ad
 			switch {
 			case mode == 0o160000:
 			case mode == 0o40000:
-				stack = append(stack, child)
+				if record(child) {
+					stack = append(stack, child)
+				}
 			case !c.blobNone || add == nil:
 				record(child)
 			}

@@ -128,76 +128,76 @@ func readEntry(r *bytes.Reader, off int64, declared *int64) (*unpacked, error) {
 	return e, nil
 }
 
+// resolveEntries resolves each delta once, when its base is resolved. A ref delta whose base the pack does not hold
+// asks external once for each base name, after every entry that the pack can resolve is resolved.
 func resolveEntries(ctx context.Context, entries []*unpacked, byOff map[int64]*unpacked, external func(SHA) (Type, []byte, error)) ([]Object, error) {
-	byName := map[SHA]*unpacked{}
-	for _, e := range entries {
-		if e.done {
-			byName[e.name] = e
-		}
-	}
 	var total int64
+	var queue []*unpacked
+	waitName := map[SHA][]*unpacked{}
+	waitOff := map[int64][]*unpacked{}
 	for _, e := range entries {
-		if e.done {
+		switch {
+		case e.done:
 			total += int64(len(e.data))
+			queue = append(queue, e)
+		case e.delta == 7:
+			waitName[e.baseName] = append(waitName[e.baseName], e)
+		case byOff[e.baseOff] != nil:
+			waitOff[e.baseOff] = append(waitOff[e.baseOff], e)
 		}
 	}
 	if total > MaxUnpackBytes {
 		return nil, ErrTooLarge
 	}
-	var missing error
-	apply := func(e *unpacked, baseType Type, base []byte) error {
-		out, err := applyDelta(base, e.data)
-		if err != nil {
-			return err
+	settle := func(base *unpacked) error {
+		deps := append(waitName[base.name], waitOff[base.off]...)
+		delete(waitName, base.name)
+		delete(waitOff, base.off)
+		for _, e := range deps {
+			out, err := applyDelta(base.data, e.data)
+			if err != nil {
+				return err
+			}
+			if total += int64(len(out)); total > MaxUnpackBytes {
+				return ErrTooLarge
+			}
+			e.t, e.data, e.done = base.t, out, true
+			e.name = Hash(e.t, e.data)
+			queue = append(queue, e)
 		}
-		if total += int64(len(out)); total > MaxUnpackBytes {
-			return ErrTooLarge
+		return ctx.Err()
+	}
+	drain := func() error {
+		for len(queue) > 0 {
+			base := queue[0]
+			queue = queue[1:]
+			if err := settle(base); err != nil {
+				return err
+			}
 		}
-		e.t, e.data, e.done = baseType, out, true
-		e.name = Hash(e.t, e.data)
-		byName[e.name] = e
 		return nil
 	}
-	for useExternal := false; ; {
-		progress := false
-		for _, e := range entries {
-			if e.done {
-				continue
-			}
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			base := byOff[e.baseOff]
-			if e.delta == 7 {
-				base = byName[e.baseName]
-			}
-			switch {
-			case base != nil && base.done:
-				if err := apply(e, base.t, base.data); err != nil {
-					return nil, err
-				}
-				progress = true
-			case e.delta == 7 && base == nil && useExternal:
-				t, data, err := external(e.baseName)
-				if err != nil {
-					if missing == nil {
-						missing = err
-					}
-					continue
-				}
-				if err := apply(e, t, data); err != nil {
-					return nil, err
-				}
-				progress = true
-			}
-		}
-		if progress {
+	if err := drain(); err != nil {
+		return nil, err
+	}
+	var missing error
+	for name := range waitName {
+		if _, ok := waitName[name]; !ok {
 			continue
 		}
-		if useExternal {
-			break
+		t, data, err := external(name)
+		if err != nil {
+			if missing == nil {
+				missing = err
+			}
+			continue
 		}
-		useExternal = true
+		if err := settle(&unpacked{t: t, data: data, name: name, off: -1}); err != nil {
+			return nil, err
+		}
+		if err := drain(); err != nil {
+			return nil, err
+		}
 	}
 	objs := make([]Object, len(entries))
 	for i, e := range entries {
