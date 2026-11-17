@@ -1,0 +1,8 @@
+{
+  "group": "workspace",
+  "steps": [
+    {"name": "first swap", "request": {"op": "opheads", "expect": 0, "heads": ["a1a1a1a1a1a1a1a1"]}, "answer": {"gen": 1, "heads": ["a1a1a1a1a1a1a1a1"]}},
+    {"name": "report the head operation", "request": {"op": "workspace", "sha": "a1a1a1a1a1a1a1a1", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "generation": 1}, "answer": {}},
+    {"name": "a generation of zero", "request": {"op": "workspace", "sha": "a1a1a1a1a1a1a1a1", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "generation": 0}, "answer": {"err": "*", "code": "vcs_object_invalid"}}
+  ]
+}

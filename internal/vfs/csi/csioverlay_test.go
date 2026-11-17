@@ -110,7 +110,7 @@ func newOverlayPlugin(t *testing.T) (*NodePlugin, *fakeMnt) {
 	t.Cleanup(func() { _ = os.RemoveAll(state) })
 	f := &fakeMnt{t: t, state: state, tgt: filepath.Join(state, "target"), fail: map[string]error{}}
 	p := &NodePlugin{StateDir: state, UID: uint32(os.Getuid()), GID: uint32(os.Getgid()), mnt: f,
-		Grant: func(volattr.Publication) string { return "" }, vols: map[string]*volume{}}
+		Grant: func(volattr.Publication) (string, error) { return "", nil }, vols: map[string]*volume{}}
 	return p, f
 }
 

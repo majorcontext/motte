@@ -8,9 +8,6 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -27,13 +24,14 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
-	"github.com/majorcontext/motte/grant"
+	"github.com/majorcontext/motte/client"
 	"github.com/majorcontext/motte/internal/gitpack"
 	"github.com/majorcontext/motte/internal/vfs/csi"
 	"github.com/majorcontext/motte/internal/vfs/ctl"
 	"github.com/majorcontext/motte/internal/vfs/importer"
 	"github.com/majorcontext/motte/internal/vfs/lower"
 	"github.com/majorcontext/motte/internal/vfs/materialize"
+	"github.com/majorcontext/motte/internal/vfs/nodegrant"
 	"github.com/majorcontext/motte/internal/vfs/store"
 	"github.com/majorcontext/motte/internal/vfs/tel"
 	"github.com/majorcontext/motte/internal/vfs/upperdir"
@@ -120,7 +118,7 @@ func (s *storeFlags) open(mode string) (*store.HTTPStore, gitpack.SHA, error) {
 	if err != nil {
 		return nil, sha, fmt.Errorf("-commit: %w", err)
 	}
-	return &store.HTTPStore{BaseURL: s.api, Grant: func() (string, error) { return grant, nil }, Client: &http.Client{Timeout: 2 * time.Minute}, Tel: s.telemetry(mode)}, sha, nil
+	return &store.HTTPStore{BaseURL: s.api, Grant: client.StaticGrant(grant), Client: &http.Client{Timeout: 2 * time.Minute}, Tel: s.telemetry(mode)}, sha, nil
 }
 
 func runImport(ctx context.Context, args []string) error {
@@ -136,7 +134,7 @@ func runImport(ctx context.Context, args []string) error {
 	if *api == "" || *remote == "" || grant == "" {
 		return fmt.Errorf("-api, -remote and %s are required", volume.GrantEnv)
 	}
-	st := &store.HTTPStore{BaseURL: *api, Grant: func() (string, error) { return grant, nil }, Client: &http.Client{Timeout: 5 * time.Minute}}
+	st := &store.HTTPStore{BaseURL: *api, Grant: client.StaticGrant(grant), Client: &http.Client{Timeout: 5 * time.Minute}}
 	if *depth == 0 {
 		sha, stats, err := importer.ImportHistory(ctx, st, *remote, *ref, func(format string, args ...any) { logger.Info(fmt.Sprintf(format, args...)) })
 		if err != nil {
@@ -173,20 +171,14 @@ func runCSI(ctx context.Context, args []string) error {
 	if err := csi.CheckHostPID(os.Readlink); err != nil {
 		return err
 	}
-	signer, err := loadSigner(*keyFile)
+	minter, err := nodegrant.Load(*keyFile)
 	if err != nil {
 		return err
 	}
 	p := &csi.NodePlugin{
 		DriverName: *driver, NodeID: *node, StateDir: *state, APIURL: *api,
-		Grant: func(pub volume.Publication) string {
-			g, err := signer.Mint(grant.Claims{Scope: grant.ScopeNode, WS: pub.Workspace, Epoch: pub.Epoch, Repo: pub.Repo, Exp: time.Now().Add(time.Hour).Unix()})
-			if err != nil {
-				logger.Error("grant mint failed", "error", err.Error())
-			}
-			return g
-		},
-		UID: uint32(*uid), GID: uint32(*gid), HTTP: &http.Client{Timeout: 2 * time.Minute}, Logger: logger,
+		Grant: minter.Mint,
+		UID:   uint32(*uid), GID: uint32(*gid), HTTP: &http.Client{Timeout: 2 * time.Minute}, Logger: logger,
 	}
 	go (&tel.Health{Logger: logger, Node: *node, Mounts: p.Mounts, Tier2: store.Tier2Bytes}).Run(ctx)
 	go p.SeedCacheSize(*state + "/cache")
@@ -280,27 +272,4 @@ func serve(ctx context.Context, srv *fuse.Server) {
 		}
 	}()
 	srv.Wait()
-}
-
-func loadSigner(path string) (grant.Signer, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return grant.Signer{}, err
-	}
-	var k struct{ Kid, Key string }
-	if err := json.Unmarshal(raw, &k); err != nil || k.Kid == "" {
-		return grant.Signer{}, errors.New("grant key file: want JSON with kid and key")
-	}
-	b, err := base64.StdEncoding.DecodeString(k.Key)
-	if err != nil {
-		return grant.Signer{}, fmt.Errorf("grant key file: key: %w", err)
-	}
-	switch len(b) {
-	case ed25519.SeedSize:
-		b = ed25519.NewKeyFromSeed(b)
-	case ed25519.PrivateKeySize:
-	default:
-		return grant.Signer{}, errors.New("grant key file: key is not an Ed25519 private key or seed")
-	}
-	return grant.Signer{Kid: k.Kid, Key: b}, nil
 }

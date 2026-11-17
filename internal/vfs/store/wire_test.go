@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/majorcontext/motte/api"
@@ -23,7 +26,13 @@ func TestHTTPStoreSpeaksTheStoreWire(t *testing.T) {
 		t.Fatal(err)
 	}
 	tok := srv.NodeGrant(t, "w1", 1, repo)
-	st := &store.HTTPStore{BaseURL: srv.URL, Grant: func() (string, error) { return tok, nil }}
+	st := &store.HTTPStore{BaseURL: srv.URL + "/", Grant: client.StaticGrant(tok)}
+	if oh, err := st.OpHeads(ctx); err != nil || oh.Generation != 0 || oh.Heads == nil || len(oh.Heads) != 0 {
+		t.Fatalf("OpHeads before the first write = %+v %v, want generation 0 and no heads", oh, err)
+	}
+	if _, err := (&store.HTTPStore{BaseURL: srv.URL, Grant: client.StaticGrant(srv.NodeGrant(t, "w1", 1, "gh:other/repo"))}).Refs(ctx); !errors.Is(err, store.ErrGrantRefused) {
+		t.Fatalf("Refs of a repo that the claim does not name = %v, want ErrGrantRefused", err)
+	}
 
 	blob := gitpack.Object{Type: gitpack.Blob, Data: []byte("hello\n")}
 	blobSHA := gitpack.Hash(gitpack.Blob, blob.Data)
@@ -51,8 +60,8 @@ func TestHTTPStoreSpeaksTheStoreWire(t *testing.T) {
 	if err != nil || ref.Commit != commitSHA.String() {
 		t.Fatalf("SwapRef create = %+v %v", ref, err)
 	}
-	var conflict *store.RefConflictError
-	if _, err := st.SwapRef(ctx, "heads/main", ref.Generation+9, commitSHA.String()); !errors.As(err, &conflict) || conflict.Ref == nil || conflict.Ref.Generation != ref.Generation {
+	_, err = st.SwapRef(ctx, "heads/main", ref.Generation+9, commitSHA.String())
+	if cur, ok := client.CurrentRef(err); !errors.Is(err, client.ErrGenerationConflict) || !ok || cur.Generation != ref.Generation {
 		t.Fatalf("stale SwapRef = %v, want a conflict that carries the stored ref", err)
 	}
 
@@ -67,5 +76,18 @@ func TestHTTPStoreSpeaksTheStoreWire(t *testing.T) {
 	}
 	if err := st.PutWorkspace(ctx, "abababababababab", commitSHA.String(), 1); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestHTTPStoreFailsACallWhoseGrantFails: a grant that cannot be minted fails the call and sends no request, so
+// the store never sees an empty bearer token.
+func TestHTTPStoreFailsACallWhoseGrantFails(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+	defer srv.Close()
+	boom := errors.New("mint failed")
+	st := &store.HTTPStore{BaseURL: srv.URL, Grant: func(context.Context) (string, error) { return "", boom }}
+	if _, err := st.Refs(t.Context()); !errors.Is(err, boom) || calls.Load() != 0 {
+		t.Errorf("Refs = %v after %d requests, want the mint error and none", err, calls.Load())
 	}
 }

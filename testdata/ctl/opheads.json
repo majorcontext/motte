@@ -1,0 +1,10 @@
+{
+  "group": "opheads",
+  "steps": [
+    {"name": "read before the first write", "request": {"op": "opheads"}, "answer": {"gen": 0, "heads": []}},
+    {"name": "first swap", "request": {"op": "opheads", "expect": 0, "heads": ["a1a1a1a1a1a1a1a1"]}, "answer": {"gen": 1, "heads": ["a1a1a1a1a1a1a1a1"]}},
+    {"name": "read", "request": {"op": "opheads"}, "answer": {"gen": 1, "heads": ["a1a1a1a1a1a1a1a1"]}},
+    {"name": "stale swap", "request": {"op": "opheads", "expect": 0, "heads": ["b2b2b2b2b2b2b2b2"]}, "answer": {"err": "*", "code": "vcs_generation_conflict"}},
+    {"name": "second swap", "request": {"op": "opheads", "expect": 1, "heads": ["b2b2b2b2b2b2b2b2"]}, "answer": {"gen": 2, "heads": ["b2b2b2b2b2b2b2b2"]}}
+  ]
+}

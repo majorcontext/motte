@@ -1,0 +1,8 @@
+{
+  "group": "putop",
+  "steps": [
+    {"name": "put an operation", "request": {"op": "putop", "type": "operations", "sha": "a1a1a1a1a1a1a1a1", "data": "b3A="}, "answer": {}},
+    {"name": "put a view", "request": {"op": "putop", "type": "views", "sha": "b2b2b2b2b2b2b2b2", "data": "dmlldw=="}, "answer": {}},
+    {"name": "data is not base64", "request": {"op": "putop", "type": "views", "sha": "b2b2b2b2b2b2b2b2", "data": "!!"}, "answer": {"err": "*", "code": "invalid_request"}}
+  ]
+}

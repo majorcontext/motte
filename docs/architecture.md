@@ -157,29 +157,13 @@ The backend writes the bytes of `GitBackend::write_commit` (the `change-id` and 
 
 ### Daemon channel
 
-The shims speak to the workspace daemon with one JSON object per line over the unix socket that `MOTTE_VFS_SOCK` names. An error answer carries `err`. The shim hashes every object itself and refuses an answer whose SHA differs. A daemon that is not in overlay mode fails every command that needs the dirty set. The operations are:
+The shims speak to the workspace daemon with the control protocol (see Control protocol) over the unix socket that `MOTTE_VFS_SOCK` names. A shim branches on the `code` of an error answer, never on its `err` text. The shim hashes every object itself and refuses an answer whose SHA differs. A daemon that is not in overlay mode fails every command that needs the dirty set.
 
-| op | request | answer |
-|---|---|---|
-| `get` | `sha` | `type`, `data` (base64) |
-| `put` | `type`, `data` (base64) | `sha` |
-| `putbatch` | `objects`: a list of `{type, data}` | `shas`, in request order |
-| `opheads` | `expect` and `heads` (both optional) | `gen`, `heads` |
-| `refs` | `name` (optional) | `refs`: a list of `{name, commit, generation}`; `ref` with `name` |
-| `swapref` | `name`, `expect`, `commit`, or `delete: true` with `expect` | `ref`; none after a delete; on a lost swap `code` `vcs_generation_conflict` with `err` and the stored `ref` |
-| `putop` | `type` (`operations` or `views`), `sha`, `data` (base64) | none |
-| `getop` | `type`, `sha` | `data` (base64) |
-| `getbatch` | `shas`, `max_size` (optional) | `datas` (base64); `large`: the indices of blobs over `max_size`, sent without data |
-| `has` | `shas` | `present`: one bool for each name; `unknown op` from a daemon that cannot answer |
-| `changes` | none | `boot`, `token`, `base_tree`, `changes`: a list of `{path, status, old_sha, old_mode, old_size, new_sha, new_mode, size}` |
-| `dirty` | none | `boot`, `token`, `base_tree`, `entries`: a list of `{path, kind, exec, opaque}` |
-| `token` | none | `boot`, `token`, `base_tree` |
-
-Every request carries the W3C `traceparent` of the innermost open span, or the `TRACEPARENT` environment variable. With `OTEL_EXPORTER_OTLP_ENDPOINT` set, the binary exports OTLP over plain HTTP, with no retry and a 500 ms limit: one span `jj.command` for each command and one for each operation (`jj.motte.snapshot`, `jj.snapshot`, `jj.checkout`, `jj.read_tree`, `jj.write_commit`, `jj.op_heads.update`, `jj.push`, `jj.fetch`), with the counts `objects` and `bytes`. `OTEL_SDK_DISABLED=true` or `OTEL_TRACES_EXPORTER=none` turns tracing off. A span holds no path, file content or credential. A snapshot sends blobs with `putbatch`, at most 64 blobs or 8 MiB a request, and falls back to `put` on `unknown op`.
+Every request carries the W3C `traceparent` of the innermost open span, or the `TRACEPARENT` environment variable. With `OTEL_EXPORTER_OTLP_ENDPOINT` set, the binary exports OTLP over plain HTTP, with no retry and a 500 ms limit: one span `jj.command` for each command and one for each operation (`jj.motte.snapshot`, `jj.snapshot`, `jj.checkout`, `jj.read_tree`, `jj.write_commit`, `jj.op_heads.update`, `jj.push`, `jj.fetch`), with the counts `objects` and `bytes`. `OTEL_SDK_DISABLED=true` or `OTEL_TRACES_EXPORTER=none` turns tracing off. A span holds no path, file content or credential. A snapshot sends blobs with `putbatch`, at most 64 blobs or 8 MiB a request, and falls back to `put` on the code `unknown_op`.
 
 ### Op heads
 
-`opheads` without `heads` reads the op heads of the workspace; a store `vcs_not_found` before the first write is generation 0 and no heads. With `heads` it swaps them when the stored generation is `expect`. Each update of `motte-op-heads` first reads the remote heads, so a writer whose claim is lost fails with `vcs_claim_lost` before its local write. It then writes the local heads, removes from the remote set the replaced operations and every remote head that the local op store holds and the local heads do not, adds the new head and swaps. On `vcs_generation_conflict` it reads the winning heads and applies its update again. All daemon calls of one update share a budget of 2 seconds. A daemon that answers `unknown op` leaves the remote heads behind the local ones and the command succeeds. Any other store failure, or a spent budget, does the same and also adds the new head to the marker `motte_unsynced` in the repo directory. A lost claim at the swap fails the command after the local write.
+`opheads` without `heads` reads the op heads of the workspace; a store `vcs_not_found` before the first write is generation 0 and no heads. With `heads` it swaps them when the stored generation is `expect`. Each update of `motte-op-heads` first reads the remote heads, so a writer whose claim is lost fails with `vcs_claim_lost` before its local write. It then writes the local heads, removes from the remote set the replaced operations and every remote head that the local op store holds and the local heads do not, adds the new head and swaps. On `vcs_generation_conflict` it reads the winning heads and applies its update again. All daemon calls of one update share a budget of 2 seconds. A daemon that answers the code `unknown_op` leaves the remote heads behind the local ones and the command succeeds. Any other store failure, or a spent budget, does the same and also adds the new head to the marker `motte_unsynced` in the repo directory. A lost claim at the swap fails the command after the local write.
 
 ### Subcommands
 
@@ -308,7 +292,7 @@ The packages under `internal/vfs` are the node daemon of the virtual workspace. 
 | `internal/vfs/tel` | Correlation, spans, log records and the health record. |
 | `internal/vfs/upperdir` | The scan of the upper directory. |
 
-`HTTPStore` is the store client of the daemon. It sends the grant as a bearer token, injects W3C trace headers, follows no redirect, and answers 403 with `ErrGrantRefused`, which no retry passes. A 409 `vcs_generation_conflict` answer becomes `RefConflictError` with the stored ref from `details.ref`. A test drives `HTTPStore` against the real service.
+`HTTPStore` is the store client of the daemon. It is `client.Client` with the spans of the daemon, so it follows no redirect, trims a trailing `/` of the base URL, and matches errors with `errors.Is` on the sentinels of `client`. It answers a `vcs_repo_forbidden` answer with `ErrGrantRefused`, which no retry passes. A call has no budget of its own; the timeout of the HTTP client bounds it. A grant that fails to mint fails the call, and no request leaves with an empty token. A test drives `HTTPStore` against the real service.
 
 ### Commands
 
@@ -319,7 +303,7 @@ The packages under `internal/vfs` are the node daemon of the virtual workspace. 
 | `motte-vfsd materialize` | Writes the checkout of a commit to `-dest`. A marker file records a finished checkout, and a later run changes nothing, whatever commit it names. |
 | `motte-vfsd import` | Fetches a repository with `git`, packs it and uploads it with an `import` grant (`PUT /v1/vcs/packs/{pack_id}`). `-depth 0` imports the whole history as packs of about 48 MiB and skips the ranges that the store holds. |
 
-The key file of `csi` is JSON `{"kid","key"}`. `key` is the standard base64 of an Ed25519 private key or of its 32-byte seed. The store must trust the public key for the scope `node`. The plugin signs a `node` grant for each store call. The grant names the workspace, the claim epoch and the repository of the volume attributes, and it expires after one hour.
+The key file of `csi` is JSON `{"kid","key"}`. `key` is the standard base64 of an Ed25519 private key or of its 32-byte seed. The store must trust the public key for the scope `node`. The plugin signs a `node` grant for each store call. The grant names the workspace, the claim epoch and the repository of the volume attributes, and it expires after one hour (`internal/vfs/nodegrant`). A publish whose claims are incomplete, such as epoch 0, fails.
 
 ### Mount mode
 
@@ -351,25 +335,41 @@ Package `volume` is the public contract between a caller and the plugin. A works
 
 ### Control protocol
 
-One JSON object for each line over the unix socket. An error answer carries `err`. A lost ref swap carries `code` `vcs_generation_conflict`, `err` and the stored `ref`. An unknown op answers `unknown op`.
+The daemon answers each line of the unix socket with one line. A request is a JSON object with `op`, the fields of the op, and an optional `traceparent`. A request line over 64 MiB is answered with the code `line_too_long`, and the connection stays open. The daemon closes every connection when its mount ends.
+
+A success answer holds exactly the fields that the table names. A field is never omitted, and a list is `[]` when it is empty. An answer with no fields is `{}`. An error answer is `{"err", "code"}`, with `ref` on a lost ref swap. `err` is for people. A consumer branches on `code`:
+
+| code | Cause |
+|---|---|
+| `invalid_request` | The line is no JSON object, or a field is missing, malformed or over a limit. |
+| `unknown_op` | The op does not exist, or the daemon cannot answer it. |
+| `line_too_long` | The request line is over 64 MiB. |
+| `store_unavailable` | The store call got no answer, or an answer that is no wire error. |
+| `internal_error` | The daemon failed on its own side, such as a read of the upper directory. |
+| `vcs_object_too_large` | An object is over 16 MiB, or a `getbatch` answer would pass 16 MiB. The store refuses an object over 16 MiB. |
+| `vcs_not_found`, `vcs_generation_conflict`, `vcs_claim_lost`, `vcs_object_invalid`, `vcs_repo_forbidden`, `vcs_workspace_conflict`, `vcs_workspace_deleted`, `vcs_not_configured`, `unauthorized`, `invalid_body` | The wire code of the store answer. |
 
 | op | request | answer |
 |---|---|---|
 | `get` | `sha` | `type`, `data` (base64) |
 | `put` | `type`, `data` (base64) | `sha` |
-| `putbatch` | `objects`: list of `{type, data}` | `shas`, in request order |
+| `putbatch` | `objects`: list of `{type, data}`, at most 4096 | `shas`, in request order |
+| `has` | `shas`, at most 4096 | `present`: one bool for each name, from `POST /v1/vcs/objects/has` |
 | `opheads` | `expect`, `heads` (both optional) | `gen`, `heads` |
-| `refs` | `name` (optional) | `refs`: list of `{name, commit, generation}`; `ref` with `name` |
-| `swapref` | `name`, `expect`, `commit`, or `delete: true` with `expect` | `ref`, none after a delete |
-| `putop` | `type` (`operations` or `views`), `sha`, `data` (base64) | none |
+| `refs` | `name` (optional) | `refs`: list of `{name, commit, generation}` without `name`; `ref` with `name` |
+| `swapref` | `name`, `expect`, `commit`, or `delete: true` with `expect` of at least 1 | `ref`; `{}` after a delete; on a lost swap the error answer carries the stored `ref`, when one exists |
+| `putop` | `type` (`operations` or `views`), `sha`, `data` (base64) | `{}` |
 | `getop` | `type`, `sha` | `data` (base64) |
-| `getbatch` | `shas`, `max_size` (optional) | `datas` in request order; `large`: indices of blobs over `max_size`, sent without data |
-| `has` | `shas` | `present`: one bool for each name, from `POST /v1/vcs/objects/has` |
+| `getbatch` | `shas`, at most 4096, `max_size` (optional) | `datas` in request order; `large`: indices of blobs over `max_size`, whose `datas` entry is empty |
+| `workspace` | `sha` (the head operation), `commit`, `generation` | `{}` |
 | `changes` | none | `boot`, `token`, `base_tree`, `changes`: list of `{path, status, old_sha, old_mode, old_size, new_sha, new_mode, size}` |
 | `dirty` | none | `boot`, `token`, `base_tree`, `entries`: list of `{path, kind, exec, opaque}` |
 | `token` | none | `boot`, `token`, `base_tree` |
-| `workspace` | `sha` (the head operation), `commit`, `generation` | none |
-| `stats` | none | cache counters `blob_hits`, `blob_misses`, `tree_calls` |
+| `stats` | none | cache counters `blob_hits`, `blob_misses`, `tree_calls` (numbers) |
+
+`opheads` without `heads` reads the op heads: generation 0 and no heads before the first write. With `heads` it swaps them when the stored generation is `expect`. The objects in `changes` and `entries` omit a field that is zero or empty. `put` and `putbatch` name each object by the hash of its bytes. `swapref` with `expect` 0 creates the ref. A ref name is a valid ref name, and a commit is 40 lowercase hex digits.
+
+The fixtures in `testdata/ctl` pin the table. A file `<group>.json` is `{"group", "steps"}`. A step is `{"name", "request" or "raw", "answer"}` and may have `"given"`. A consumer opens one connection to a fresh daemon for each file and replays the steps in order. It sends `request` as one line, or `raw` as one line of text, and compares the answer line with `answer`. Objects match key for key, with no key missing or surplus, and lists match element for element. The string `"*"` in an answer matches any value that is present. `given` names a state of the upper directory that only the daemon under test sets up, and other consumers ignore it. `edited` is an upper directory with `a` rewritten and `n` added over the base tree of the fixtures; `clean` is the empty upper directory. The Go tests replay every file against the real socket, the real service and a lower layer on an in-memory upper directory. A shim and its fake replay the same files.
 
 ### Dirty set
 
@@ -401,4 +401,4 @@ A directory that merges a base directory at another path lists every base leaf b
 
 ### Tests
 
-The packages under `internal/vfs` pin the daemon over an in-memory upper directory, the plugin over a fake of the mount seam, the ref and op-head wire against a fake store, and `HTTPStore` against the real service. `internal/vfs/upperdir` tests `Scan` against a model of overlayfs and, as root, against a real overlay. No Go test mounts FUSE. The harness under `internal/vfs/testdata` (`vfsfuzz`, `overlaycheck`, `overlaykit`) checks a real overlay over a running daemon and needs root, `/dev/fuse` and overlayfs. CI vets the tools and runs the tests of `overlaykit`.
+The packages under `internal/vfs` pin the daemon over an in-memory upper directory, the plugin over a fake of the mount seam, the control protocol fixtures against the real service, and `HTTPStore` against the real service. `internal/vfs/upperdir` tests `Scan` against a model of overlayfs and, as root, against a real overlay. No Go test mounts FUSE. The harness under `internal/vfs/testdata` (`vfsfuzz`, `overlaycheck`, `overlaykit`) checks a real overlay over a running daemon and needs root, `/dev/fuse` and overlayfs. CI vets the tools and runs the tests of `overlaykit`.

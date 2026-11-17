@@ -44,7 +44,7 @@ type NodePlugin struct {
 	// APIURL is the store base URL. Grant signs the node grant of a volume; the plugin calls it for every
 	// store call, so a mount outlives any one grant.
 	APIURL string
-	Grant  func(volattr.Publication) string
+	Grant  func(volattr.Publication) (string, error)
 	UID    uint32
 	GID    uint32
 	HTTP   *http.Client

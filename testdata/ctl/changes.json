@@ -1,0 +1,7 @@
+{
+  "group": "changes",
+  "steps": [
+    {"name": "clean", "given": "clean", "request": {"op": "changes"}, "answer": {"boot": "*", "token": "*", "base_tree": "724936f2e41ff5f07ef5998ecd6f7e6ee0be0eea", "changes": []}},
+    {"name": "edited", "given": "edited", "request": {"op": "changes"}, "answer": {"boot": "*", "token": "*", "base_tree": "724936f2e41ff5f07ef5998ecd6f7e6ee0be0eea", "changes": [{"path": "a", "status": "modified", "old_sha": "56a6051ca2b02b04ef92d5150c9ef600403cb1de", "old_mode": 33188, "old_size": 1, "new_sha": "43dd47ea691c90a5fa7827892c70241913351963", "new_mode": 33188, "size": 3}, {"path": "n", "status": "added", "new_mode": 33188, "size": 3}]}}
+  ]
+}

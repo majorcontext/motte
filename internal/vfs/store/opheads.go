@@ -2,13 +2,11 @@ package store
 
 import (
 	"context"
-	"encoding/base64"
-	"net/http"
-	"net/url"
-	"strings"
+	"errors"
 	"time"
 
 	"github.com/majorcontext/motte/api"
+	"github.com/majorcontext/motte/client"
 )
 
 // OpHeadsStore reads and swaps the op heads of the workspace that the grant names.
@@ -28,45 +26,33 @@ type OpObjectStore interface {
 }
 
 func (s *HTTPStore) PutOp(ctx context.Context, kind, id string, data []byte) error {
-	cctx, cl := s.begin(ctx, "vcs.client.op.put", "/v1/vcs/ops/{kind}/{object_id}")
-	err := s.do(cctx, cl, http.MethodPut, "/v1/vcs/ops/"+url.PathEscape(kind)+"/"+url.PathEscape(id), api.OpObject{Data: base64.StdEncoding.EncodeToString(data)}, nil)
-	cl.end(cctx, 1, err)
-	return err
+	ctx, cl := s.begin(ctx, "vcs.client.op.put", "/v1/vcs/ops/{kind}/{object_id}")
+	return cl.end(ctx, 1, s.c().PutOp(ctx, kind, id, data))
 }
 
 func (s *HTTPStore) GetOp(ctx context.Context, kind, id string) ([]byte, error) {
-	var out api.OpObject
-	cctx, cl := s.begin(ctx, "vcs.client.op.get", "/v1/vcs/ops/{kind}/{object_id}")
-	err := s.do(cctx, cl, http.MethodGet, "/v1/vcs/ops/"+url.PathEscape(kind)+"/"+url.PathEscape(id), nil, &out)
-	cl.end(cctx, 1, err)
-	if err != nil {
-		return nil, err
-	}
-	return base64.StdEncoding.DecodeString(out.Data)
+	ctx, cl := s.begin(ctx, "vcs.client.op.get", "/v1/vcs/ops/{kind}/{object_id}")
+	data, err := s.c().Op(ctx, kind, id)
+	return data, cl.end(ctx, 1, err)
 }
 
 func (s *HTTPStore) PutWorkspace(ctx context.Context, op, commit string, generation int64) error {
-	cctx, cl := s.begin(ctx, "vcs.client.workspace.put", "/v1/vcs/workspace")
-	err := s.do(cctx, cl, http.MethodPut, "/v1/vcs/workspace", api.SetWorkspaceRequest{Op: op, Commit: commit, Generation: generation}, nil)
-	cl.end(cctx, 0, err)
-	return err
+	ctx, cl := s.begin(ctx, "vcs.client.workspace.put", "/v1/vcs/workspace")
+	return cl.end(ctx, 0, s.c().SetWorkspace(ctx, op, commit, generation))
 }
 
+// OpHeads reads the op heads. A workspace that has none yet is generation 0 and no heads.
 func (s *HTTPStore) OpHeads(ctx context.Context) (api.OpHeads, error) {
-	var out api.OpHeads
-	cctx, cl := s.begin(ctx, "vcs.client.op_heads.get", "/v1/vcs/op-heads")
-	err := s.do(cctx, cl, http.MethodGet, "/v1/vcs/op-heads", nil, &out)
-	if cl.status == http.StatusNotFound && err != nil && strings.Contains(err.Error(), "vcs_not_found") {
-		err, out = nil, api.OpHeads{Heads: []string{}}
+	ctx, cl := s.begin(ctx, "vcs.client.op_heads.get", "/v1/vcs/op-heads")
+	out, err := s.c().OpHeads(ctx)
+	if errors.Is(err, client.ErrNotFound) {
+		out, err = api.OpHeads{Heads: []string{}}, nil
 	}
-	cl.end(cctx, 0, err)
-	return out, err
+	return out, cl.end(ctx, 0, err)
 }
 
 func (s *HTTPStore) SwapOpHeads(ctx context.Context, expect int64, heads []string) (api.OpHeads, error) {
-	var out api.OpHeads
-	cctx, cl := s.begin(ctx, "vcs.client.op_heads.swap", "/v1/vcs/op-heads")
-	err := s.do(cctx, cl, http.MethodPut, "/v1/vcs/op-heads", api.SwapOpHeadsRequest{ExpectGeneration: expect, Heads: heads}, &out)
-	cl.end(cctx, len(heads), err)
-	return out, err
+	ctx, cl := s.begin(ctx, "vcs.client.op_heads.swap", "/v1/vcs/op-heads")
+	out, err := s.c().SwapOpHeads(ctx, expect, heads)
+	return out, cl.end(ctx, len(heads), err)
 }

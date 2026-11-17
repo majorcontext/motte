@@ -1,0 +1,17 @@
+{
+  "group": "swapref",
+  "steps": [
+    {"name": "create", "request": {"op": "swapref", "name": "heads/main", "expect": 0, "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, "answer": {"ref": {"name": "heads/main", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "generation": 1}}},
+    {"name": "move", "request": {"op": "swapref", "name": "heads/main", "expect": 1, "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "answer": {"ref": {"name": "heads/main", "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "generation": 2}}},
+    {"name": "stale expect carries the stored ref", "request": {"op": "swapref", "name": "heads/main", "expect": 1, "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, "answer": {"err": "*", "code": "vcs_generation_conflict", "ref": {"name": "heads/main", "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "generation": 2}}},
+    {"name": "create over an existing ref", "request": {"op": "swapref", "name": "heads/main", "expect": 0, "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, "answer": {"err": "*", "code": "vcs_generation_conflict", "ref": {"name": "heads/main", "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "generation": 2}}},
+    {"name": "delete with the stored generation", "request": {"op": "swapref", "name": "heads/main", "expect": 2, "delete": true}, "answer": {}},
+    {"name": "delete of a ref that is gone", "request": {"op": "swapref", "name": "heads/main", "expect": 2, "delete": true}, "answer": {"err": "*", "code": "vcs_generation_conflict"}},
+    {"name": "create again after the delete", "request": {"op": "swapref", "name": "heads/main", "expect": 0, "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, "answer": {"ref": {"name": "heads/main", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "generation": "*"}}},
+    {"name": "commit is not 40 lowercase hex", "request": {"op": "swapref", "name": "heads/main", "expect": 1, "commit": "ABC"}, "answer": {"err": "*", "code": "invalid_request"}},
+    {"name": "no name", "request": {"op": "swapref", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, "answer": {"err": "*", "code": "invalid_request"}},
+    {"name": "dotted segment", "request": {"op": "swapref", "name": "heads/../tags/v1", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, "answer": {"err": "*", "code": "invalid_request"}},
+    {"name": "empty segment", "request": {"op": "swapref", "name": "heads//main", "expect": 1, "delete": true}, "answer": {"err": "*", "code": "invalid_request"}},
+    {"name": "delete without the stored generation", "request": {"op": "swapref", "name": "heads/main", "delete": true}, "answer": {"err": "*", "code": "invalid_request"}}
+  ]
+}

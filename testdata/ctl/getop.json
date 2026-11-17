@@ -1,0 +1,8 @@
+{
+  "group": "getop",
+  "steps": [
+    {"name": "put first", "request": {"op": "putop", "type": "operations", "sha": "a1a1a1a1a1a1a1a1", "data": "b3A="}, "answer": {}},
+    {"name": "get it", "request": {"op": "getop", "type": "operations", "sha": "a1a1a1a1a1a1a1a1"}, "answer": {"data": "b3A="}},
+    {"name": "get an absent operation", "request": {"op": "getop", "type": "operations", "sha": "b2b2b2b2b2b2b2b2"}, "answer": {"err": "*", "code": "vcs_not_found"}}
+  ]
+}

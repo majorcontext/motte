@@ -31,7 +31,7 @@ type mounter interface {
 // lowerLayer is the VFS of an overlay volume and its FUSE mount.
 type lowerLayer interface {
 	mount(ctx context.Context, dir string) error
-	// serve answers the control protocol on l until the returned stop function runs.
+	// serve answers the control protocol on l until the returned stop function runs. Stop returns after every control connection is closed.
 	serve(l net.Listener, onErr func(error)) (stop func())
 	unmount() error
 	close()
@@ -89,13 +89,15 @@ func (l *fuseLower) mount(ctx context.Context, dir string) error {
 }
 
 func (l *fuseLower) serve(ln net.Listener, onErr func(error)) func() {
-	ctx, stop := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		if err := l.ctl.Serve(ctx, ln); err != nil {
 			onErr(err)
 		}
 	}()
-	return stop
+	return func() { cancel(); <-done }
 }
 
 func (l *fuseLower) unmount() error { return l.srv.Unmount() }

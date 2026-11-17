@@ -5,7 +5,6 @@ package lower
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io/fs"
 	"maps"
 	"slices"
@@ -34,9 +33,9 @@ func (v *VFS) Dirty(ctx context.Context) ([]ctl.DirtyEntry, upperdir.Token, erro
 	return DirtyFromUpper(es), tok, nil
 }
 
-// Stats is the counter line of the node cache.
-func (v *VFS) Stats() string {
-	return fmt.Sprintf("blob_hits=%d blob_misses=%d tree_calls=%d", v.c.BlobHits.Load(), v.c.BlobMisses.Load(), v.c.TreeMisses.Load())
+// Stats returns the counters of the node cache.
+func (v *VFS) Stats() ctl.Stats {
+	return ctl.Stats{BlobHits: v.c.BlobHits.Load(), BlobMisses: v.c.BlobMisses.Load(), TreeCalls: v.c.TreeMisses.Load()}
 }
 
 // Cache is the node cache of the mount.

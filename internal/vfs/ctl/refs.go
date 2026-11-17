@@ -2,7 +2,6 @@ package ctl
 
 import (
 	"context"
-	"errors"
 	"regexp"
 
 	"github.com/majorcontext/motte/api"
@@ -12,40 +11,60 @@ import (
 
 var commitHex = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
-// serveRefs answers the shim ops refs and swapref. The error carries the store code; a *RefConflictError also
-// carries the stored ref, so the shim that loses the race can retry from the winner.
-func serveRefs(ctx context.Context, s store.RefStore, op, name string, expect int64, commit string, del bool) (refs []api.Ref, ref *api.Ref, err error) {
-	if op == "refs" && name == "" {
-		ctx, cancel := context.WithTimeout(ctx, store.OpHeadsBudget)
-		defer cancel()
-		refs, err = s.Refs(ctx)
-		return refs, nil, err
-	}
-	if name == "" || expect < 0 {
-		return nil, nil, errors.New("refs: a ref needs a name and a non-negative expect")
-	}
-	if !refname.Valid(name) {
-		return nil, nil, errors.New("refs: invalid ref name")
-	}
-	if op == "swapref" && !del && !commitHex.MatchString(commit) {
-		return nil, nil, errors.New("refs: commit must be 40 lowercase hex digits")
-	}
-	if del && expect < 1 {
-		return nil, nil, errors.New("refs: a delete needs the stored generation in expect")
-	}
+// serveOpHeads answers opheads: a read without heads, and a compare-and-swap on the generation expect with them.
+func serveOpHeads(ctx context.Context, s store.OpHeadsStore, rq request) any {
 	ctx, cancel := context.WithTimeout(ctx, store.OpHeadsBudget)
 	defer cancel()
-	var r api.Ref
-	switch {
-	case op == "refs":
-		r, err = s.Ref(ctx, name)
-	case del:
-		return nil, nil, s.DeleteRef(ctx, name, expect)
-	default:
-		r, err = s.SwapRef(ctx, name, expect, commit)
+	var h api.OpHeads
+	var err error
+	if len(rq.Heads) == 0 {
+		h, err = s.OpHeads(ctx)
+	} else {
+		h, err = s.SwapOpHeads(ctx, rq.Expect, rq.Heads)
 	}
 	if err != nil {
-		return nil, nil, err
+		return storeFail(err)
 	}
-	return nil, &r, nil
+	return opHeadsAnswer{h.Generation, nonNil(h.Heads)}
+}
+
+// serveRefs answers refs and swapref. A lost swap carries the stored ref, so the shim that loses the race can retry
+// from the winner.
+func serveRefs(ctx context.Context, s store.RefStore, rq request) any {
+	ctx, cancel := context.WithTimeout(ctx, store.OpHeadsBudget)
+	defer cancel()
+	if rq.Op == "refs" && rq.Name == "" {
+		refs, err := s.Refs(ctx)
+		if err != nil {
+			return storeFail(err)
+		}
+		return refsAnswer{nonNil(refs)}
+	}
+	switch {
+	case rq.Name == "" || rq.Expect < 0:
+		return invalid("refs: a ref needs a name and a non-negative expect")
+	case !refname.Valid(rq.Name):
+		return invalid("refs: invalid ref name")
+	case rq.Op == "swapref" && !rq.Delete && !commitHex.MatchString(rq.Commit):
+		return invalid("refs: commit must be 40 lowercase hex digits")
+	case rq.Delete && rq.Expect < 1:
+		return invalid("refs: a delete needs the stored generation in expect")
+	}
+	var r api.Ref
+	var err error
+	switch {
+	case rq.Op == "refs":
+		r, err = s.Ref(ctx, rq.Name)
+	case rq.Delete:
+		if err = s.DeleteRef(ctx, rq.Name, rq.Expect); err != nil {
+			return storeFail(err)
+		}
+		return empty{}
+	default:
+		r, err = s.SwapRef(ctx, rq.Name, rq.Expect, rq.Commit)
+	}
+	if err != nil {
+		return storeFail(err)
+	}
+	return refAnswer{r}
 }

@@ -353,7 +353,7 @@ func writeBase(o overlayPaths, commit string) error {
 // steps in reverse order and keeps the volume directory.
 func (p *NodePlugin) mountVolume(ctx context.Context, req *csi.NodePublishVolumeRequest, pub volattr.Publication, tel telemetry.Telemetry, o overlayPaths, base gitpack.SHA, ctlDir string) (*volume, error) {
 	m := p.mountOps()
-	st := &store.HTTPStore{BaseURL: p.APIURL, Client: p.HTTP, Tel: tel, Grant: func() (string, error) { return p.Grant(pub), nil }}
+	st := &store.HTTPStore{BaseURL: p.APIURL, Client: p.HTTP, Tel: tel, Grant: func(context.Context) (string, error) { return p.Grant(pub) }}
 	cacheDir := filepath.Join(p.StateDir, "cache")
 	ll, err := m.openLower(ctx, lower.Config{
 		Store: st, CacheDir: cacheDir, UpperDir: o.upper, Base: base,

@@ -12,25 +12,19 @@ import (
 // maxBlobBatch matches the byte limit of one blob batch of the store.
 const maxBlobBatch = 16 << 20
 
-// getBlobs answers getbatch: the data of each blob, in request order. A blob
-// larger than maxSize, when set, is listed in Large with no data. A batch over
-// maxBlobBatch fails as too_large, so the caller splits it.
-func (s *Server) getBlobs(ctx context.Context, names []string, maxSize int64) ctlResp {
-	if len(names) > maxCtlObjects {
-		return ctlResp{Err: fmt.Sprintf("vfs: more than %d objects in one request", maxCtlObjects)}
-	}
-	shas := make([]gitpack.SHA, len(names))
-	for i, n := range names {
-		s, err := gitpack.ParseSHA(n)
-		if err != nil {
-			return ctlResp{Err: err.Error()}
-		}
-		shas[i] = s
+var tooLarge = failure{Err: "ctl: getbatch passes the batch byte limit", Code: CodeObjectTooLarge}
+
+// getBlobs answers getbatch: the data of each blob, in request order. A blob larger than maxSize, when set, is
+// listed in Large with no data. A batch over maxBlobBatch fails as too large, so the caller splits it.
+func (s *Server) getBlobs(ctx context.Context, names []string, maxSize int64) any {
+	shas, bad := parseSHAs(names)
+	if bad != nil {
+		return *bad
 	}
 	blobs := make([][]byte, len(shas))
 	var missing []gitpack.SHA
 	var at []int
-	var r blobReply
+	r := blobReply{large: []int{}}
 	for i, sha := range shas {
 		if !s.Cache.HasBlob(sha) {
 			missing, at = append(missing, sha), append(at, i)
@@ -47,16 +41,16 @@ func (s *Server) getBlobs(ctx context.Context, names []string, maxSize int64) ct
 			blobs[i], err = os.ReadFile(s.Cache.BlobPath(sha))
 		}
 		if err != nil {
-			return ctlResp{Err: err.Error()}
+			return internal(err)
 		}
 	}
 	if len(missing) > 0 {
 		got, err := s.Store.Blobs(ctx, missing)
 		if err != nil {
-			return ctlResp{Err: err.Error()}
+			return storeFail(err)
 		}
 		if len(got) != len(missing) {
-			return ctlResp{Err: fmt.Sprintf("vfs: store answered %d of %d blobs", len(got), len(missing))}
+			return failure{Err: fmt.Sprintf("ctl: store answered %d of %d blobs", len(got), len(missing)), Code: CodeStoreUnavailable}
 		}
 		for j, i := range at {
 			if !r.skip(i, int64(len(got[j])), maxSize) {
@@ -71,10 +65,8 @@ func (s *Server) getBlobs(ctx context.Context, names []string, maxSize int64) ct
 	for i, b := range blobs {
 		data[i] = base64.StdEncoding.EncodeToString(b)
 	}
-	return ctlResp{Datas: data, Large: r.large}
+	return datasAnswer{data, r.large}
 }
-
-var tooLarge = ctlResp{Err: "vfs: getbatch passes the batch byte limit: vcs_object_too_large"}
 
 type blobReply struct {
 	total int64

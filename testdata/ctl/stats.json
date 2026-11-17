@@ -1,0 +1,6 @@
+{
+  "group": "stats",
+  "steps": [
+    {"name": "counters of the node cache", "given": "clean", "request": {"op": "stats"}, "answer": {"blob_hits": "*", "blob_misses": "*", "tree_calls": "*"}}
+  ]
+}

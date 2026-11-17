@@ -1,0 +1,9 @@
+{
+  "group": "put",
+  "steps": [
+    {"name": "put a blob", "request": {"op": "put", "type": "blob", "data": "aGVsbG8K"}, "answer": {"sha": "ce013625030ba8dba906f756967f9e9ca394464a"}},
+    {"name": "put an empty blob", "request": {"op": "put", "type": "blob", "data": ""}, "answer": {"sha": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"}},
+    {"name": "unknown type", "request": {"op": "put", "type": "bogus", "data": ""}, "answer": {"err": "*", "code": "invalid_request"}},
+    {"name": "data is not base64", "request": {"op": "put", "type": "blob", "data": "!!"}, "answer": {"err": "*", "code": "invalid_request"}}
+  ]
+}

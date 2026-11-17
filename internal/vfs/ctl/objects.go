@@ -3,7 +3,6 @@ package ctl
 import (
 	"context"
 	"encoding/base64"
-	"errors"
 	"fmt"
 
 	"github.com/majorcontext/motte/api"
@@ -11,128 +10,125 @@ import (
 	"github.com/majorcontext/motte/internal/vfs/store"
 )
 
-func ctlRefs(ctx context.Context, s store.RefStore, rq ctlReq) ctlResp {
-	refs, ref, err := serveRefs(ctx, s, rq.Op, rq.Name, rq.Expect, rq.Commit, rq.Delete)
-	var conflict *store.RefConflictError
-	if errors.As(err, &conflict) {
-		return ctlResp{Err: err.Error(), Code: store.ConflictCode, Ref: conflict.Ref}
-	}
-	if err != nil {
-		return ctlResp{Err: err.Error()}
-	}
-	return ctlResp{Refs: refs, Ref: ref}
-}
+const maxObjects = 4096
 
-const maxCtlObjects = 4096
+func tooMany() failure { return invalid("ctl: more than %d objects in one request", maxObjects) }
 
-// ctlHas answers has: whether the store holds each object, in request order.
-func ctlHas(ctx context.Context, s store.HasStore, names []string) ctlResp {
-	if len(names) > maxCtlObjects {
-		return ctlResp{Err: fmt.Sprintf("vfs: more than %d objects in one request", maxCtlObjects)}
+// parseSHAs returns the names as SHAs. At most maxObjects names are allowed.
+func parseSHAs(names []string) ([]gitpack.SHA, *failure) {
+	if len(names) > maxObjects {
+		f := tooMany()
+		return nil, &f
 	}
 	shas := make([]gitpack.SHA, len(names))
 	for i, n := range names {
 		var err error
 		if shas[i], err = gitpack.ParseSHA(n); err != nil {
-			return ctlResp{Err: err.Error()}
+			f := invalid("ctl: %v", err)
+			return nil, &f
 		}
+	}
+	return shas, nil
+}
+
+func serveHas(ctx context.Context, s store.HasStore, names []string) any {
+	shas, bad := parseSHAs(names)
+	if bad != nil {
+		return *bad
 	}
 	present, err := s.Has(ctx, shas)
 	if err != nil {
-		return ctlResp{Err: err.Error()}
+		return storeFail(err)
 	}
-	return ctlResp{Present: present}
+	return presentAnswer{nonNil(present)}
 }
 
-// ctlWorkspace answers workspace: rq.SHA is the head operation, rq.Commit the commit of the mount and rq.Generation
+// serveWorkspace answers workspace: rq.SHA is the head operation, rq.Commit the commit of the mount and rq.Generation
 // the op-heads generation of the swap that set the operation.
-func ctlWorkspace(ctx context.Context, s store.WorkspaceStore, rq ctlReq) ctlResp {
+func serveWorkspace(ctx context.Context, s store.WorkspaceStore, rq request) any {
 	ctx, cancel := context.WithTimeout(ctx, store.OpHeadsBudget)
 	defer cancel()
 	if err := s.PutWorkspace(ctx, rq.SHA, rq.Commit, rq.Generation); err != nil {
-		return ctlResp{Err: err.Error()}
+		return storeFail(err)
 	}
-	return ctlResp{}
+	return empty{}
 }
 
-// ctlOp stores or reads one object of the op log: Type is the kind ("operations" or "views") and SHA the ID.
-func ctlOp(ctx context.Context, s store.OpObjectStore, rq ctlReq) ctlResp {
+// serveOp stores or reads one object of the op log: Type is the kind ("operations" or "views") and SHA the ID.
+func serveOp(ctx context.Context, s store.OpObjectStore, rq request) any {
 	if rq.Op == "getop" {
 		data, err := s.GetOp(ctx, rq.Type, rq.SHA)
 		if err != nil {
-			return ctlResp{Err: err.Error()}
+			return storeFail(err)
 		}
-		return ctlResp{Data: base64.StdEncoding.EncodeToString(data)}
+		return dataAnswer{base64.StdEncoding.EncodeToString(data)}
 	}
 	data, err := base64.StdEncoding.DecodeString(rq.Data)
-	if err == nil {
-		err = s.PutOp(ctx, rq.Type, rq.SHA, data)
-	}
 	if err != nil {
-		return ctlResp{Err: err.Error()}
+		return invalid("ctl: data is not base64: %v", err)
 	}
-	return ctlResp{}
+	if err := s.PutOp(ctx, rq.Type, rq.SHA, data); err != nil {
+		return storeFail(err)
+	}
+	return empty{}
 }
 
-// ctlObjects serves the object operations of the jj shims: get, put and putbatch. The names of put objects are
-// computed here, so a client cannot name an object it did not write.
-func (s *Server) ctlObjects(ctx context.Context, rq ctlReq) ctlResp {
+// objects serves get, put and putbatch. The names of put objects are computed here, so a client cannot name an
+// object it did not write.
+func (s *Server) objects(ctx context.Context, rq request) any {
 	switch rq.Op {
 	case "get":
-		sha, err := gitpack.ParseSHA(rq.SHA)
+		shas, bad := parseSHAs([]string{rq.SHA})
+		if bad != nil {
+			return *bad
+		}
+		t, data, err := s.Store.Object(ctx, shas[0])
 		if err != nil {
-			return ctlResp{Err: err.Error()}
+			return storeFail(err)
 		}
-		t, data, err := s.Store.Object(ctx, sha)
-		if err != nil {
-			return ctlResp{Err: err.Error()}
-		}
-		return ctlResp{Type: t.String(), Data: base64.StdEncoding.EncodeToString(data)}
-	case "has":
-		if hs, ok := s.Store.(store.HasStore); ok {
-			return ctlHas(ctx, hs, rq.SHAs)
-		}
-	case "workspace":
-		if ws, ok := s.Store.(store.WorkspaceStore); ok {
-			return ctlWorkspace(ctx, ws, rq)
-		}
+		return objectAnswer{t.String(), base64.StdEncoding.EncodeToString(data)}
 	case "put":
 		shas, err := s.putObjects(ctx, []api.Object{{Type: rq.Type, Data: rq.Data}})
 		if err != nil {
-			return ctlResp{Err: err.Error()}
+			return err
 		}
-		return ctlResp{SHA: shas[0]}
-	case "putbatch":
-		shas, err := s.putObjects(ctx, rq.Objects)
-		if err != nil {
-			return ctlResp{Err: err.Error()}
-		}
-		return ctlResp{SHAs: shas}
+		return shaAnswer{shas[0]}
 	}
-	return ctlResp{Err: unknownOp}
+	shas, err := s.putObjects(ctx, rq.Objects)
+	if err != nil {
+		return err
+	}
+	return shasAnswer{shas}
 }
 
-func (s *Server) putObjects(ctx context.Context, in []api.Object) ([]string, error) {
-	if len(in) > maxCtlObjects {
-		return nil, fmt.Errorf("vfs: more than %d objects in one request", maxCtlObjects)
+func (s *Server) putObjects(ctx context.Context, in []api.Object) ([]string, *failure) {
+	if len(in) > maxObjects {
+		f := tooMany()
+		return nil, &f
 	}
 	objs := make([]gitpack.Object, len(in))
 	shas := make([]string, len(in))
 	for i, o := range in {
 		t := gitpack.ParseType(o.Type)
 		if t == 0 {
-			return nil, fmt.Errorf("vfs: object type %q", o.Type)
+			f := invalid("ctl: object type %q", o.Type)
+			return nil, &f
 		}
 		data, err := base64.StdEncoding.DecodeString(o.Data)
 		if err != nil {
-			return nil, err
+			f := invalid("ctl: data is not base64: %v", err)
+			return nil, &f
+		}
+		if len(data) > gitpack.MaxObjectBytes {
+			return nil, &failure{Err: fmt.Sprintf("ctl: an object is over %d bytes", gitpack.MaxObjectBytes), Code: CodeObjectTooLarge}
 		}
 		objs[i] = gitpack.Object{Type: t, Data: data}
 		shas[i] = gitpack.Hash(t, data).String()
 	}
 	if len(objs) > 0 {
 		if err := s.Store.PutObjects(ctx, objs); err != nil {
-			return nil, err
+			f := storeFail(err)
+			return nil, &f
 		}
 	}
 	return shas, nil

@@ -1,0 +1,8 @@
+{
+  "group": "putbatch",
+  "steps": [
+    {"name": "two blobs, in request order", "request": {"op": "putbatch", "objects": [{"type": "blob", "data": "Yg=="}, {"type": "blob", "data": "YQ=="}]}, "answer": {"shas": ["63d8dbd40c23542e740659a7168a0ce3138ea748", "2e65efe2a145dda7ee51d1741299f848e5bf752e"]}},
+    {"name": "no objects", "request": {"op": "putbatch", "objects": []}, "answer": {"shas": []}},
+    {"name": "one bad object fails the batch", "request": {"op": "putbatch", "objects": [{"type": "blob", "data": "Yw=="}, {"type": "bogus", "data": ""}]}, "answer": {"err": "*", "code": "invalid_request"}}
+  ]
+}
