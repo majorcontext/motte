@@ -23,7 +23,7 @@ Non-goals:
 | Store service | HTTP service, PostgreSQL index, the epoch fence. | M2 |
 | `client` | Typed Go client for callers. | M3 |
 | `vfsd` and `volume` | Node daemon that serves a virtual workspace, and its volume attributes. | M4 |
-| jj backend | The jj crate that talks to the store plane. | M5 |
+| jj backend | `jj/`: the jj binary whose stores and working copy use the workspace daemon. Released for linux amd64 and arm64. | M5 |
 
 ## Planes
 
@@ -114,6 +114,80 @@ The caller raises the epoch before it commits its own increment. The caller call
 ### Repository creation
 
 `POST /v1/repos` creates the repository with one root commit under the ref `main`. The root commit has the empty tree, the author and committer `motte <motte@motte.invalid>` and the creation time as its time. The store writes the root objects first, then the `repos` row and the ref in one transaction, so a failed create leaves no repository without `main`. The path is `repo_` and random base32 text. The name is trimmed and has 1 to 100 bytes with no control character, else 400 `invalid_body`. A workspace can start on `main` at once.
+
+## jj backend
+
+The crate `jj/` builds the binary `jj`: jj 0.47.1 (`jj-lib` and `jj-cli`, pinned exactly) with four shims and the subcommand `jj motte`. The binary keeps the name `jj` because it is jj with extra stores. A release attaches it for linux amd64 and arm64, with sha256 sums.
+
+### Shims
+
+| Shim | Registered name | Role |
+|---|---|---|
+| `Backend` | `motte-objects` | Reads and writes git objects through the workspace daemon. |
+| `OpStore` | `motte-op-store` | jj's simple op store, with the objects mirrored to the daemon. |
+| `OpHeadsStore` | `motte-op-heads` | Op heads in local files, swapped into the store with a generation. |
+| `WorkingCopy` | `motte-vfs` | A working copy on a kernel overlay over the lazy lower layer of the daemon. |
+
+The names are written into `.jj/repo/*/type` and `.jj/working_copy/type`. A rename is a migration.
+
+The backend writes the bytes of `GitBackend::write_commit` (the `change-id` and `jj:trees` headers, the signing path, and the retry that lowers the committer time when a commit ID exists with other extras) and git trees in git entry order. A commit ID is the git SHA. `jj/tests/differential.rs` proves that the object IDs equal those of stock `GitBackend`. The working copy reads the dirty set of the daemon instead of walking the tree. `.jj` is a symlink in the mount to a directory outside it. `set_sparse_patterns` is unsupported.
+
+### Daemon channel
+
+The shims speak to the workspace daemon with one JSON object per line over the unix socket that `MOTTE_VFS_SOCK` names. An error answer carries `err`. The shim hashes every object itself and refuses an answer whose SHA differs. A daemon that is not in overlay mode fails every command that needs the dirty set. The operations are:
+
+| op | request | answer |
+|---|---|---|
+| `get` | `sha` | `type`, `data` (base64) |
+| `put` | `type`, `data` (base64) | `sha` |
+| `putbatch` | `objects`: a list of `{type, data}` | `shas`, in request order |
+| `opheads` | `expect` and `heads` (both optional) | `gen`, `heads` |
+| `refs` | `name` (optional) | `refs`: a list of `{name, commit, generation}`; `ref` with `name` |
+| `swapref` | `name`, `expect`, `commit`, or `delete: true` with `expect` | `ref`; none after a delete; on a lost swap `code` `vcs_generation_conflict` with `err` and the stored `ref` |
+| `putop` | `type` (`operations` or `views`), `sha`, `data` (base64) | none |
+| `getop` | `type`, `sha` | `data` (base64) |
+| `getbatch` | `shas`, `max_size` (optional) | `datas` (base64); `large`: the indices of blobs over `max_size`, sent without data |
+| `has` | `shas` | `present`: one bool for each name; `unknown op` from a daemon that cannot answer |
+| `changes` | none | `boot`, `token`, `base_tree`, `changes`: a list of `{path, status, old_sha, old_mode, old_size, new_sha, new_mode, size}` |
+| `dirty` | none | `boot`, `token`, `base_tree`, `entries`: a list of `{path, kind, exec, opaque}` |
+| `token` | none | `boot`, `token`, `base_tree` |
+
+Every request carries the W3C `traceparent` of the innermost open span, or the `TRACEPARENT` environment variable. With `OTEL_EXPORTER_OTLP_ENDPOINT` set, the binary exports OTLP over plain HTTP, with no retry and a 500 ms limit: one span `jj.command` for each command and one for each operation (`jj.motte.snapshot`, `jj.snapshot`, `jj.checkout`, `jj.read_tree`, `jj.write_commit`, `jj.op_heads.update`, `jj.push`, `jj.fetch`), with the counts `objects` and `bytes`. `OTEL_SDK_DISABLED=true` or `OTEL_TRACES_EXPORTER=none` turns tracing off. A span holds no path, file content or credential. A snapshot sends blobs with `putbatch`, at most 64 blobs or 8 MiB a request, and falls back to `put` on `unknown op`.
+
+### Op heads
+
+`opheads` without `heads` reads the op heads of the workspace; a store `vcs_not_found` before the first write is generation 0 and no heads. With `heads` it swaps them when the stored generation is `expect`. Each update of `motte-op-heads` first reads the remote heads, so a writer whose claim is lost fails with `vcs_claim_lost` before its local write. It then writes the local heads, removes from the remote set the replaced operations and every remote head that the local op store holds and the local heads do not, adds the new head and swaps. On `vcs_generation_conflict` it reads the winning heads and applies its update again. All daemon calls of one update share a budget of 2 seconds. A daemon that answers `unknown op`, any other store failure, or a spent budget leaves the remote heads behind the local ones and the command succeeds; the failure adds the new head to the marker `motte_unsynced` in the repo directory. A lost claim at the swap fails the command after the local write.
+
+### Subcommands
+
+`jj motte` has the subcommands `init`, `restore`, `attach`, `verify`, `flush`, `sync`, `snapshot`, `changes`, `push`, `fetch` and `dirty`. `init`, `restore` and `attach` need the `base_tree` of the daemon to be the tree of the mount commit. Every jj command except `jj motte snapshot`, and the ones that never snapshot (`--ignore-working-copy`), holds a shared flock on `motte_command.lock` in the repo directory.
+
+`jj motte changes` prints the work-tree diff as JSON for a caller that sets `HARNESS_CHANGES_SCOPE` (`branch` or `uncommitted`), `HARNESS_CHANGES_BASE` and `HARNESS_CHANGES_PATCH_BYTES` (default 1 MiB). It loads the op head that ended last, in whole seconds, then the larger ID. It never snapshots and writes no operation. It diffs the target tree against the daemon base tree and overrides each path that `changes` names. The patch is in git format and ends at the last whole file within the byte cap, with `truncated` set. A file larger than 2 MiB is `large` with no hunk. Renames are not detected.
+
+### Push and fetch to a git origin
+
+A workspace has a git origin when `init` or `restore` got `--origin-url`, an http(s) URL with no user information, and `--commit` or `--base`, which set the repo config key `motte.origin-base` to the commit that origin holds. `--origin-branch <name>` makes, at the start commit, the local bookmark `<name>` and the tracked bookmark `<name>@origin`, and sets `revset-aliases.'trunk()'` to `"<name>"@origin`. The only remote is `origin`. The commands keep a bare repo `motte_git` in the repo directory as the transport, run the `git` binary over HTTPS with `GIT_TERMINAL_PROMPT=0`, and share a deadline of 10 minutes.
+
+`jj motte push -b <bookmark>...` refuses a missing or conflicted bookmark, a new commit that is conflicted, has no description or is the root commit, a rewrite of the default branch of origin, and a workspace with no `MOTTE_VFS_SOCK`. It probes the claim with `opheads`, reads the tips of origin (`git ls-remote --symref`), fetches the base of each bookmark by SHA with no blobs (falling back to heads at depth 20, 200, 1,000, then unshallow), writes the loose objects of the new commits from the daemon, probes the claim again, and runs `git push --atomic --force-with-lease=refs/heads/<name>:<commit of NAME@origin>`. One jj transaction then sets `NAME@origin`. A bookmark whose tip already equals its commit is recorded without an update. The span `jj.push` carries `remote`, `refs` and `outcome`: `ok`, `refused`, `stale`, `rejected`, `network` or `claim_lost`.
+
+`jj motte fetch [-b <bookmark>...]` probes the claim, reads the heads of origin (at most 100 without `-b`, the default branch first), clears `refs/motte/origin/` and `refs/motte/base/` of `motte_git`, and fetches the heads that differ into `refs/motte/origin/` with `--no-tags --no-filter --depth=N`, `N` being 1, 20, 200 and 1,000 (`--refetch` when a `refs/motte/base/` ref existed). A commit whose parent is in neither `motte_git` nor the daemon at depth 1,000 is a shallow root: the backend records it in the `shallow` file, published whole under an exclusive lock on `shallow.lock`, and shows it with no parents. The command refuses a commit whose `encoding` header is not UTF-8. It writes the new commits to the daemon with `putbatch`, parents first, each after the blobs and trees that differ from its first parent. One jj transaction makes the tips heads and sets `NAME@origin`. A local bookmark moves to the tip when `NAME@origin` is tracked, the local target equals the old `NAME@origin` and the old commit is an ancestor of the tip, or when neither existed. The span `jj.fetch` has the outcomes of push except `stale`.
+
+### Push and fetch to a native repository
+
+A native workspace has no git origin: the store is the origin. `init` and `restore` take `--origin-native`, which excludes `--origin-url`, and set `motte.origin-native` to true and `motte.origin-base` to the start commit. `--origin-default-branch` requires it and sets `motte.origin-default-branch`. A native workspace without `motte.origin-base` or `motte.origin-default-branch` makes push, fetch and delete fail as `refused`; none falls back to a git origin. A ref of the store is a bookmark of `origin`. The commands run no `git` and make no network call of their own. They need no flush, because `put`, `putbatch` and `snapshot` answer after the upload to `POST /v1/vcs/objects`.
+
+`jj motte push -b <bookmark>...` refuses what the git push refuses, and a rewrite of the default branch or the start branch: the stored tip must be an ancestor of the commit. The new commits are the ancestors of the bookmarks that are not ancestors of `motte.origin-base` or a `NAME@origin`, at most 1,000 for each bookmark. The steps are:
+
+1. Probe the claim with `opheads`.
+2. Read the ref of each bookmark with `refs` and `name`.
+3. Check that the store holds the new commits, their trees and their blobs, comparing each commit only with its first parent and reading only trees whose ID differs. Blobs are asked with `has`; a daemon that answers `unknown op` gets `getbatch` with a size limit of one byte. A missing object stops the push as `network`.
+4. Probe the claim again.
+5. In name order, send `swapref` with `expect` set to the stored generation, or 0 to create the ref. A ref that is at the commit needs no swap. A ref that differs from the commit that `NAME@origin` records ends the push as `stale` with "origin moved NAME; run jj motte fetch first". `vcs_generation_conflict` is `stale`. `vcs_claim_lost` is `claim_lost`.
+6. One jj transaction sets `NAME@origin`, tracked, for each bookmark that the store holds at the commit.
+
+The swaps are not atomic across refs: the first failure stops the push, and the error names the bookmarks that this call moved. There is no force option: a rewrite is a compare-and-swap against `NAME@origin`. `jj motte push --delete NAME` (repeatable, never with `-b`) deletes refs of a native repository only. It refuses the default branch and the start branch, and a name with no ref and no `NAME@origin`. It ends as `stale` when the stored commit differs from the commit that `NAME@origin` records. It forgets `NAME@origin` without a swap when the ref is already gone, sends `swapref` with `delete` for the rest, and forgets `NAME@origin` of the deleted refs in one transaction. The local bookmark stays.
+
+`jj motte fetch [-b <bookmark>...]` probes the claim, lists the refs with `refs`, and takes the named bookmarks, or the default branch and the first 99 others in name order. It refuses a named bookmark with no ref and no `NAME@origin`. A bookmark with no ref but with a `NAME@origin` was deleted: the command forgets `NAME@origin`, keeps the local bookmark and prints `NAME: deleted on origin`. For each other bookmark it reads the commit with `get` and refuses a missing commit or an object that is not a commit. It walks the commits that the jj index lacks, at most 1,000 for each bookmark, with the shallow-root rules of the git fetch. One jj transaction adds the roots to the `shallow` file, makes the tips heads and sets `NAME@origin` with the local-bookmark rules of the git fetch.
 
 ## Grant
 
