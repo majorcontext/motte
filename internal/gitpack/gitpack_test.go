@@ -39,6 +39,9 @@ func TestVerifyRestoresReadState(t *testing.T) {
 		t.Fatal(err)
 	}
 	cancel()
+	if p.CachedBytes() > maxCacheBytes {
+		t.Errorf("cache holds %d bytes", p.CachedBytes())
+	}
 	if _, _, err := p.Get(names[0]); err != nil {
 		t.Errorf("read after canceled verify: %v", err)
 	}

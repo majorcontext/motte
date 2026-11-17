@@ -217,7 +217,17 @@ func (p *Pack) Verify(ctx context.Context, idx, pack []byte) error {
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].off < items[j].off })
 	p.c.max, p.c.work, p.cacheAll, p.ctx = verifyCacheBytes, 0, true, ctx
-	defer func() { p.c.max, p.c.work, p.cacheAll, p.ctx = maxCacheBytes, 0, false, nil }()
+	defer func() {
+		p.c.mu.Lock()
+		defer p.c.mu.Unlock()
+		p.c.max, p.c.work, p.cacheAll, p.ctx = maxCacheBytes, 0, false, nil
+		for p.c.bytes > p.c.max && len(p.c.order) > 0 {
+			o := p.c.order[0]
+			p.c.order = p.c.order[1:]
+			p.c.bytes -= int64(len(p.c.m[o].data))
+			delete(p.c.m, o)
+		}
+	}()
 	for _, it := range items {
 		if ctx.Err() != nil {
 			return ctx.Err()
