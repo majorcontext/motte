@@ -1,0 +1,9 @@
+{
+  "group": "has",
+  "steps": [
+    {"name": "put first", "request": {"op": "put", "type": "blob", "data": "YQ=="}, "answer": {"sha": "2e65efe2a145dda7ee51d1741299f848e5bf752e"}},
+    {"name": "one is held, one is not", "request": {"op": "has", "shas": ["2e65efe2a145dda7ee51d1741299f848e5bf752e", "2222222222222222222222222222222222222222"]}, "answer": {"present": [true, false]}},
+    {"name": "no names", "request": {"op": "has", "shas": []}, "answer": {"present": []}},
+    {"name": "a name that is not a SHA", "request": {"op": "has", "shas": ["xyz"]}, "answer": {"err": "*", "code": "invalid_request"}}
+  ]
+}

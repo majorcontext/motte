@@ -1,0 +1,9 @@
+{
+  "group": "get",
+  "steps": [
+    {"name": "put first", "request": {"op": "put", "type": "blob", "data": "aGVsbG8K"}, "answer": {"sha": "ce013625030ba8dba906f756967f9e9ca394464a"}},
+    {"name": "get it", "request": {"op": "get", "sha": "ce013625030ba8dba906f756967f9e9ca394464a"}, "answer": {"type": "blob", "data": "aGVsbG8K"}},
+    {"name": "get a name that is not a SHA", "request": {"op": "get", "sha": "xyz"}, "answer": {"err": "*", "code": "invalid_request"}},
+    {"name": "get an absent object", "request": {"op": "get", "sha": "1111111111111111111111111111111111111111"}, "answer": {"err": "*", "code": "vcs_not_found"}}
+  ]
+}

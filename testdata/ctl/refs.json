@@ -1,0 +1,11 @@
+{
+  "group": "refs",
+  "steps": [
+    {"name": "list when none exist", "request": {"op": "refs"}, "answer": {"refs": []}},
+    {"name": "create", "request": {"op": "swapref", "name": "heads/main", "expect": 0, "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, "answer": {"ref": {"name": "heads/main", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "generation": 1}}},
+    {"name": "read", "request": {"op": "refs", "name": "heads/main"}, "answer": {"ref": {"name": "heads/main", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "generation": 1}}},
+    {"name": "list", "request": {"op": "refs"}, "answer": {"refs": [{"name": "heads/main", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "generation": 1}]}},
+    {"name": "read an absent ref", "request": {"op": "refs", "name": "heads/gone"}, "answer": {"err": "*", "code": "vcs_not_found"}},
+    {"name": "dotted segment", "request": {"op": "refs", "name": "heads/./main"}, "answer": {"err": "*", "code": "invalid_request"}}
+  ]
+}

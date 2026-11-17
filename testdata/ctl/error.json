@@ -1,0 +1,8 @@
+{
+  "group": "error",
+  "steps": [
+    {"name": "unknown op", "request": {"op": "bogus"}, "answer": {"err": "unknown op", "code": "unknown_op"}},
+    {"name": "no op", "request": {}, "answer": {"err": "*", "code": "unknown_op"}},
+    {"name": "not JSON", "raw": "not json", "answer": {"err": "*", "code": "invalid_request"}}
+  ]
+}

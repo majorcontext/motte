@@ -3,6 +3,7 @@ package volume
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 
 	"github.com/majorcontext/motte/internal/gitpack"
@@ -20,15 +21,25 @@ const (
 	CtlSocket  = "ctl.sock"
 	SockEnv    = "MOTTE_VFS_SOCK"
 	PodUIDAttr = "csi.storage.k8s.io/pod.uid"
-	kindAttr   = "volume"
-	kindCtl    = "ctl"
+	// PodNamespaceAttr is the namespace of the pod. The kubelet sets it when the CSIDriver has podInfoOnMount.
+	PodNamespaceAttr = "csi.storage.k8s.io/pod.namespace"
+	kindAttr         = "volume"
+	kindCtl          = "ctl"
 )
 
-// CtlAttributes returns the attributes of the volume that binds the control socket into a pod.
-func CtlAttributes() map[string]string { return map[string]string{kindAttr: kindCtl} }
+// CtlAttributes returns the attributes of the volume that binds the control socket of one workspace into a pod. A pod
+// with two workspace volumes has two control socket volumes.
+func CtlAttributes(workspace string) map[string]string {
+	return map[string]string{kindAttr: kindCtl, "workspace": workspace}
+}
 
 // IsCtl reports whether attrs are the attributes of a control socket volume.
 func IsCtl(attrs map[string]string) bool { return attrs[kindAttr] == kindCtl }
+
+var workspaceID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// ValidWorkspace reports whether id can name a workspace. The node plugin uses it as a directory name.
+func ValidWorkspace(id string) bool { return workspaceID.MatchString(id) }
 
 // Publication is what the caller tells the node plugin about one workspace volume. It travels as the
 // volume attributes of the inline CSI volume of the pod.
@@ -55,8 +66,8 @@ func ParsePublication(attrs map[string]string) (Publication, error) {
 		return Publication{}, fmt.Errorf("vfs: epoch attribute: %w", err)
 	}
 	p := Publication{Workspace: attrs["workspace"], Epoch: epoch, Repo: attrs["repo"], Commit: attrs["commit"], Runtime: attrs["runtime"]}
-	if p.Workspace == "" || p.Repo == "" {
-		return Publication{}, fmt.Errorf("vfs: the volume attributes name no workspace or repo")
+	if !ValidWorkspace(p.Workspace) || p.Repo == "" {
+		return Publication{}, fmt.Errorf("vfs: the volume attributes name no valid workspace or no repo")
 	}
 	if _, err := gitpack.ParseSHA(p.Commit); err != nil {
 		return Publication{}, fmt.Errorf("vfs: commit attribute: %w", err)

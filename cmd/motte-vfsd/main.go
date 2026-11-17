@@ -8,9 +8,6 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -27,9 +25,16 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
-	"github.com/majorcontext/motte/grant"
+	"github.com/majorcontext/motte/client"
 	"github.com/majorcontext/motte/internal/gitpack"
-	"github.com/majorcontext/motte/internal/vfs"
+	"github.com/majorcontext/motte/internal/vfs/csi"
+	"github.com/majorcontext/motte/internal/vfs/ctl"
+	"github.com/majorcontext/motte/internal/vfs/importer"
+	"github.com/majorcontext/motte/internal/vfs/lower"
+	"github.com/majorcontext/motte/internal/vfs/materialize"
+	"github.com/majorcontext/motte/internal/vfs/nodegrant"
+	"github.com/majorcontext/motte/internal/vfs/store"
+	"github.com/majorcontext/motte/internal/vfs/tel"
 	"github.com/majorcontext/motte/internal/vfs/upperdir"
 	"github.com/majorcontext/motte/volume"
 )
@@ -89,8 +94,8 @@ type storeFlags struct {
 }
 
 // telemetry names the mount in the spans and records of the command.
-func (s *storeFlags) telemetry(mode string) vfs.Telemetry {
-	return vfs.Telemetry{Logger: logger, Corr: vfs.Correlation{WorkspaceID: s.workspace, Repo: s.repo, MountID: s.mountID, Mode: mode, Runtime: s.runtime, Node: s.node, Epoch: s.epoch}}
+func (s *storeFlags) telemetry(mode string) tel.Telemetry {
+	return tel.Telemetry{Logger: logger, Corr: tel.Correlation{WorkspaceID: s.workspace, Repo: s.repo, MountID: s.mountID, Mode: mode, Runtime: s.runtime, Node: s.node, Epoch: s.epoch}}
 }
 
 func (s *storeFlags) register(fl *flag.FlagSet) {
@@ -105,7 +110,7 @@ func (s *storeFlags) register(fl *flag.FlagSet) {
 }
 
 // open returns the store client and the commit. The grant comes from the environment, so it stays out of the process list.
-func (s *storeFlags) open(mode string) (*vfs.HTTPStore, gitpack.SHA, error) {
+func (s *storeFlags) open(mode string) (*store.HTTPStore, gitpack.SHA, error) {
 	grant := os.Getenv(volume.GrantEnv)
 	if s.api == "" || grant == "" {
 		return nil, gitpack.SHA{}, fmt.Errorf("-api and %s are required", volume.GrantEnv)
@@ -114,7 +119,7 @@ func (s *storeFlags) open(mode string) (*vfs.HTTPStore, gitpack.SHA, error) {
 	if err != nil {
 		return nil, sha, fmt.Errorf("-commit: %w", err)
 	}
-	return &vfs.HTTPStore{BaseURL: s.api, Grant: func() (string, error) { return grant, nil }, Client: &http.Client{Timeout: 2 * time.Minute}, Tel: s.telemetry(mode)}, sha, nil
+	return &store.HTTPStore{BaseURL: s.api, Grant: client.StaticGrant(grant), Client: &http.Client{Timeout: 2 * time.Minute}, Tel: s.telemetry(mode)}, sha, nil
 }
 
 func runImport(ctx context.Context, args []string) error {
@@ -130,9 +135,9 @@ func runImport(ctx context.Context, args []string) error {
 	if *api == "" || *remote == "" || grant == "" {
 		return fmt.Errorf("-api, -remote and %s are required", volume.GrantEnv)
 	}
-	st := &vfs.HTTPStore{BaseURL: *api, Grant: func() (string, error) { return grant, nil }, Client: &http.Client{Timeout: 5 * time.Minute}}
+	st := &store.HTTPStore{BaseURL: *api, Grant: client.StaticGrant(grant), Client: &http.Client{Timeout: 5 * time.Minute}}
 	if *depth == 0 {
-		sha, stats, err := vfs.ImportHistory(ctx, st, *remote, *ref, func(format string, args ...any) { logger.Info(fmt.Sprintf(format, args...)) })
+		sha, stats, err := importer.ImportHistory(ctx, st, *remote, *ref, func(format string, args ...any) { logger.Info(fmt.Sprintf(format, args...)) })
 		if err != nil {
 			return err
 		}
@@ -140,7 +145,7 @@ func runImport(ctx context.Context, args []string) error {
 		fmt.Println(sha)
 		return nil
 	}
-	sha, err := vfs.Import(ctx, st, *remote, *ref, *depth)
+	sha, err := importer.Import(ctx, st, *remote, *ref, *depth)
 	if err != nil {
 		return err
 	}
@@ -156,33 +161,34 @@ func runCSI(ctx context.Context, args []string) error {
 	state := fl.String("state", "/var/lib/motte-vfsd", "directory of the blob cache and the overlays")
 	api := fl.String("api", "", "store base URL")
 	keyFile := fl.String("grant-key-file", "", `file with the JSON {"kid","key"} of the key that signs node grants; key is the standard base64 of an Ed25519 private key or its 32-byte seed`)
+	namespaces := fl.String("allowed-namespaces", "", "comma-separated namespaces whose pods may publish a volume; the plugin refuses every other pod")
 	uid := fl.Uint("uid", 1000, "owner of base files")
 	gid := fl.Uint("gid", 1000, "group of base files")
 	if err := fl.Parse(args); err != nil {
 		return err
 	}
-	if *api == "" || *keyFile == "" {
-		return errors.New("-api and -grant-key-file are required")
+	var allowed []string
+	for _, ns := range strings.Split(*namespaces, ",") {
+		if ns = strings.TrimSpace(ns); ns != "" {
+			allowed = append(allowed, ns)
+		}
 	}
-	if err := vfs.CheckHostPID(os.Readlink); err != nil {
+	if *api == "" || *keyFile == "" || len(allowed) == 0 {
+		return errors.New("-api, -grant-key-file and -allowed-namespaces are required")
+	}
+	if err := csi.CheckHostPID(os.Readlink); err != nil {
 		return err
 	}
-	signer, err := loadSigner(*keyFile)
+	minter, err := nodegrant.Load(*keyFile)
 	if err != nil {
 		return err
 	}
-	p := &vfs.NodePlugin{
+	p := &csi.NodePlugin{
 		DriverName: *driver, NodeID: *node, StateDir: *state, APIURL: *api,
-		Grant: func(pub volume.Publication) string {
-			g, err := signer.Mint(grant.Claims{Scope: grant.ScopeNode, WS: pub.Workspace, Epoch: pub.Epoch, Repo: pub.Repo, Exp: time.Now().Add(time.Hour).Unix()})
-			if err != nil {
-				logger.Error("grant mint failed", "error", err.Error())
-			}
-			return g
-		},
+		Grant: minter.Mint, AllowedNamespaces: allowed,
 		UID: uint32(*uid), GID: uint32(*gid), HTTP: &http.Client{Timeout: 2 * time.Minute}, Logger: logger,
 	}
-	go (&vfs.Health{Logger: logger, Node: *node, Mounts: p.Mounts}).Run(ctx)
+	go (&tel.Health{Logger: logger, Node: *node, Mounts: p.Mounts, Tier2: store.Tier2Bytes}).Run(ctx)
 	go p.SeedCacheSize(*state + "/cache")
 	logger.Info("serving", "driver", *driver, "endpoint", *endpoint)
 	return p.Serve(ctx, *endpoint)
@@ -206,7 +212,7 @@ func runMaterialize(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return vfs.MaterializeWith(ctx, sf.telemetry("materialize"), st, sha, *dest, *marker, *uid, *gid)
+	return materialize.MaterializeWith(ctx, sf.telemetry("materialize"), st, sha, *dest, *marker, *uid, *gid)
 }
 
 func runMount(ctx context.Context, args []string) error {
@@ -233,10 +239,10 @@ func runMount(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	tel := sf.telemetry("mount")
-	h := &vfs.Health{Logger: logger, Node: sf.node, Mounts: func() int { return 1 }}
+	tl := sf.telemetry("mount")
+	h := &tel.Health{Logger: logger, Node: sf.node, Mounts: func() int { return 1 }, Tier2: store.Tier2Bytes}
 	go h.Run(ctx)
-	v, err := vfs.New(ctx, vfs.Config{Telemetry: tel, Store: st, CacheDir: *cacheDir, UpperDir: *upper, CtlSock: *ctlSock, Base: sha, UID: uint32(*uid), GID: uint32(*gid), NoOpen: *noOpen})
+	v, err := lower.New(ctx, lower.Config{Telemetry: tl, Store: st, CacheDir: *cacheDir, UpperDir: *upper, Base: sha, UID: uint32(*uid), GID: uint32(*gid), NoOpen: *noOpen})
 	if err != nil {
 		return err
 	}
@@ -244,21 +250,21 @@ func runMount(ctx context.Context, args []string) error {
 	if err := os.MkdirAll(*mnt, 0o755); err != nil {
 		return err
 	}
-	ctl, err := vfs.ListenCtlSocket(*ctlSock, int(*uid), int(*gid))
+	ln, err := ctl.Listen(*ctlSock, int(*uid), int(*gid))
 	if err != nil {
 		return fmt.Errorf("control socket: %w", err)
 	}
-	srv, err := v.MountFUSE(ctx, *mnt, vfs.MountOpts{DefaultPermission: true})
+	srv, err := v.MountFUSE(ctx, *mnt, lower.MountOpts{DefaultPermission: true})
 	if err != nil {
 		if srv != nil {
 			_ = srv.Unmount()
 		}
-		_ = ctl.Close()
+		_ = ln.Close()
 		return fmt.Errorf("mount: %w", err)
 	}
 	logger.Info("mounted", "commit", sha.String(), "mnt", *mnt)
 	go func() {
-		if err := v.ServeCtl(ctx, ctl); err != nil {
+		if err := (&ctl.Server{Store: st, Cache: v.Cache(), Workspace: v}).Serve(ctx, ln); err != nil {
 			logger.Error("control socket failed", "error", err.Error())
 		}
 	}()
@@ -274,27 +280,4 @@ func serve(ctx context.Context, srv *fuse.Server) {
 		}
 	}()
 	srv.Wait()
-}
-
-func loadSigner(path string) (grant.Signer, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return grant.Signer{}, err
-	}
-	var k struct{ Kid, Key string }
-	if err := json.Unmarshal(raw, &k); err != nil || k.Kid == "" {
-		return grant.Signer{}, errors.New("grant key file: want JSON with kid and key")
-	}
-	b, err := base64.StdEncoding.DecodeString(k.Key)
-	if err != nil {
-		return grant.Signer{}, fmt.Errorf("grant key file: key: %w", err)
-	}
-	switch len(b) {
-	case ed25519.SeedSize:
-		b = ed25519.NewKeyFromSeed(b)
-	case ed25519.PrivateKeySize:
-	default:
-		return grant.Signer{}, errors.New("grant key file: key is not an Ed25519 private key or seed")
-	}
-	return grant.Signer{Kid: k.Kid, Key: b}, nil
 }

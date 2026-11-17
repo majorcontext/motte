@@ -1,0 +1,11 @@
+{
+  "group": "getbatch",
+  "steps": [
+    {"name": "put a", "request": {"op": "put", "type": "blob", "data": "YQ=="}, "answer": {"sha": "2e65efe2a145dda7ee51d1741299f848e5bf752e"}},
+    {"name": "put bbbbbb", "request": {"op": "put", "type": "blob", "data": "YmJiYmJi"}, "answer": {"sha": "d6d2f13a2ed121d421a912680d9174bca9e5d44b"}},
+    {"name": "both, in request order", "request": {"op": "getbatch", "shas": ["d6d2f13a2ed121d421a912680d9174bca9e5d44b", "2e65efe2a145dda7ee51d1741299f848e5bf752e"]}, "answer": {"datas": ["YmJiYmJi", "YQ=="], "large": []}},
+    {"name": "max_size lists a larger blob with no data", "request": {"op": "getbatch", "shas": ["2e65efe2a145dda7ee51d1741299f848e5bf752e", "d6d2f13a2ed121d421a912680d9174bca9e5d44b"], "max_size": 3}, "answer": {"datas": ["YQ==", ""], "large": [1]}},
+    {"name": "an absent blob", "request": {"op": "getbatch", "shas": ["1111111111111111111111111111111111111111"]}, "answer": {"err": "*", "code": "vcs_not_found"}},
+    {"name": "a name that is not a SHA", "request": {"op": "getbatch", "shas": ["xyz"]}, "answer": {"err": "*", "code": "invalid_request"}}
+  ]
+}
