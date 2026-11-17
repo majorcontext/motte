@@ -14,6 +14,9 @@ import (
 	"github.com/majorcontext/motte/internal/gitpack"
 	"github.com/majorcontext/motte/internal/vfs/store"
 	"github.com/majorcontext/motte/testserver"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 // TestHTTPStoreSpeaksTheStoreWire drives HTTPStore against the real server, so a wire change in either breaks here.
@@ -89,5 +92,30 @@ func TestHTTPStoreFailsACallWhoseGrantFails(t *testing.T) {
 	st := &store.HTTPStore{BaseURL: srv.URL, Grant: func(context.Context) (string, error) { return "", boom }}
 	if _, err := st.Refs(t.Context()); !errors.Is(err, boom) || calls.Load() != 0 {
 		t.Errorf("Refs = %v after %d requests, want the mint error and none", err, calls.Load())
+	}
+}
+
+// TestHTTPStoreSpanRecordsTheStatusAndBytes: a call that succeeds records the real status, not zero, and the bytes of
+// the answer.
+func TestHTTPStoreSpanRecordsTheStatusAndBytes(t *testing.T) {
+	rec := tracetest.NewSpanRecorder()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"refs":[]}`))
+	}))
+	defer srv.Close()
+	st := &store.HTTPStore{BaseURL: srv.URL, Grant: client.StaticGrant("g")}
+	if _, err := st.Refs(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]int64{}
+	for _, s := range rec.Ended() {
+		for _, a := range s.Attributes() {
+			got[string(a.Key)] = a.Value.AsInt64()
+		}
+	}
+	if got["http.response.status_code"] != http.StatusCreated || got["bytes_in"] != 11 {
+		t.Errorf("span attributes %v, want status 201 and 11 bytes in", got)
 	}
 }

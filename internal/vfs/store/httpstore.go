@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -60,9 +61,32 @@ type countingTransport struct {
 	n  *atomic.Int64
 }
 
+type callKey struct{}
+
+// RoundTrip counts the request and, for a request made under begin, records the status and the bytes of the answer on
+// the call.
 func (c countingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	c.n.Add(1)
-	return c.rt.RoundTrip(r)
+	resp, err := c.rt.RoundTrip(r)
+	cl, _ := r.Context().Value(callKey{}).(*call)
+	if cl == nil || err != nil {
+		return resp, err
+	}
+	cl.status.Store(int64(resp.StatusCode))
+	cl.out.Store(max(r.ContentLength, 0))
+	resp.Body = &countedBody{ReadCloser: resp.Body, n: &cl.in}
+	return resp, nil
+}
+
+type countedBody struct {
+	io.ReadCloser
+	n *atomic.Int64
+}
+
+func (b *countedBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	b.n.Add(int64(n))
+	return n, err
 }
 
 // c returns the client. The http.Client timeout bounds a call, so the per-call budget of the client is off.
@@ -87,23 +111,23 @@ type call struct {
 	span    trace.Span
 	route   string
 	started time.Time
+	// status, in and out are set by the transport: the HTTP status, and the bytes of the answer and of the request.
+	status, in, out atomic.Int64
 }
 
 // begin starts the span of a request to route and, when a FUSE operation waits on it, links the two.
 func (s *HTTPStore) begin(ctx context.Context, name, route string) (context.Context, *call) {
 	ctx, span := s.Tel.Start(ctx, name, attribute.String("http.route", route), attribute.String("tier", "store"))
-	return ctx, &call{s: s, span: span, route: route, started: time.Now()}
+	cl := &call{s: s, span: span, route: route, started: time.Now()}
+	return context.WithValue(ctx, callKey{}, cl), cl
 }
 
 // end closes the span with the figures of the request, logs a failure once and returns err, with a refused grant
 // marked as ErrGrantRefused.
 func (c *call) end(ctx context.Context, objects int, err error) error {
-	var status int
-	var ce *client.Error
-	if errors.As(err, &ce) {
-		status = ce.Status
-	}
-	c.span.SetAttributes(attribute.Int("objects", objects), attribute.Int("http.response.status_code", status), attribute.Int("retries", 0))
+	status := int(c.status.Load())
+	c.span.SetAttributes(attribute.Int("objects", objects), attribute.Int64("bytes_in", c.in.Load()), attribute.Int64("bytes_out", c.out.Load()),
+		attribute.Int("http.response.status_code", status), attribute.Int("retries", 0))
 	if ot := tel.OpTraceFrom(ctx); ot != nil {
 		ot.AddStore(c.span.SpanContext(), time.Since(c.started))
 	}
