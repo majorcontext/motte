@@ -40,9 +40,13 @@ bucket:
 
 # trustedKeys is the list of public keys that the store trusts. Each entry has
 # kid, key (standard base64 of an Ed25519 public key) and scopes. Set
-# trustedKeysConfigMap to read the JSON list from an existing ConfigMap instead.
+# trustedKeysConfigMap or trustedKeysSecret to read the JSON list from an
+# existing ConfigMap or Secret instead. Set exactly one of the three.
 trustedKeys: []
 trustedKeysConfigMap:
+  name: ""
+  key: trusted-keys.json
+trustedKeysSecret:
   name: ""
   key: trusted-keys.json
 
