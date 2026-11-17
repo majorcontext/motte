@@ -45,8 +45,10 @@ jobs:
       - run: helm lint charts/motte -f charts/motte/ci/keys-secret.yaml
       - run: helm template motte charts/motte -f charts/motte/ci/values.yaml > /dev/null
       - run: helm template motte charts/motte -f charts/motte/ci/internal-lb.yaml > /dev/null
-      - run: helm template motte charts/motte -f charts/motte/ci/keys-secret.yaml | grep -A4 'name: MOTTE_TRUSTED_KEYS' | grep -q secretKeyRef
-      - run: '! helm template motte charts/motte -f charts/motte/ci/keys-secret.yaml --set trustedKeysConfigMap.name=x'
+      - run: |
+          helm template motte charts/motte -f charts/motte/ci/keys-secret.yaml | grep -A4 MOTTE_TRUSTED_KEYS | grep -q secretKeyRef
+      - run: |
+          ! helm template motte charts/motte -f charts/motte/ci/keys-secret.yaml --set trustedKeysConfigMap.name=x
 
   leak:
     # A fork pull request gets no secrets, so the job cannot run for it.
