@@ -23,7 +23,7 @@ Non-goals:
 | `meta` | Metadata seam: repositories, workspaces and the epoch fence, op heads, refs, pack listing. Backends `meta/postgres` and `meta/sqlite`, and the suite `meta/metatest`. Public package. | M2 |
 | Store service | HTTP service over a `meta` store and a `bucket` store, and the epoch fence. | M2 |
 | `client` | Typed Go client for callers. Public package. | M3 |
-| `testserver` | Starts a real server in a caller's test. Public package. | M3 |
+| `testserver` | Starts a real server in a caller's test, on PostgreSQL (`Start`) or on SQLite and a temporary directory (`StartLocal`). Public package. | M3 |
 | `internal/vfs/...`, `cmd/motte-vfsd`, `volume` | Node daemon that serves a virtual workspace, and its public volume attributes. | M4 |
 | jj backend | `jj/`: the jj binary whose stores and working copy use the workspace daemon. Released for linux amd64 and arm64. | M5 |
 
@@ -38,13 +38,25 @@ The store plane serves the node daemon and the jj backend. The control plane ser
 | Variable | Meaning |
 |---|---|
 | `MOTTE_LISTEN` | Listen address. Default `:8080`. |
-| `MOTTE_DATABASE_URL` | PostgreSQL DSN. |
+| `MOTTE_META` | Metadata backend: `postgres` or `sqlite`. Default `postgres`. |
+| `MOTTE_DATABASE_URL` | PostgreSQL DSN. Required for `postgres`. |
+| `MOTTE_SQLITE_PATH` | SQLite database file. Required for `sqlite`. |
 | `MOTTE_BUCKET_KIND` | `gcs` or `fs`. |
 | `MOTTE_BUCKET` | Bucket name for `gcs`, directory for `fs`. |
 | `MOTTE_TRUSTED_KEYS` | JSON list of `{"kid","key","scopes"}`. `key` is the standard base64 of an Ed25519 public key. `scopes` holds only `node`, `read`, `import` and `operator`. The service refuses to start on any other scope text. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Optional. Enables OTLP trace export. |
 
-The service applies the embedded migrations of its metadata backend at start. The PostgreSQL backend applies them under an advisory lock, so replicas can start together. `GET /health` answers 200. `GET /ready` answers 200 while the metadata backend answers a ping. `GET /metrics` serves Prometheus metrics. These three routes need no grant. A request for a path or method that no route serves answers 404 `vcs_not_found` or 405 `method_not_allowed` in the error envelope.
+The service refuses to start on a `MOTTE_META` or `MOTTE_BUCKET_KIND` value that it does not know. The service applies the embedded migrations of its metadata backend at start. The PostgreSQL backend applies them under an advisory lock, so replicas can start together. `GET /health` answers 200. `GET /ready` answers 200 while the metadata backend answers a ping. `GET /metrics` serves Prometheus metrics. These three routes need no grant. A request for a path or method that no route serves answers 404 `vcs_not_found` or 405 `method_not_allowed` in the error envelope.
+
+### Run locally
+
+The service runs with the `sqlite` metadata backend and the `fs` bucket and no other service. The key pair is any Ed25519 pair, and this command makes one and starts the service on `:8080`:
+
+```
+openssl genpkey -algorithm ed25519 -out motte.key && MOTTE_META=sqlite MOTTE_SQLITE_PATH=motte.db MOTTE_BUCKET_KIND=fs MOTTE_BUCKET=objects MOTTE_TRUSTED_KEYS="[{\"kid\":\"local\",\"key\":\"$(openssl pkey -in motte.key -pubout -outform DER | tail -c 32 | base64)\",\"scopes\":[\"node\",\"read\",\"import\",\"operator\"]}]" go run ./cmd/motte
+```
+
+A Go test starts the same composition with `testserver.StartLocal`, which needs no service and never skips. `testserver.Start` runs on PostgreSQL and skips without `MOTTE_TEST_DATABASE_URL`. One process uses one SQLite file and one `fs` directory.
 
 ### Limits and memory
 

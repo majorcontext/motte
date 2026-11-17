@@ -13,7 +13,9 @@ import (
 
 type config struct {
 	listen      string
+	meta        string
 	databaseURL string
+	sqlitePath  string
 	bucketKind  string
 	bucket      string
 	keys        []grant.Key
@@ -23,7 +25,9 @@ type config struct {
 // loadConfig reads the configuration from the environment.
 //
 //	MOTTE_LISTEN        listen address, default :8080
-//	MOTTE_DATABASE_URL  PostgreSQL DSN
+//	MOTTE_META          postgres (default) or sqlite
+//	MOTTE_DATABASE_URL  PostgreSQL DSN, for postgres
+//	MOTTE_SQLITE_PATH   database file, for sqlite
 //	MOTTE_BUCKET_KIND   gcs or fs
 //	MOTTE_BUCKET        bucket name for gcs, directory for fs
 //	MOTTE_TRUSTED_KEYS  JSON list of {"kid","key","scopes"}; key is the base64 Ed25519 public key
@@ -31,7 +35,9 @@ type config struct {
 func loadConfig(getenv func(string) string) (config, error) {
 	c := config{
 		listen:      getenv("MOTTE_LISTEN"),
+		meta:        getenv("MOTTE_META"),
 		databaseURL: getenv("MOTTE_DATABASE_URL"),
+		sqlitePath:  getenv("MOTTE_SQLITE_PATH"),
 		bucketKind:  getenv("MOTTE_BUCKET_KIND"),
 		bucket:      getenv("MOTTE_BUCKET"),
 		otlp:        getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "",
@@ -39,8 +45,18 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if c.listen == "" {
 		c.listen = ":8080"
 	}
-	if c.databaseURL == "" || c.bucket == "" {
-		return config{}, errors.New("MOTTE_DATABASE_URL and MOTTE_BUCKET are required")
+	if c.meta == "" {
+		c.meta = "postgres"
+	}
+	switch {
+	case c.meta == "postgres" && c.databaseURL == "":
+		return config{}, errors.New("MOTTE_DATABASE_URL is required")
+	case c.meta == "sqlite" && c.sqlitePath == "":
+		return config{}, errors.New("MOTTE_SQLITE_PATH is required")
+	case c.meta != "postgres" && c.meta != "sqlite":
+		return config{}, errors.New("MOTTE_META must be postgres or sqlite")
+	case c.bucket == "":
+		return config{}, errors.New("MOTTE_BUCKET is required")
 	}
 	if c.bucketKind != "gcs" && c.bucketKind != "fs" {
 		return config{}, errors.New("MOTTE_BUCKET_KIND must be gcs or fs")

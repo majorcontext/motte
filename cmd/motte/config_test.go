@@ -14,3 +14,24 @@ func TestParseKeysRefusesAnUnknownScope(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadConfigChoosesBackendsAndRefusesUnknownOnes(t *testing.T) {
+	keys := `[{"kid":"k","key":"` + strings.Repeat("A", 43) + `=","scopes":["node"]}]`
+	for name, c := range map[string]struct {
+		env map[string]string
+		ok  bool
+	}{
+		"postgres by default":  {map[string]string{"MOTTE_DATABASE_URL": "postgres://x", "MOTTE_BUCKET_KIND": "gcs", "MOTTE_BUCKET": "b"}, true},
+		"sqlite and fs":        {map[string]string{"MOTTE_META": "sqlite", "MOTTE_SQLITE_PATH": "m.db", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d"}, true},
+		"sqlite needs a path":  {map[string]string{"MOTTE_META": "sqlite", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d"}, false},
+		"unknown meta":         {map[string]string{"MOTTE_META": "spanner", "MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d"}, false},
+		"unknown bucket kind":  {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "r2", "MOTTE_BUCKET": "d"}, false},
+		"postgres needs a DSN": {map[string]string{"MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d"}, false},
+	} {
+		c.env["MOTTE_TRUSTED_KEYS"] = keys
+		_, err := loadConfig(func(k string) string { return c.env[k] })
+		if (err == nil) != c.ok {
+			t.Errorf("%s: error = %v, want ok = %v", name, err, c.ok)
+		}
+	}
+}

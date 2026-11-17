@@ -22,7 +22,9 @@ import (
 	"github.com/majorcontext/motte/bucket/gcs"
 	"github.com/majorcontext/motte/grant"
 	"github.com/majorcontext/motte/internal/server"
+	"github.com/majorcontext/motte/meta"
 	"github.com/majorcontext/motte/meta/postgres"
+	"github.com/majorcontext/motte/meta/sqlite"
 )
 
 func main() {
@@ -48,6 +50,21 @@ func openBucket(ctx context.Context, c config) (bucket.Store, error) {
 	return gcs.New(client, c.bucket), nil
 }
 
+func openMeta(ctx context.Context, c config) (meta.Store, func(), error) {
+	if c.meta == "sqlite" {
+		db, err := sqlite.Open(ctx, c.sqlitePath)
+		if err != nil {
+			return nil, nil, err
+		}
+		return db, func() { _ = db.Close() }, nil
+	}
+	db, err := postgres.Open(ctx, c.databaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	return db, db.Close, nil
+}
+
 func run(log *slog.Logger) error {
 	cfg, err := loadConfig(getenv)
 	if err != nil {
@@ -67,11 +84,11 @@ func run(log *slog.Logger) error {
 	}
 	otel.SetTextMapPropagator(propagation.TraceContext{})
 
-	db, err := postgres.Open(ctx, cfg.databaseURL)
+	db, closeMeta, err := openMeta(ctx, cfg)
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer closeMeta()
 	bucket, err := openBucket(ctx, cfg)
 	if err != nil {
 		return err
