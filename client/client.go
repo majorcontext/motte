@@ -323,16 +323,20 @@ func (c *Client) ProtectedRefs(ctx context.Context, repo string) ([]string, erro
 	return out.Patterns, err
 }
 
-// Events returns up to limit ref events with a sequence above after, oldest first. Zero takes the server default.
-// ErrEventsPruned means retention removed events above after, and the caller must read the refs again.
-func (c *Client) Events(ctx context.Context, after int64, limit int) ([]api.Event, error) {
-	path := "/v1/events?after=" + strconv.FormatInt(after, 10)
+// Events returns up to limit ref events after cursor, and the cursor to pass next. An empty cursor starts at the
+// first event. Zero limit takes the server default. Events of one ref arrive in order. ErrEventsPruned means
+// retention removed events after the cursor, and the caller must read the refs again.
+func (c *Client) Events(ctx context.Context, cursor string, limit int) ([]api.Event, string, error) {
+	q := url.Values{}
+	if cursor != "" {
+		q.Set("cursor", cursor)
+	}
 	if limit > 0 {
-		path += "&limit=" + strconv.Itoa(limit)
+		q.Set("limit", strconv.Itoa(limit))
 	}
 	var out api.Events
-	err := c.do(ctx, http.MethodGet, path, nil, &out)
-	return out.Events, err
+	err := c.do(ctx, http.MethodGet, "/v1/events?"+q.Encode(), nil, &out)
+	return out.Events, out.Cursor, err
 }
 
 // CreateSubscription registers a receiver of ref events. Its cursor starts at the newest event.

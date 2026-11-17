@@ -154,33 +154,60 @@ func TestRefEventsRecordEveryWrite(t *testing.T) {
 	if err := node.DeleteRef(ctx, "x", moved.Generation); err != nil {
 		t.Fatal(err)
 	}
-	evs, err := op.Events(ctx, 0, 0)
+	evs, cursor, err := op.Events(ctx, "", 0)
 	if err != nil || len(evs) != 4 {
 		t.Fatalf("events = %+v, %v, want 4: the failed create has none", evs, err)
 	}
 	main, _ := node.Ref(ctx, "main")
-	want := []api.Event{
-		{Repo: native, Ref: "main", New: main.Commit, Kind: "operator"},
-		{Repo: native, Ref: "x", New: commitA, Generation: made.Generation, Kind: "node"},
-		{Repo: native, Ref: "x", Old: commitA, New: commitB, Generation: moved.Generation, Kind: "merge"},
-		{Repo: native, Ref: "x", Old: commitB, Generation: moved.Generation, Kind: "node"},
+	want := map[string][]api.Event{
+		"main": {{Repo: native, Ref: "main", New: main.Commit, Kind: "operator"}},
+		"x": {
+			{Repo: native, Ref: "x", New: commitA, Generation: made.Generation, Kind: "node"},
+			{Repo: native, Ref: "x", Old: commitA, New: commitB, Generation: moved.Generation, Kind: "merge"},
+			{Repo: native, Ref: "x", Old: commitB, Generation: moved.Generation, Kind: "node"},
+		},
 	}
-	for i, w := range want {
-		g := evs[i]
-		if g.Time == "" || g.Generation <= 0 || i > 0 && g.Seq <= evs[i-1].Seq {
-			t.Errorf("event %d = %+v: want a time, a generation and a rising seq", i, g)
+	got := map[string][]api.Event{}
+	for _, g := range evs {
+		if g.Time == "" || g.Generation <= 0 || g.Seq <= 0 || g.Partition < 0 || g.Partition >= 64 {
+			t.Errorf("event %+v: want a time, a generation, a seq and a partition", g)
 		}
-		g.Seq, g.Time = 0, ""
-		if i == 0 {
-			g.Generation = 0
-		}
-		if g != w {
-			t.Errorf("event %d = %+v, want %+v", i, g, w)
+		got[g.Ref] = append(got[g.Ref], g)
+	}
+	for ref, ws := range want {
+		for i, w := range ws {
+			g := got[ref][i]
+			if i > 0 && (g.Partition != got[ref][0].Partition || g.Seq <= got[ref][i-1].Seq) {
+				t.Errorf("%s event %d = %+v: want the partition of the ref and a rising seq", ref, i, g)
+			}
+			g.Seq, g.Time, g.Partition = 0, "", 0
+			if ref == "main" {
+				g.Generation = 0
+			}
+			if g != w {
+				t.Errorf("%s event %d = %+v, want %+v", ref, i, g, w)
+			}
 		}
 	}
-	page, err := op.Events(ctx, evs[0].Seq, 2)
-	if err != nil || len(page) != 2 || page[0].Seq != evs[1].Seq || page[1].Seq != evs[2].Seq {
-		t.Errorf("page = %+v, %v, want events 1 and 2", page, err)
+	if more, next, err := op.Events(ctx, cursor, 0); err != nil || len(more) != 0 || next != cursor {
+		t.Errorf("after the cursor = %+v, %q, %v, want nothing and the same cursor", more, next, err)
+	}
+	if _, err := merge.SwapRef(ctx, "y", 0, commitA); err != nil {
+		t.Fatal(err)
+	}
+	if more, _, err := op.Events(ctx, cursor, 0); err != nil || len(more) != 1 || more[0].Ref != "y" {
+		t.Errorf("after the cursor = %+v, %v, want the one new event", more, err)
+	}
+	var seen []api.Event
+	for cur := ""; len(seen) < 5; {
+		page, next, err := op.Events(ctx, cur, 2)
+		if err != nil || len(page) == 0 || len(page) > 2 {
+			t.Fatalf("page = %+v, %v", page, err)
+		}
+		seen, cur = append(seen, page...), next
+	}
+	if len(seen) != 5 {
+		t.Errorf("pages of 2 gave %d events, want 5 with no repeat", len(seen))
 	}
 	if raw, _ := json.Marshal(evs); strings.Contains(string(raw), "mg1.") {
 		t.Error("an event carries a grant")
@@ -189,7 +216,7 @@ func TestRefEventsRecordEveryWrite(t *testing.T) {
 
 func TestEventRouteRules(t *testing.T) {
 	e := newEnv(t)
-	for _, q := range []string{"after=-1", "after=x", "limit=0", "limit=1001", "limit=x"} {
+	for _, q := range []string{"cursor=x", "cursor=MSwy", "limit=0", "limit=1001", "limit=x"} {
 		e.want(e.call("GET", "/v1/events?"+q, e.operator(), nil), 400, "invalid_body")
 	}
 	e.want(e.claim("ws1", 1, repoText), 200, "")
@@ -216,8 +243,9 @@ func TestSubscriptionRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	sub, err := op.CreateSubscription(ctx, api.CreateSubscriptionRequest{URL: "https://x.invalid/h", Secret: strings.Repeat("s", 16), Repo: repoText})
-	if err != nil || sub.ID == "" || sub.Cursor != 1 || sub.Repo != repoText {
-		t.Fatalf("create = %+v, %v, want the cursor at the newest event", sub, err)
+	_, head, _ := op.Events(ctx, "", 0)
+	if err != nil || sub.ID == "" || sub.Cursor != head || sub.Repo != repoText {
+		t.Fatalf("create = %+v, %v, want a cursor at the newest events", sub, err)
 	}
 	list, err := op.Subscriptions(ctx)
 	if raw, _ := json.Marshal(list); err != nil || len(list) != 1 || list[0] != sub || strings.Contains(string(raw), "sssss") {

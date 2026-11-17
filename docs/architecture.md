@@ -135,7 +135,7 @@ Ordinary `git` clones, fetches and pushes a repository over HTTPS. The routes ne
 | `POST /v1/workspaces/{id}/flush` with `{epoch, generation, prev, op, snapshot}` | `operator` |
 | `DELETE /v1/workspaces/{id}` | `operator` |
 | `PUT /v1/repos/{repo}/protected-refs` with `{patterns}` replaces the list and answers 200 with `{patterns}`. `GET` of the same path returns it. `{repo}` is the repository text, with `/` as `%2F`. | `operator` |
-| `GET /v1/events?after=<seq>&limit=<n>` returns `{events}` | `operator` |
+| `GET /v1/events?cursor=<cursor>&limit=<n>` returns `{events, cursor}` | `operator` |
 | `POST /v1/subscriptions` with `{url, secret, repo}` answers 201 with the subscription | `operator` |
 | `GET /v1/subscriptions` lists the subscriptions, oldest first | `operator` |
 | `DELETE /v1/subscriptions/{id}` answers 204 | `operator` |
@@ -157,23 +157,27 @@ Every create, swap and delete of a ref appends one event in the same unit as the
 
 | Field | Meaning |
 |---|---|
-| `seq` | Positive and unique. Events are visible in `seq` order, so a consumer that keeps its last `seq` loses none. |
+| `partition` | 0 to 63: the hash of the repo and the ref name, modulo 64. |
+| `seq` | Positive. With `partition` it identifies the event. In a partition it has no gap and follows commit order, so a consumer that keeps the last `seq` of each partition loses none. |
 | `repo`, `ref` | Repository text and ref name. |
 | `old`, `new` | Commit before and after. `old` is empty for a create and `new` is empty for a delete. |
 | `generation` | Generation of the ref after the write. For a delete, the generation that the ref had. |
 | `kind` | `node`, `merge` or `operator`: the scope of the grant that wrote the ref. The event never holds a grant. |
 | `time` | RFC 3339 time of the write, from the clock of the backend. |
 
-`GET /v1/events?after=N&limit=M` returns the events with `seq` above `N`, oldest first, up to `M`. `after` defaults to 0, and `limit` to 100 and is at most 1000. The route is for a consumer that was down. The main path is delivery to a subscription.
+`GET /v1/events?cursor=C&limit=M` returns up to `M` events and a new cursor. `limit` defaults to 100 and is at most 1000. The cursor is opaque: it holds the position in every partition. An empty or absent `cursor` starts at the first event of every partition. A consumer passes the `cursor` of an answer as the `cursor` of its next call, and the route returns the events after it. An answer with no events returns the same cursor. A cursor that the route did not return, or that is malformed, answers 400 `invalid_body`. The route is for a consumer that was down. The main path is delivery to a subscription.
 
-Retention: the store keeps an event for `MOTTE_EVENT_RETENTION`, 14 days by default. A server removes older events every hour and keeps the highest removed `seq`. A read with `after` below that value answers 410 `vcs_events_pruned`, and the consumer must read the refs again. A subscription whose cursor falls below that value stops delivering and logs an error. The operator deletes it and creates it again.
+Ordering: the 64 partitions of a store are fixed (`meta.Partitions`). An event is identified by `(partition, seq)`. The events of one ref are in one partition and arrive in commit order with no gap. No order holds between two refs, and a consumer must not assume one. The route fills its answer from the lowest partition up, so a page can hold events of some partitions only, and later pages hold the rest.
+
+Retention: the store keeps an event for `MOTTE_EVENT_RETENTION`, 14 days by default. A server removes older events every hour and keeps the highest removed `seq` of each partition. A read from a position below that floor in any partition that the route reads answers 410 `vcs_events_pruned`, and the consumer must read the refs again. A subscription whose cursor in a partition falls below the floor stops delivering that partition and logs an error. The operator deletes the subscription and creates it again.
 
 Delivery is push, at least once:
 
-- An operator registers a subscription with `POST /v1/subscriptions`: a receiver `url` (http or https, with a host and no user information, at most 2048 bytes), a `secret` of 16 to 256 bytes, and an optional `repo` filter. Its cursor starts at the newest event, so it gets no history. The store keeps the secret and never returns it.
-- Every server replica runs the delivery worker. A worker delivers a subscription only while it holds its lease. The lease is columns of the subscription row, taken by one conditional write. It is 30 seconds, and the holder renews it before each event and while it waits. A replica that crashes loses the lease when it expires, and another replica takes over from the stored cursor. All waits and lease times use the injected `internal/clock`.
-- The worker reads events above the cursor and sends them one at a time, in `seq` order. It skips an event that the `repo` filter excludes, and it moves the cursor past it. One request is `POST` of the JSON event to the `url`, with `Content-Type: application/json`. `X-Motte-Sequence` is the `seq`. `X-Motte-Signature` is `sha256=` and the lowercase hex HMAC-SHA256 of the exact request body under the secret. The request has a limit of 10 seconds, and the worker follows no redirect.
-- A 2xx answer acknowledges the event, and the worker then raises the stored cursor. Any other answer, or no answer, makes the worker send the same event again after a wait of 1 second, doubled after each attempt, up to 5 minutes. The worker sends no later event first. A crash between the answer and the cursor write repeats one event, so a receiver must treat a repeated `seq` as a repeat.
+- An operator registers a subscription with `POST /v1/subscriptions`: a receiver `url` (http or https, with a host and no user information, at most 2048 bytes), a `secret` of 16 to 256 bytes, and an optional `repo` filter. Its cursors start at the newest event of every partition, so it gets no history. The answer carries `cursor`, the acknowledged positions in the form of an event cursor. The store keeps the secret and never returns it.
+- Every server replica runs the delivery worker. A subscription has one cursor and one lease for each partition. A worker delivers a partition of a subscription only while it holds that lease, so replicas deliver different partitions of one subscription in parallel, and the order holds in each partition. The lease is columns of the row of the partition, taken by one conditional write. It is 30 seconds, and the holder renews it before each event and while it waits. A replica that crashes loses its leases when they expire, and another replica takes over from the stored cursors. All waits and lease times use the injected `internal/clock`.
+- Every second a worker reads the subscriptions and the newest `seq` of every partition, and starts a delivery for each partition that has events above its cursor. A delivery ends when the partition is caught up.
+- A delivery reads the events of a partition above the cursor and sends them one at a time, in `seq` order. It skips an event that the `repo` filter excludes, and it moves the cursor past it. One request is `POST` of the JSON event to the `url`, with `Content-Type: application/json`. `X-Motte-Partition` and `X-Motte-Sequence` are the partition and the `seq`; the pair identifies the event. `X-Motte-Signature` is `sha256=` and the lowercase hex HMAC-SHA256 of the exact request body under the secret. The request has a limit of 10 seconds, and the worker follows no redirect.
+- A 2xx answer acknowledges the event, and the worker then raises the stored cursor. Any other answer, or no answer, makes the worker send the same event again after a wait of 1 second, doubled after each attempt, up to 5 minutes. The worker sends no later event first. A crash between the answer and the cursor write repeats one event, so a receiver must treat a repeated `(partition, seq)` as a repeat. A receiver gets the events of one ref in order, and the events of different partitions in no fixed order.
 - A log line of delivery names the subscription, the `seq`, the status and the type of an error. It never holds the URL, the secret or the body.
 
 ## Data model
@@ -186,10 +190,11 @@ packs(repo, pack_id, bytes, created_at, pk(repo, pack_id))
 refs(repo, name, commit_sha, generation, updated_at, pk(repo, name)); sequence ref_generation
 workspaces(id pk, repo, owner, epoch bigint, op, snapshot, report_generation, created_at, deleted_at)
 op_heads(workspace_id pk -> workspaces, epoch, generation, heads text[], updated_at)
-counters(name pk, value)   rows event_seq, events_floor
-events(seq pk, repo, ref, old_commit, new_commit, generation, kind, at)
+event_partitions(partition pk, seq, floor)   64 rows
+events(partition, seq, repo, ref, old_commit, new_commit, generation, kind, at, pk(partition, seq))
 protected_refs(repo pk, patterns text[])
-subscriptions(id pk, url, secret, repo, cursor, created_at, lease_owner, lease_until)
+subscriptions(id pk, url, secret, repo, created_at)
+subscription_cursors(sub_id, partition, cursor, lease_owner, lease_until, pk(sub_id, partition))
 ```
 
 A repository text has the form `<prefix>:<path>`. The prefix `native` is reserved for the repositories that `POST /v1/repos` creates. The prefix matches `^[a-z0-9][a-z0-9-]{0,62}$`. The path has 1 to 512 bytes of UTF-8. Object keys are `repos/<prefix>/<base64url path>/...` and `ops/<workspace>/...`. A repository that the caller owns elsewhere has no `repos` row. The store keeps only the packs and refs of such a repository.
@@ -243,8 +248,11 @@ Every method that writes is one atomic unit. The unit is one conditional stateme
 - Order: names, repositories, pack ids and workspace ids are opaque text. A list sorts them by byte value of their UTF-8 text.
 - Time: `Repo.CreatedAt` and the creation time of a pack come from the clock of the backend, with a resolution of 1 millisecond or finer.
 - Racers: of N concurrent calls that need the same free condition, exactly one wins and the others get the error of a lost condition.
-- Events: every write that creates, moves or deletes a ref appends one event in the same unit as the ref write, and a write that changes nothing appends none. The event holds the repo, the ref, the old and new commit (empty when absent), the generation (that of the deleted ref for a delete), the writer kind and the time. The kind is `node` for `SwapRef` and `DeleteRef`, `merge` for `MergeRef` and `MergeDeleteRef`, and `operator` for the `main` that `CreateRepo` writes. `Seq` is positive and unique, and it follows commit order: a reader that sees `Seq` N sees every event below N that will ever exist, so a consumer that keeps the last `Seq` it read loses no event. Retention removes events and keeps the highest removed `Seq` as a floor. A read from a `Seq` below the floor is `ErrEventsPruned`.
-- Lease: a subscription row holds its lease. A lease write is one conditional statement on that row, and `now` is an argument, so the clock of the caller decides expiry. The lease passes to a new owner only when `lease_until` is at or before `now`. Owners must have clocks that differ by much less than the lease time.
+- Events: every write that creates, moves or deletes a ref appends one event in the same unit as the ref write, and a write that changes nothing appends none. The event holds the repo, the ref, the old and new commit (empty when absent), the generation (that of the deleted ref for a delete), the writer kind and the time. The kind is `node` for `SwapRef` and `DeleteRef`, `merge` for `MergeRef` and `MergeDeleteRef`, and `operator` for the `main` that `CreateRepo` writes.
+- Partitions: a store has `meta.Partitions` = 64 event partitions. The partition of an event is `meta.Partition(repo, ref)`: the FNV-1a 32-bit hash of the repo, a zero byte and the ref name, modulo 64. The backend gets the partition as an argument, so no SQL computes it. All events of one ref are in one partition. Changing the number is a migration that renumbers the events.
+- Event order: each partition has its own counter, taken in the unit of the write. An event is identified by `(partition, seq)`. In a partition `seq` starts at 1, has no gap, and follows commit order: a reader that sees `seq` N sees every event of that partition below N, so a consumer that keeps the last `seq` of each partition loses no event. This gives the order of the events of one ref. There is no order across partitions. Writes to refs in different partitions share no counter and do not wait for each other.
+- Retention: retention removes events and keeps, for each partition, the highest removed `seq` as a floor. A read of a partition from a `seq` below its floor is `ErrEventsPruned`. The other partitions are not affected.
+- Lease: the lease of a partition of a subscription is columns of its row in `subscription_cursors`. A lease write is one conditional statement on that row, and `now` is an argument, so the clock of the caller decides expiry. The lease passes to a new owner only when `lease_until` is at or before `now`. Owners must have clocks that differ by much less than the lease time. A subscription has one lease and one cursor for each partition.
 - Visibility: a method that returns nil has committed durably. A read that starts after it sees the write, in every client of the store.
 
 | Method | Condition | Effect | Error on a failed condition |
@@ -271,13 +279,14 @@ Every method that writes is one atomic unit. The unit is one conditional stateme
 | `MergeDeleteRef(repo, name, expect)` | The stored generation is `expect`. | Deletes the ref and appends one event. | As `MergeRef`. |
 | `ProtectedRefs(repo)` | None. | Returns the patterns, in the order that `SetProtectedRefs` stored them. | None. A repo with none returns an empty list. |
 | `SetProtectedRefs(repo, patterns)` | None. | Replaces the whole list. | None. |
-| `Events(after, limit)` | `after` is not below the floor. | Lists up to `limit` events with `Seq` above `after`, by `Seq`. | `ErrEventsPruned`. |
-| `PruneEvents(before)` | None. | Deletes the events with a time before `before` and raises the floor to the highest deleted `Seq`. | None. |
-| `CreateSubscription(s)` | No subscription has the id. | Inserts the row with its cursor at the newest `Seq` that ever existed, and returns it with its creation time. | `ErrExists`. |
-| `Subscriptions()` | None. | Lists by creation time, then id. | None. |
-| `DeleteSubscription(id)` | The subscription exists. | Deletes it and its lease. | `ErrNotFound`. |
-| `AcquireLease(id, owner, now, until)` | The lease owner is `owner`, or its `lease_until` is at or before `now`. | Sets the owner and `lease_until` to `until`, and returns the row. | `ErrNotFound`, else `ErrLeaseHeld`. |
-| `AdvanceCursor(id, owner, cursor)` | The lease owner is `owner`. | Sets the cursor to the higher of the stored one and `cursor`. | `ErrNotFound`, else `ErrLeaseHeld`. |
+| `Events(partition, after, limit)` | `after` is not below the floor of the partition. | Lists up to `limit` events of the partition with `seq` above `after`, by `seq`. | `ErrEventsPruned`. |
+| `EventHeads()` | None. | Returns the newest `seq` of each partition, 0 for none. | None. |
+| `PruneEvents(before)` | None. | Deletes the events with a time before `before` and raises the floor of each partition to its highest deleted `seq`. | None. |
+| `CreateSubscription(s)` | No subscription has the id. | Inserts the row and one cursor for each partition, at the newest `seq` that ever existed in it, and returns the row with its cursors and creation time. | `ErrExists`. |
+| `Subscriptions()` | None. | Lists by creation time, then id, each with its cursors. | None. |
+| `DeleteSubscription(id)` | The subscription exists. | Deletes it, its cursors and its leases. | `ErrNotFound`. |
+| `AcquireLease(id, partition, owner, now, until)` | The lease owner of that partition is `owner`, or its `lease_until` is at or before `now`. | Sets the owner and `lease_until` to `until`, and returns the subscription fields and the cursor of the partition. | `ErrNotFound`, else `ErrLeaseHeld`. |
+| `AdvanceCursor(id, partition, owner, cursor)` | The lease owner of that partition is `owner`. | Sets the cursor of the partition to the higher of the stored one and `cursor`. | `ErrNotFound`, else `ErrLeaseHeld`. |
 | `AddPack(repo, id, bytes)` | No pack row has the repo and id. | Inserts the row with the creation time. | None. A repeat changes nothing and keeps the first `bytes`. |
 | `Packs(repo)` | None. | Lists the packs of the repo, oldest first, then by id. | None. |
 
@@ -291,8 +300,8 @@ A `repo` argument of a fenced write is the repo of the grant. It must equal the 
 
 ### Provided backends
 
-- `meta/postgres` is the production backend. It keeps the schema in the section Data model, applies `meta/postgres/migrations` at start under an advisory lock, and meets each write with one statement, except a ref write and `CreateRepo`. The fence of a ref or op-heads write is a `FOR SHARE` read of the workspace row inside the statement. A report is one `UPDATE` that locks the row itself. The generation comes from the sequence `ref_generation`. A ref write and `CreateRepo` are one transaction. It first takes the next event number with `UPDATE counters SET value = value + 1 WHERE name = 'event_seq' RETURNING value`. The row lock lasts to the commit, so `Seq` order is commit order, and the number comes before any workspace lock, so a claim is not starved by writes that wait for the counter. One statement then writes the ref and the event, and the transaction rolls back when no row changed, so a failed write leaves no gap. All ref writes of one store are therefore serial at the counter row.
-- `meta/sqlite` is for tests and for a service that runs with no other process. It keeps the same fields in the tables of `meta/sqlite/migrations`. It uses a pure Go driver, so the service builds with CGO disabled. It opens one connection, so its writes are ordered, and one process uses one database file. Each write is one transaction of statements in which no read feeds a write. The fence is an `EXISTS` condition of the statement. The generation comes from the row `ref_generation` of the table `counters`, which the same transaction increments. A ref write inserts its event first, with the condition of the ref write, and `events.seq` is `AUTOINCREMENT`, so a rolled-back event takes no number. Times are integer microseconds, and the heads are JSON text.
+- `meta/postgres` is the production backend. It keeps the schema in the section Data model, applies `meta/postgres/migrations` at start under an advisory lock, and meets each write with one statement, except a ref write and `CreateRepo`. The fence of a ref or op-heads write is a `FOR SHARE` read of the workspace row inside the statement. A report is one `UPDATE` that locks the row itself. The generation comes from the sequence `ref_generation`. A ref write and `CreateRepo` are one transaction. It first takes the next event number of the partition with `UPDATE event_partitions SET seq = seq + 1 WHERE partition = $1 RETURNING seq`. The row lock lasts to the commit, so `seq` order is commit order in the partition, and the number comes before any workspace lock, so a claim is not starved by writes that wait for the counter. One statement then writes the ref and the event, and the transaction rolls back when no row changed, so a failed write leaves no gap. Only writes to refs of the same partition wait for each other.
+- `meta/sqlite` is for tests and for a service that runs with no other process. It keeps the same fields in the tables of `meta/sqlite/migrations`. It uses a pure Go driver, so the service builds with CGO disabled. It opens one connection, so its writes are ordered, and one process uses one database file. Each write is one transaction of statements in which no read feeds a write. The fence is an `EXISTS` condition of the statement. The generation comes from the row `ref_generation` of the table `counters`, which the same transaction increments. A ref write inserts its event first, with the condition of the ref write, and the number `event_partitions.seq + 1`. A second statement raises `event_partitions.seq` only when that event row exists. The ref write follows with its own condition. A write whose condition fails therefore leaves no event and no gap, in a batch that does not roll back too. Times are integer microseconds, and the heads are JSON text.
 - `bucket/gcs` and `bucket/fs` are the object backends. `gcs` writes with the precondition that the object does not exist. `fs` links a synced temporary file to its name.
 
 ### A new backend

@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strconv"
 	"sync"
 	"testing"
@@ -37,7 +38,7 @@ func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f
 type receivers struct {
 	mu     sync.Mutex
 	t      *testing.T
-	seqs   map[string][]int64
+	evs    map[string][]api.Event
 	status int
 	fail   int
 }
@@ -50,23 +51,35 @@ func (r *receivers) RoundTrip(req *http.Request) (*http.Response, error) {
 	_ = json.Unmarshal(body, &ev)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if req.Header.Get(api.HeaderSignature) != "sha256="+hex.EncodeToString(mac.Sum(nil)) || req.Header.Get(api.HeaderSequence) != strconv.FormatInt(ev.Seq, 10) {
-		r.t.Errorf("delivery of seq %d has the signature %q and sequence %q", ev.Seq, req.Header.Get(api.HeaderSignature), req.Header.Get(api.HeaderSequence))
+	if req.Header.Get(api.HeaderSignature) != "sha256="+hex.EncodeToString(mac.Sum(nil)) || req.Header.Get(api.HeaderSequence) != strconv.FormatInt(ev.Seq, 10) || req.Header.Get(api.HeaderPartition) != strconv.Itoa(ev.Partition) {
+		r.t.Errorf("delivery of %d/%d has the signature %q, partition %q and sequence %q", ev.Partition, ev.Seq, req.Header.Get(api.HeaderSignature), req.Header.Get(api.HeaderPartition), req.Header.Get(api.HeaderSequence))
 	}
 	status := http.StatusNoContent
 	if r.fail > 0 {
 		r.fail--
 		status = http.StatusInternalServerError
 	} else {
-		r.seqs[req.URL.Path] = append(r.seqs[req.URL.Path], ev.Seq)
+		r.evs[req.URL.Path] = append(r.evs[req.URL.Path], ev)
 	}
 	return &http.Response{StatusCode: status, Body: http.NoBody, Header: http.Header{}}, nil
 }
 
+// got returns the sorted ref names that a receiver got. It reports a repeat, and a partition whose events did not
+// arrive in order with no gap.
 func (r *receivers) got(path string) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return fmt.Sprint(r.seqs[path])
+	last := map[int]int64{}
+	var refs []string
+	for _, e := range r.evs[path] {
+		if last[e.Partition] != 0 && e.Seq != last[e.Partition]+1 {
+			r.t.Errorf("%s: partition %d delivered seq %d after %d", path, e.Partition, e.Seq, last[e.Partition])
+		}
+		last[e.Partition] = e.Seq
+		refs = append(refs, e.Ref)
+	}
+	sort.Strings(refs)
+	return fmt.Sprint(refs)
 }
 
 type bubble struct {
@@ -85,7 +98,7 @@ func newBubble(t *testing.T) *bubble {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	pub, key, _ := ed25519.GenerateKey(rand.Reader)
-	return &bubble{t: t, store: db, rcv: &receivers{t: t, seqs: map[string][]int64{}}, keyP: pub, key: key}
+	return &bubble{t: t, store: db, rcv: &receivers{t: t, evs: map[string][]api.Event{}}, keyP: pub, key: key}
 }
 
 // replica runs a server on the shared store until the returned stop func is called.
@@ -141,14 +154,24 @@ func TestEventsAreDeliveredSignedInOrderAndOnceAcrossReplicas(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		write(repoA, "a1")
+		first, err := repoA.SwapRef(ctx, "a1", 0, commitA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := repoA.SwapRef(ctx, "a1", first.Generation, commitB)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := repoA.SwapRef(ctx, "a1", second.Generation, commitA); err != nil {
+			t.Fatal(err)
+		}
 		write(repoB, "b1")
 		write(repoA, "a2")
 		time.Sleep(20 * time.Second)
-		if got := b.rcv.got("/all"); got != "[1 2 3]" {
+		if got := b.rcv.got("/all"); got != "[a1 a1 a1 a2 b1]" {
 			t.Errorf("deliveries = %s, want each event once, in order, with two replicas running", got)
 		}
-		if got := b.rcv.got("/filtered"); got != "[2]" {
+		if got := b.rcv.got("/filtered"); got != "[b1]" {
 			t.Errorf("filtered deliveries = %s, want only the event of its repo", got)
 		}
 
@@ -156,8 +179,8 @@ func TestEventsAreDeliveredSignedInOrderAndOnceAcrossReplicas(t *testing.T) {
 		write(repoA, "a3")
 		write(repoA, "a4")
 		time.Sleep(2 * time.Minute)
-		if got := b.rcv.got("/all"); got != "[1 2 3 4 5]" || b.rcv.fail != 0 {
-			t.Errorf("deliveries = %s after refusals (left %d), want 4 and 5 once each, in order, after retries", got, b.rcv.fail)
+		if got := b.rcv.got("/all"); got != "[a1 a1 a1 a2 a3 a4 b1]" || b.rcv.fail != 0 {
+			t.Errorf("deliveries = %s after refusals (left %d), want a3 and a4 once each after retries", got, b.rcv.fail)
 		}
 
 		stopA()
@@ -165,8 +188,8 @@ func TestEventsAreDeliveredSignedInOrderAndOnceAcrossReplicas(t *testing.T) {
 		write(repoA, "a5")
 		stopC, _ := b.replica("c", cfg)
 		time.Sleep(3 * time.Minute)
-		if got := b.rcv.got("/all"); got != "[1 2 3 4 5 6]" {
-			t.Errorf("deliveries = %s after a failover, want 6 once: the cursor survives and the new replica takes the expired lease", got)
+		if got := b.rcv.got("/all"); got != "[a1 a1 a1 a2 a3 a4 a5 b1]" {
+			t.Errorf("deliveries = %s after a failover, want a5 once: the cursor survives and the new replica takes the expired lease", got)
 		}
 		stopC()
 	})
@@ -182,14 +205,18 @@ func TestOldEventsArePrunedAndAnOlderCursorIsRefused(t *testing.T) {
 		if _, err := merge.SwapRef(ctx, "a", 0, commitA); err != nil {
 			t.Fatal(err)
 		}
+		_, older, err := op.Events(ctx, "", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
 		time.Sleep(25 * time.Hour)
 		if _, err := merge.SwapRef(ctx, "b", 0, commitA); err != nil {
 			t.Fatal(err)
 		}
 		time.Sleep(2 * time.Hour)
-		_, err := op.Events(ctx, 0, 0)
+		_, _, err = op.Events(ctx, "", 0)
 		refuses(t, err, client.ErrEventsPruned, 410)
-		if evs, err := op.Events(ctx, 1, 0); err != nil || len(evs) != 1 || evs[0].Ref != "b" {
+		if evs, _, err := op.Events(ctx, older, 0); err != nil || len(evs) != 1 || evs[0].Ref != "b" {
 			t.Errorf("events from the floor = %+v, %v, want the one newer event", evs, err)
 		}
 	})

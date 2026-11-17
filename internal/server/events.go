@@ -30,43 +30,43 @@ func (s *Server) registerEvents(mux *http.ServeMux) {
 }
 
 func eventView(e meta.Event) api.Event {
-	return api.Event{Seq: e.Seq, Repo: e.Repo, Ref: e.Ref, Old: e.Old, New: e.New, Generation: e.Generation, Kind: e.Kind, Time: e.At.UTC().Format(time.RFC3339Nano)}
+	return api.Event{Partition: e.Partition, Seq: e.Seq, Repo: e.Repo, Ref: e.Ref, Old: e.Old, New: e.New, Generation: e.Generation, Kind: e.Kind, Time: e.At.UTC().Format(time.RFC3339Nano)}
 }
 
 func subscriptionView(s meta.Subscription) api.Subscription {
-	return api.Subscription{ID: s.ID, URL: s.URL, Repo: s.Repo, Cursor: s.Cursor, CreatedAt: s.CreatedAt.UTC().Format(time.RFC3339)}
-}
-
-// queryInt reads an integer parameter in [lo, hi]. An absent parameter is def.
-func queryInt(r *http.Request, name string, def, lo, hi int64) (int64, error) {
-	v := r.URL.Query().Get(name)
-	if v == "" {
-		return def, nil
-	}
-	n, err := strconv.ParseInt(v, 10, 64)
-	if err != nil || n < lo || n > hi {
-		return 0, errBody
-	}
-	return n, nil
+	return api.Subscription{ID: s.ID, URL: s.URL, Repo: s.Repo, Cursor: encodeCursor(s.Cursors), CreatedAt: s.CreatedAt.UTC().Format(time.RFC3339)}
 }
 
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request, _ call) error {
-	after, err := queryInt(r, "after", 0, 0, 1<<62)
+	cursor, err := decodeCursor(r.URL.Query().Get("cursor"))
 	if err != nil {
 		return err
 	}
-	limit, err := queryInt(r, "limit", eventsDefault, 1, eventsMax)
+	limit := int64(eventsDefault)
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if limit, err = strconv.ParseInt(v, 10, 64); err != nil || limit < 1 || limit > eventsMax {
+			return errBody
+		}
+	}
+	heads, err := s.index.EventHeads(r.Context())
 	if err != nil {
 		return err
 	}
-	evs, err := s.index.Events(r.Context(), after, int(limit))
-	if err != nil {
-		return err
+	out := api.Events{Events: []api.Event{}}
+	for p := 0; p < meta.Partitions && len(out.Events) < int(limit); p++ {
+		if heads[p] <= cursor[p] {
+			continue
+		}
+		evs, err := s.index.Events(r.Context(), p, cursor[p], int(limit)-len(out.Events))
+		if err != nil {
+			return err
+		}
+		for _, e := range evs {
+			out.Events = append(out.Events, eventView(e))
+			cursor[p] = e.Seq
+		}
 	}
-	out := api.Events{Events: make([]api.Event, len(evs))}
-	for i, e := range evs {
-		out.Events[i] = eventView(e)
-	}
+	out.Cursor = encodeCursor(cursor)
 	s.writeJSON(w, http.StatusOK, out)
 	return nil
 }
