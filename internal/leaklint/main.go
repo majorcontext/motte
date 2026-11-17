@@ -94,7 +94,7 @@ func run(list string, ci bool) ([]hit, error) {
 		}
 		hits = append(hits, scan(string(name), data, terms)...)
 	}
-	log, err := git("log", "--format=%H%n%an%n%ae%n%cn%n%ce%n%B%x01")
+	log, err := git("log", "--no-merges", "--format=%H%n%an%n%ae%n%cn%n%ce%n%B%x01")
 	if err != nil {
 		return nil, err
 	}
