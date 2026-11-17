@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -222,7 +223,8 @@ func TestRefEventsRecordEveryWrite(t *testing.T) {
 func TestEventRouteRules(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
-	for _, q := range []string{"cursor=x", "cursor=MSwy", "limit=0", "limit=1001", "limit=x"} {
+	ahead := base64.RawURLEncoding.EncodeToString([]byte("1" + strings.Repeat(",0", 63)))
+	for _, q := range []string{"cursor=x", "cursor=MSwy", "cursor=" + ahead, "limit=0", "limit=1001", "limit=x"} {
 		e.want(e.call("GET", "/v1/events?"+q, e.operator(), nil), 400, "invalid_body")
 	}
 	e.want(e.claim("ws1", 1, repoText), 200, "")

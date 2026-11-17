@@ -53,8 +53,13 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request, _ call) erro
 		return err
 	}
 	out := api.Events{Events: []api.Event{}}
+	for p, c := range cursor {
+		if c > heads[p] {
+			return errBody
+		}
+	}
 	for p := 0; p < meta.Partitions && len(out.Events) < int(limit); p++ {
-		if heads[p] <= cursor[p] {
+		if heads[p] == cursor[p] {
 			continue
 		}
 		evs, err := s.index.Events(r.Context(), p, cursor[p], int(limit)-len(out.Events))

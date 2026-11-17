@@ -109,6 +109,7 @@ func (s *Store) PruneEvents(ctx context.Context, before time.Time) error {
 
 func (s *Store) CreateSubscription(ctx context.Context, sub meta.Subscription) (meta.Subscription, error) {
 	var created time.Time
+	var cursors []int64
 	err := inTx(ctx, s.db, func(tx *sql.Tx) error {
 		var micro int64
 		if err := tx.QueryRowContext(ctx, `
@@ -117,8 +118,22 @@ func (s *Store) CreateSubscription(ctx context.Context, sub meta.Subscription) (
 			return err
 		}
 		created = time.UnixMicro(micro).UTC()
-		_, err := tx.ExecContext(ctx, `INSERT INTO subscription_cursors (sub_id, partition, cursor) SELECT ?, partition, seq FROM event_partitions`, sub.ID)
-		return err
+		if _, err := tx.ExecContext(ctx, `INSERT INTO subscription_cursors (sub_id, partition, cursor) SELECT ?, partition, seq FROM event_partitions`, sub.ID); err != nil {
+			return err
+		}
+		rows, err := tx.QueryContext(ctx, `SELECT cursor FROM subscription_cursors WHERE sub_id = ? ORDER BY partition`, sub.ID)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var c int64
+			if err := rows.Scan(&c); err != nil {
+				return err
+			}
+			cursors = append(cursors, c)
+		}
+		return rows.Err()
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return meta.Subscription{}, meta.ErrExists
@@ -126,11 +141,7 @@ func (s *Store) CreateSubscription(ctx context.Context, sub meta.Subscription) (
 	if err != nil {
 		return meta.Subscription{}, fmt.Errorf("sqlite: create subscription: %w", err)
 	}
-	heads, err := s.EventHeads(ctx)
-	if err != nil {
-		return meta.Subscription{}, err
-	}
-	sub.CreatedAt, sub.Cursors = created, heads
+	sub.CreatedAt, sub.Cursors = created, cursors
 	return sub, nil
 }
 

@@ -23,6 +23,7 @@ var policyCases = []struct {
 	{"pruned events refuse an older cursor in their partition", eventPrune},
 	{"protected refs are kept for each repo", protectedRefs},
 	{"subscriptions start at the newest event", subscriptions},
+	{"a created subscription returns the cursors that it stored", subscriptionCursorsAreStored},
 	{"one owner holds a lease", leaseExclusive},
 }
 
@@ -363,6 +364,36 @@ func updateRefEvents(t *testing.T, s meta.Store) {
 		g.Partition, g.Seq, g.At = 0, 0, time.Time{}
 		if g != w {
 			t.Errorf("event %d = %+v, want %+v", i, g, w)
+		}
+	}
+}
+
+func subscriptionCursorsAreStored(t *testing.T, s meta.Store) {
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_, err := s.MergeRef(ctx, repoText, fmt.Sprint("w", i), 0, commitA)
+			ok(t, err)
+		}
+	})
+	defer wg.Wait()
+	defer close(stop)
+	for i := range 20 {
+		id := fmt.Sprint("s", i)
+		made, err := s.CreateSubscription(ctx, meta.Subscription{ID: id, URL: "https://x.invalid", Secret: "k"})
+		ok(t, err)
+		list, err := s.Subscriptions(ctx)
+		ok(t, err)
+		for _, l := range list {
+			if l.ID == id && fmt.Sprint(l.Cursors) != fmt.Sprint(made.Cursors) {
+				t.Fatalf("created cursors %v, stored %v", made.Cursors, l.Cursors)
+			}
 		}
 	}
 }
