@@ -18,10 +18,10 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
+	"github.com/majorcontext/motte/bucket"
+	"github.com/majorcontext/motte/bucket/fs"
+	"github.com/majorcontext/motte/bucket/gcs"
 	"github.com/majorcontext/motte/grant"
-	"github.com/majorcontext/motte/internal/objstore"
-	"github.com/majorcontext/motte/internal/objstore/fs"
-	"github.com/majorcontext/motte/internal/objstore/gcs"
 	"github.com/majorcontext/motte/internal/pg"
 	"github.com/majorcontext/motte/internal/server"
 )
@@ -34,7 +34,7 @@ func main() {
 	}
 }
 
-func openBucket(ctx context.Context, c config) (objstore.Store, error) {
+func openBucket(ctx context.Context, c config) (bucket.Store, error) {
 	if c.bucketKind == "fs" {
 		root, err := fs.New(c.bucket)
 		if err != nil {

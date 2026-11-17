@@ -15,8 +15,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/majorcontext/motte/bucket/fs"
 	"github.com/majorcontext/motte/grant"
-	"github.com/majorcontext/motte/internal/objstore/fs"
 	"github.com/majorcontext/motte/internal/pgtest"
 )
 

@@ -18,7 +18,7 @@ Non-goals:
 |---|---|---|
 | `grant` | Claims, Ed25519 signer, verifier. Public package. | M1 |
 | `api` | Wire types and error codes. Public package. | M1 |
-| `internal/objstore` | Object store seam with Cloud Storage and filesystem buckets. | M1 |
+| `bucket` | Object store seam with Cloud Storage (`bucket/gcs`) and filesystem (`bucket/fs`) buckets, and its conformance suite `bucket/buckettest`. Public package. | M1 |
 | `internal/gitpack` | Reader and writer of git pack files and v2 indexes. | M1 |
 | Store service | HTTP service, PostgreSQL index, the epoch fence. | M2 |
 | `client` | Typed Go client for callers. Public package. | M3 |

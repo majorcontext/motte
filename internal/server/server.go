@@ -15,8 +15,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/majorcontext/motte/api"
+	"github.com/majorcontext/motte/bucket"
 	"github.com/majorcontext/motte/grant"
-	"github.com/majorcontext/motte/internal/objstore"
 	"github.com/majorcontext/motte/internal/pg"
 	"github.com/majorcontext/motte/internal/store"
 )
@@ -25,7 +25,7 @@ import (
 // every composition shares one graph.
 type Config struct {
 	Pool     *pgxpool.Pool
-	Bucket   objstore.Store
+	Bucket   bucket.Store
 	Verifier *grant.Verifier
 	Logger   *slog.Logger
 	// Now is the clock of grant expiry and the root commit. It defaults to time.Now.
