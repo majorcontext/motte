@@ -43,12 +43,13 @@ type Server struct {
 	latency  *prometheus.HistogramVec
 	registry *prometheus.Registry
 	mux      *http.ServeMux
+	readers  chan struct{}
 }
 
 // New returns a Server over the database of cfg.Pool and the object store cfg.Bucket.
 func New(cfg Config) *Server {
 	db := &pg.DB{Pool: cfg.Pool}
-	s := &Server{index: db, objects: store.New(cfg.Bucket, db), verifier: cfg.Verifier, logger: cfg.Logger, now: cfg.Now}
+	s := &Server{index: db, objects: store.New(cfg.Bucket, db), verifier: cfg.Verifier, logger: cfg.Logger, now: cfg.Now, readers: make(chan struct{}, uploadReaders)}
 	if s.now == nil {
 		s.now = time.Now
 	}

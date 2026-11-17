@@ -358,24 +358,28 @@ func TestBodyOverTheLimitAnswersTooLarge(t *testing.T) {
 }
 
 func TestSlowUploadDoesNotStallOtherRequests(t *testing.T) {
-	e := newEnv(t)
-	e.want(e.claim("ws1", 1, repoText), 200, "")
-	body, w := io.Pipe()
-	reading := make(chan struct{})
-	ctx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{Got100Continue: func() { close(reading) }})
-	req, _ := http.NewRequestWithContext(ctx, "POST", e.url+"/v1/vcs/objects", body)
-	req.Header.Set("Authorization", "Bearer "+e.nodeGrant("ws1", 1))
-	req.Header.Set("Expect", "100-continue")
-	go func() {
-		if resp, err := http.DefaultClient.Do(req); err == nil {
-			resp.Body.Close()
-		}
-	}()
-	<-reading
-	if _, err := e.Client(e.readGrant(repoText)).Has(context.Background(), []string{commitA}); err != nil {
-		t.Fatalf("a read waited for a stalled upload: %v", err)
+	for method, path := range map[string]string{"POST": "/v1/vcs/objects", "PUT": "/v1/vcs/ops/operations/0123456789abcdef"} {
+		t.Run(path, func(t *testing.T) {
+			e := newEnv(t)
+			e.want(e.claim("ws1", 1, repoText), 200, "")
+			body, w := io.Pipe()
+			reading := make(chan struct{})
+			ctx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{Got100Continue: func() { close(reading) }})
+			req, _ := http.NewRequestWithContext(ctx, method, e.url+path, body)
+			req.Header.Set("Authorization", "Bearer "+e.nodeGrant("ws1", 1))
+			req.Header.Set("Expect", "100-continue")
+			go func() {
+				if resp, err := http.DefaultClient.Do(req); err == nil {
+					resp.Body.Close()
+				}
+			}()
+			<-reading
+			if _, err := e.Client(e.readGrant(repoText)).Has(context.Background(), []string{commitA}); err != nil {
+				t.Fatalf("a read waited for a stalled upload: %v", err)
+			}
+			w.CloseWithError(errors.New("sender gone"))
+		})
 	}
-	w.CloseWithError(errors.New("sender gone"))
 }
 
 func TestUnknownRouteAndMethodUseTheErrorEnvelope(t *testing.T) {

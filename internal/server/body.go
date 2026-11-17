@@ -26,12 +26,28 @@ func readBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, erro
 	return raw, nil
 }
 
-// readUpload is readBody under the upload deadline.
-func (s *Server) readUpload(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, error) {
-	if err := http.NewResponseController(w).SetReadDeadline(s.now().Add(uploadTimeout)); err != nil {
-		return nil, err
+// uploadReaders bounds the upload bodies that are being read or wait for a reservation, so the memory of bodies is
+// at most uploadReaders times the largest body limit.
+const uploadReaders = 4
+
+// receive reads an upload body under the upload deadline and reserves its length. The reader slot is held from before
+// the first byte until the reservation is made. The caller releases the reservation.
+func (s *Server) receive(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, func(), error) {
+	select {
+	case s.readers <- struct{}{}:
+	case <-r.Context().Done():
+		return nil, nil, r.Context().Err()
 	}
-	return readBody(w, r, limit)
+	defer func() { <-s.readers }()
+	if err := http.NewResponseController(w).SetReadDeadline(s.now().Add(uploadTimeout)); err != nil {
+		return nil, nil, err
+	}
+	body, err := readBody(w, r, limit)
+	if err != nil {
+		return nil, nil, err
+	}
+	release, err := s.reserve(r, int64(len(body)))
+	return body, release, err
 }
 
 func decodeJSON(raw []byte, out any) error {

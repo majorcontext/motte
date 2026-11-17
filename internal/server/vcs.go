@@ -248,11 +248,7 @@ func decodeObjects(body []byte) ([]gitpack.Object, error) {
 }
 
 func (s *Server) putObjects(w http.ResponseWriter, r *http.Request, c call) error {
-	body, err := s.readUpload(w, r, packBodyMax)
-	if err != nil {
-		return err
-	}
-	release, err := s.reserve(r, int64(len(body)))
+	body, release, err := s.receive(w, r, packBodyMax)
 	if err != nil {
 		return err
 	}
@@ -292,11 +288,7 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, c call) error
 }
 
 func (s *Server) importPack(w http.ResponseWriter, r *http.Request, c call) error {
-	body, err := s.readUpload(w, r, packBodyMax)
-	if err != nil {
-		return err
-	}
-	release, err := s.reserve(r, int64(len(body)))
+	body, release, err := s.receive(w, r, packBodyMax)
 	if err != nil {
 		return err
 	}
@@ -335,16 +327,13 @@ func (s *Server) getOp(w http.ResponseWriter, r *http.Request, c call) error {
 }
 
 func (s *Server) putOp(w http.ResponseWriter, r *http.Request, c call) error {
-	release, err := s.reserve(r, store.ReadReserve)
+	body, release, err := s.receive(w, r, opBodyMax)
 	if err != nil {
 		return err
 	}
 	defer release()
-	if err := http.NewResponseController(w).SetReadDeadline(s.now().Add(uploadTimeout)); err != nil {
-		return err
-	}
 	var req api.OpObject
-	if err := decodeBody(w, r, opBodyMax, &req); err != nil {
+	if err := decodeJSON(body, &req); err != nil {
 		return err
 	}
 	data, err := unb64(req.Data)
