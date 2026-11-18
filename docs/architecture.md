@@ -364,6 +364,23 @@ A backend implements the interface and returns the sentinel errors of its packag
 - Cloudflare D1 (`meta`): each write is one `batch` call. D1 runs a batch as one transaction and rolls it back when a statement fails. D1 has no interactive transaction and no row lock, and the contract needs neither. The conditions are the `WHERE` clauses and `INSERT ... SELECT ... WHERE EXISTS` fences of `meta/sqlite`, which is SQLite SQL. The counter is a row that the first statement of the batch increments. The result of a statement reports the rows that it changed, and a conditional statement that changed no row is the failed condition. Reads that pick an error go to the primary.
 - Cloudflare R2 (`bucket`): R2 has an S3-compatible API. `Create` is `PutObject` with `If-None-Match: *`, which answers 412 when the key exists. `Get` and `GetRange` are `GetObject` with an optional `Range` header, and a 416 answer is an empty result. R2 reads see a completed write.
 
+## Provider seams
+
+Every external provider sits behind an interface that its consumer owns. A provider is a database, an object store, a forge, a cloud API or a remote credential source. A seam has a conformance suite that every implementation runs, and at least two implementations: a local or in-memory implementation counts. The table lists each seam. `internal/seams` checks the table against the code in CI.
+
+| Seam | Interface | Suite | Implementations | Gap |
+|---|---|---|---|---|
+| meta-store | `meta.Store` | `meta/metatest.Run` | `meta/postgres`, `meta/sqlite` | |
+| bucket-store | `bucket.Store` | `bucket/buckettest.Run` | `bucket/gcs`, `bucket/fs` | |
+
+- A cell that names Go code is `dir.Identifier`: the directory is relative to the module root.
+- A seam that meets the rule has an interface, a suite and at least two implementations. A seam that does not has a reason in the Gap column, and its name is a line of `testdata/seam-gaps.txt`. The list only shrinks: CI fails a gap that the merge base does not list.
+- A package under the directory of the interface (the suite excepted), or a package that holds `var _ pkg.Interface = ...`, is an implementation. The table must list it.
+- Each implementation has a test that calls the suite function.
+- Only an implementation package, a package under `cmd/`, or a package in `testdata/provider-sdk-importers.txt` imports a provider SDK. The SDK prefixes are in `internal/seams/providers.go`.
+- A provider host name (`ghcr.io`, `github.com`, `api.github.com`, `googleapis.com`, `amazonaws.com`, `r2.cloudflarestorage.com`) appears only in a Go string literal or a YAML file of `.github` or `charts` that `testdata/provider-hosts.txt` lists. The module path and import paths are not literals for this rule.
+- A change to a seam updates the table in the same diff.
+
 ## jj backend
 
 The crate `jj/` builds the binary `jj`: jj 0.47.1 (`jj-lib` and `jj-cli`, pinned exactly) with four shims and the subcommand `jj motte`. The binary keeps the name `jj` because it is jj with extra stores. A release attaches it for linux amd64 and arm64, with sha256 sums.

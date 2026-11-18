@@ -32,6 +32,16 @@ Test time differs by machine, so the repository limits the causes of slow tests 
 - `testtime` runs a fixed calibration workload (a CPU loop and a loop of file create, write, stat and remove) after the test stream ends, when the machine is idle. The line `calibrate SECONDS` of the budget file is the calibration time on the reference runner, the GitHub `ubuntu-latest` job. `testtime` multiplies every time budget by measured divided by reference, and never by less than 1. It prints the calibration time and the factor.
 - `testtime` prints, for each package, the sum of the time of its leaf tests divided by the wall time of the package. The ratio has no limit.
 
+## Provider seams
+
+- Put each external provider behind an interface that the consumer owns. See `docs/architecture.md` "Provider seams".
+- Give each seam a conformance suite that every implementation runs, and at least two implementations. A local or in-memory implementation counts.
+- Import a provider SDK only in an implementation package or under `cmd/`.
+- Name a provider host only in a file of `testdata/provider-hosts.txt`.
+- Update the seams table in the same diff as a change to a seam.
+- A seam that does not meet the rule is a gap row in the table and a line of `testdata/seam-gaps.txt`. The list only shrinks.
+- `internal/seams` enforces these rules in `go test`.
+
 ## Comments
 
 Write no comment by default. A comment states why: a constraint, a hazard, or a rejected alternative. It never restates the code. It carries no history, no date, no person, no pull request number and no path to justify the code.
