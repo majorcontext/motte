@@ -19,7 +19,7 @@ Non-goals:
 |---|---|---|
 | `grant` | Claims, Ed25519 signer, verifier. Public package. | M1 |
 | `api` | Wire types and error codes. Public package. | M1 |
-| `bucket` | Object store seam with Cloud Storage (`bucket/gcs`) and filesystem (`bucket/fs`) buckets, and its conformance suite `bucket/buckettest`. Public package. | M1 |
+| `bucket` | Object store seam with Cloud Storage (`bucket/gcs`), S3-compatible (`bucket/s3`) and filesystem (`bucket/fs`) buckets, and its conformance suite `bucket/buckettest`. Public package. | M1 |
 | `internal/gitpack` | Reader and writer of git pack files and v2 indexes, and the reader of a pushed pack. | M1 |
 | `internal/pktline`, `internal/gitproto` | The pkt-line framing, and the git smart HTTP protocol over an object reader: advertisement, v2 fetch and ls-refs, receive-pack. | M6 |
 | `internal/land` | Pure rebase of a linear range of commits onto a tip: tree diff, tree apply and the file-level conflict check. | M7 |
@@ -45,13 +45,16 @@ The store plane serves the node daemon and the jj backend. The control plane ser
 | `MOTTE_META` | Metadata backend: `postgres` or `sqlite`. Default `postgres`. |
 | `MOTTE_DATABASE_URL` | PostgreSQL DSN. Required for `postgres`. |
 | `MOTTE_SQLITE_PATH` | SQLite database file. Required for `sqlite`. |
-| `MOTTE_BUCKET_KIND` | `gcs` or `fs`. |
-| `MOTTE_BUCKET` | Bucket name for `gcs`, directory for `fs`. |
+| `MOTTE_BUCKET_KIND` | `gcs`, `s3` or `fs`. |
+| `MOTTE_BUCKET` | Bucket name for `gcs` and `s3`, directory for `fs`. |
+| `MOTTE_S3_ENDPOINT` | Optional, `s3` only. Base URL of an S3-compatible service, such as R2 or MinIO. Default: the AWS endpoint of the region. |
+| `MOTTE_S3_REGION` | `s3` only. Region of the bucket. Default: the region of the AWS SDK default chain. Use `auto` for R2. |
+| `MOTTE_S3_PATH_STYLE` | Optional, `s3` only. `true` addresses the bucket in the URL path, not the host name. Default `false`. MinIO needs `true`. |
 | `MOTTE_TRUSTED_KEYS` | JSON list of `{"kid","key","scopes"}`. `key` is the standard base64 of an Ed25519 public key. `scopes` holds only `node`, `read`, `write`, `import`, `operator` and `merge`. The service refuses to start on any other scope text. |
 | `MOTTE_EVENT_RETENTION` | Optional. How long a ref event is kept, as a Go duration. Default `336h`. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Optional. Enables OTLP trace export. |
 
-The service refuses to start on a `MOTTE_META` or `MOTTE_BUCKET_KIND` value that it does not know. The service applies the embedded migrations of its metadata backend at start. The PostgreSQL backend applies them under an advisory lock, so replicas can start together. `GET /health` answers 200. `GET /ready` answers 200 while the metadata backend answers a ping. `GET /metrics` serves Prometheus metrics. These three routes need no grant. A request for a path or method that no route serves answers 404 `vcs_not_found` or 405 `method_not_allowed` in the error envelope.
+The `s3` backend takes its credentials from the AWS SDK default chain: the environment (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`), the shared files, or a role. The service refuses to start on a `MOTTE_META` or `MOTTE_BUCKET_KIND` value that it does not know, on a `MOTTE_S3_*` variable with another kind, and on a `MOTTE_S3_PATH_STYLE` value that is not `true` or `false`. The service applies the embedded migrations of its metadata backend at start. The PostgreSQL backend applies them under an advisory lock, so replicas can start together. `GET /health` answers 200. `GET /ready` answers 200 while the metadata backend answers a ping. `GET /metrics` serves Prometheus metrics. These three routes need no grant. A request for a path or method that no route serves answers 404 `vcs_not_found` or 405 `method_not_allowed` in the error envelope.
 
 ### Run locally
 
@@ -273,7 +276,7 @@ A caller of the service chooses where the service keeps its state. Two seams hol
 | Interface | Holds | Backends |
 |---|---|---|
 | `meta.Store` | Repositories, workspaces and their epoch fence, op heads, refs, protected ref patterns, ref events, event subscriptions, the land queue, lease and log, the pack listing. | `meta/postgres`, `meta/sqlite` |
-| `bucket.Store` | Pack files, pack indexes and op objects. | `bucket/gcs`, `bucket/fs` |
+| `bucket.Store` | Pack files, pack indexes and op objects. | `bucket/gcs`, `bucket/s3`, `bucket/fs` |
 
 The suites `meta/metatest` and `bucket/buckettest` export `Run(t, newBackend)`. A backend passes its suite before a server uses it. The suite is the executable form of this section, and a difference between them is a defect.
 
@@ -354,7 +357,8 @@ A `repo` argument of a fenced write is the repo of the grant. It must equal the 
 
 - `meta/postgres` is the production backend. It keeps the schema in the section Data model, applies `meta/postgres/migrations` at start under an advisory lock, and meets each write with one statement, except a ref write, `CreateRepo` and `LandRef`. The fence of a ref or op-heads write is a `FOR SHARE` read of the workspace row inside the statement. A report is one `UPDATE` that locks the row itself. The generation comes from the sequence `ref_generation`. A ref write, `CreateRepo` and `LandRef` are one transaction. It first takes the next event number of the partition with `UPDATE event_partitions SET seq = seq + 1 WHERE partition = $1 RETURNING seq`. The row lock lasts to the commit, so `seq` order is commit order in the partition, and the number comes before any workspace lock, so a claim is not starved by writes that wait for the counter. One statement then writes the ref and the event, and the transaction rolls back when no row changed, so a failed write leaves no gap. Only writes to refs of the same partition wait for each other. `LandRef` takes the event number the same way, then runs one statement of data-modifying parts: the lease check, the ref move, the event, the log rows, the prune and the item results, all of them conditional on the ref that moved. A land lease write and a claim are one statement.
 - `meta/sqlite` is for tests and for a service that runs with no other process. It keeps the same fields in the tables of `meta/sqlite/migrations`. It uses a pure Go driver, so the service builds with CGO disabled. It opens one connection, so its writes are ordered, and one process uses one database file. Each write is one transaction of statements in which no read feeds a write. The fence is an `EXISTS` condition of the statement. The generation comes from the row `ref_generation` of the table `counters`, which the same transaction increments. A ref write inserts its event first, with the condition of the ref write, and the number `event_partitions.seq + 1`. A second statement raises `event_partitions.seq` only when that event row exists. The ref write follows with its own condition. A write whose condition fails therefore leaves no event and no gap, in a batch that does not roll back too. `LandRef` follows the same pattern: its event insert carries the lease and ref conditions, and each later statement (the log row of each land and the end of each item, one statement for each) needs that event row to exist for the generation of the unit. Times are integer microseconds, and the heads are JSON text.
-- `bucket/gcs` and `bucket/fs` are the object backends. `gcs` writes with the precondition that the object does not exist. `fs` links a synced temporary file to its name.
+- `bucket/gcs`, `bucket/s3` and `bucket/fs` are the object backends. `gcs` writes with the precondition that the object does not exist. `fs` links a synced temporary file to its name.
+- `bucket/s3` uses the AWS SDK for Go v2, and only `bucket/s3` and `cmd/motte` import it. `Create` is `PutObject` with `If-None-Match: *`. An answer of 412 is `created` false. An answer of 409 (`ConditionalRequestConflict`, a concurrent write of the same key is in flight) is retried, and the retry answers 412 or succeeds, so exactly one creator gets true. `Get` and `GetRange` are `GetObject`, and `GetRange` sends a `Range` header: `bytes=off-` for a negative `n` or an end that overflows, otherwise `bytes=off-(off+n-1)`. An `n` of 0 reads the first byte of the range and returns none, so a missing key is still `bucket.ErrNotFound`. An answer of 416 is an empty result, and `NoSuchKey` is `bucket.ErrNotFound`. A negative `off` is an error. The client sends checksums only where the API needs them, because some S3-compatible services reject the default checksum headers. S3 reads see a completed write, so the read-after-`Create` rule holds. A service must support `If-None-Match` on `PutObject`: AWS S3, R2 and MinIO do. A service that ignores the header breaks the rule that a stored object is never replaced, and `buckettest` shows it.
 
 ### A new backend
 
@@ -362,7 +366,7 @@ A backend implements the interface and returns the sentinel errors of its packag
 
 - Cloud Spanner (`meta`): each write is one read-write transaction. The transaction reads the rows that the condition names, tests the condition, writes, and commits. Spanner orders transactions strictly, so a claim and a write are ordered. The generation counter is one row that the transaction updates, or a Spanner sequence, which is unique and not ordered. The creation time is the commit timestamp. Reads that pick an error are strong reads. The heads are an `ARRAY<STRING>`.
 - Cloudflare D1 (`meta`): each write is one `batch` call. D1 runs a batch as one transaction and rolls it back when a statement fails. D1 has no interactive transaction and no row lock, and the contract needs neither. The conditions are the `WHERE` clauses and `INSERT ... SELECT ... WHERE EXISTS` fences of `meta/sqlite`, which is SQLite SQL. The counter is a row that the first statement of the batch increments. The result of a statement reports the rows that it changed, and a conditional statement that changed no row is the failed condition. Reads that pick an error go to the primary.
-- Cloudflare R2 (`bucket`): R2 has an S3-compatible API. `Create` is `PutObject` with `If-None-Match: *`, which answers 412 when the key exists. `Get` and `GetRange` are `GetObject` with an optional `Range` header, and a 416 answer is an empty result. R2 reads see a completed write.
+- Cloudflare R2 (`bucket`): `bucket/s3` serves R2 with `MOTTE_S3_ENDPOINT` set to the account endpoint of R2 and `MOTTE_S3_REGION=auto`. It needs no other backend.
 
 ## Provider seams
 
