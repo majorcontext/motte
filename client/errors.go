@@ -20,6 +20,7 @@ var (
 	ErrRefProtected       = errors.New("motte: ref protected")
 	ErrEventsPruned       = errors.New("motte: events pruned")
 	ErrLandConflict       = errors.New("motte: land conflict")
+	ErrLandStale          = errors.New("motte: land stale")
 	ErrLandInvalid        = errors.New("motte: land invalid")
 	ErrLandTimeout        = errors.New("motte: land timeout")
 	ErrUnauthorized       = errors.New("motte: unauthorized")
@@ -43,6 +44,7 @@ var sentinels = map[api.Code]error{
 	api.CodeRefProtected:       ErrRefProtected,
 	api.CodeEventsPruned:       ErrEventsPruned,
 	api.CodeLandConflict:       ErrLandConflict,
+	api.CodeLandStale:          ErrLandStale,
 	api.CodeLandInvalid:        ErrLandInvalid,
 	api.CodeLandTimeout:        ErrLandTimeout,
 	api.CodeUnauthorized:       ErrUnauthorized,
@@ -83,6 +85,16 @@ func CurrentRef(err error) (api.Ref, bool) {
 	gen, _ := m["generation"].(json.Number)
 	n, err := gen.Int64()
 	return api.Ref{Name: name, Commit: commit, Generation: n}, err == nil
+}
+
+// StaleTree returns the tree that a stale land would have made.
+func StaleTree(err error) string {
+	var e *Error
+	if !errors.As(err, &e) || !errors.Is(err, ErrLandStale) {
+		return ""
+	}
+	tree, _ := e.Details["tree"].(string)
+	return tree
 }
 
 // ConflictPaths returns the paths that a land conflict names.

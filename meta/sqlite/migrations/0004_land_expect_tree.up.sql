@@ -1,0 +1,1 @@
+ALTER TABLE land_queue ADD COLUMN expect_tree TEXT NOT NULL DEFAULT '';

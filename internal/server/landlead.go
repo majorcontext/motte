@@ -307,7 +307,15 @@ func (b *batchRun) land(ctx context.Context, batch *land.Batch, it meta.LandItem
 	if err != nil {
 		return err
 	}
-	l, err := batch.Land(ctx, base, head, when)
+	var expect *gitpack.SHA
+	if it.ExpectTree != "" {
+		tree, err := gitpack.ParseSHA(it.ExpectTree)
+		if err != nil {
+			return err
+		}
+		expect = &tree
+	}
+	l, err := batch.LandExpecting(ctx, base, head, when, expect)
 	if err != nil {
 		out, ok := outcomeOf(err)
 		if !ok {

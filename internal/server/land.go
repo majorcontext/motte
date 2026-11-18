@@ -79,7 +79,7 @@ func (s *Server) land(w http.ResponseWriter, r *http.Request, c call) error {
 	if repo != c.claims.Repo {
 		return errForbidden
 	}
-	if !refname.Valid(req.Ref) || !lowerHex(req.Base, 40, 40) || !lowerHex(req.Head, 40, 40) || req.ID != "" && !landID.MatchString(req.ID) {
+	if !refname.Valid(req.Ref) || !lowerHex(req.Base, 40, 40) || !lowerHex(req.Head, 40, 40) || req.ID != "" && !landID.MatchString(req.ID) || req.ExpectTree != "" && !lowerHex(req.ExpectTree, 40, 40) {
 		return errBody
 	}
 	if err := s.refProtected(r.Context(), c.claims.Scope, repo, req.Ref); err != nil {
@@ -88,7 +88,7 @@ func (s *Server) land(w http.ResponseWriter, r *http.Request, c call) error {
 	if req.ID == "" {
 		req.ID = rand.Text()
 	}
-	out, err := s.enqueueAndWait(r.Context(), meta.LandRequest{ID: req.ID, Repo: repo, Ref: req.Ref, Base: req.Base, Head: req.Head, Kind: scopeKind(c.claims.Scope)})
+	out, err := s.enqueueAndWait(r.Context(), meta.LandRequest{ID: req.ID, Repo: repo, Ref: req.Ref, Base: req.Base, Head: req.Head, ExpectTree: req.ExpectTree, Kind: scopeKind(c.claims.Scope)})
 	if err != nil {
 		return err
 	}
@@ -112,7 +112,7 @@ func (s *Server) enqueueAndWait(ctx context.Context, req meta.LandRequest) (land
 	if err != nil {
 		return landOutcome{}, err
 	}
-	if item.Base != req.Base || item.Head != req.Head || item.Ref != req.Ref {
+	if item.Base != req.Base || item.Head != req.Head || item.Ref != req.Ref || item.ExpectTree != req.ExpectTree {
 		return landOutcome{Code: api.CodeInvalidBody, Message: "the land id is used by another change"}, nil
 	}
 	timeout := clk.NewTimer(s.lands.Timeout)
@@ -190,7 +190,10 @@ func (s *Server) tellLand(k landWaiter, out landOutcome) {
 func outcomeOf(err error) (landOutcome, bool) {
 	var conflict *land.ConflictError
 	var invalid land.Invalid
+	var stale *land.StaleError
 	switch {
+	case errors.As(err, &stale):
+		return landOutcome{Code: api.CodeLandStale, Message: "the land would make another tree than the expected tree", Details: map[string]any{"tree": stale.Tree.String()}}, true
 	case errors.As(err, &conflict):
 		return landOutcome{Code: api.CodeLandConflict, Message: "the change touches paths that changed since its base", Details: map[string]any{"paths": conflict.Paths}}, true
 	case errors.As(err, &invalid):

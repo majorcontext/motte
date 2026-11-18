@@ -137,7 +137,7 @@ Ordinary `git` clones, fetches and pushes a repository over HTTPS. The routes ne
 | `POST /v1/workspaces/{id}/flush` with `{epoch, generation, prev, op, snapshot}` | `operator` |
 | `DELETE /v1/workspaces/{id}` | `operator` |
 | `PUT /v1/repos/{repo}/protected-refs` with `{patterns}` replaces the list and answers 200 with `{patterns}`. `GET` of the same path returns it. `{repo}` is the repository text, with `/` as `%2F`. | `operator` |
-| `POST /v1/repos/{repo}/lands` with `{id, ref, base, head}` lands the commits `base..head` on `ref` and answers 200 with `{id, ref, generation, tip, fast_forward, commits}`. See Land. `{repo}` is the repository text, with `/` as `%2F`. | `merge`, `write` |
+| `POST /v1/repos/{repo}/lands` with `{id, ref, base, head, expect_tree}` lands the commits `base..head` on `ref` and answers 200 with `{id, ref, generation, tip, fast_forward, commits}`. See Land. `{repo}` is the repository text, with `/` as `%2F`. | `merge`, `write` |
 | `GET /v1/events?cursor=<cursor>&limit=<n>` returns `{events, cursor}` | `operator` |
 | `POST /v1/subscriptions` with `{url, secret, repo}` answers 201 with the subscription | `operator` |
 | `GET /v1/subscriptions` lists the subscriptions, oldest first | `operator` |
@@ -229,7 +229,7 @@ events(partition, seq, repo, ref, old_commit, new_commit, generation, kind, at, 
 protected_refs(repo pk, patterns text[])
 subscriptions(id pk, url, secret, repo, created_at)
 subscription_cursors(sub_id, partition, cursor, lease_owner, lease_until, pk(sub_id, partition))
-land_queue(repo, id, seq, ref, base, head, kind, state, owner, result, generation, enqueued_at, done_at, pk(repo, id))   seq is unique and rises
+land_queue(repo, id, seq, ref, base, head, expect_tree, kind, state, owner, result, generation, enqueued_at, done_at, pk(repo, id))   seq is unique and rises
 land_leases(repo, ref, owner, lease_until, pk(repo, ref))
 land_heads(repo, ref, n, pk(repo, ref))   rows ever logged
 land_log(repo, ref, n, old_tip, new_tip, paths, pk(repo, ref, n))   paths is null for a change with too many

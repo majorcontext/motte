@@ -57,6 +57,11 @@ type ConflictError struct{ Paths []string }
 
 func (e *ConflictError) Error() string { return "land: conflict on " + strings.Join(e.Paths, ", ") }
 
+// StaleError is a land whose tree is not the tree that the caller expected. Tree is the tree that the land would make.
+type StaleError struct{ Tree gitpack.SHA }
+
+func (e *StaleError) Error() string { return "land: the land would make tree " + e.Tree.String() }
+
 // Batch lands changes one after the other on a running tip, and holds the objects that it makes until the caller
 // stores them. A later land of the batch sees the earlier ones. A Batch is for one goroutine.
 type Batch struct {
@@ -170,10 +175,16 @@ func (b *Batch) walk(ctx context.Context, base, head gitpack.SHA) ([]link, error
 // other range is rebuilt on the tip with the commit time when. It returns a *ConflictError when a path of the range
 // also changed since base, and Invalid or ErrTooLarge when the range cannot land. A failed land leaves no trace.
 func (b *Batch) Land(ctx context.Context, base, head gitpack.SHA, when time.Time) (Landed, error) {
+	return b.LandExpecting(ctx, base, head, when, nil)
+}
+
+// LandExpecting is Land that also returns a *StaleError, and moves nothing, when expect is set and the tree of the
+// commit that head becomes differs from it. The check follows the conflict check.
+func (b *Batch) LandExpecting(ctx context.Context, base, head gitpack.SHA, when time.Time, expect *gitpack.SHA) (Landed, error) {
 	b.trees, b.produced = b.produced, map[gitpack.SHA][]Entry{}
 	b.loaded, b.tooBig = 0, false
 	b.mark, b.markSize = len(b.objs), b.bytes
-	l, err := b.land(ctx, base, head, when)
+	l, err := b.land(ctx, base, head, when, expect)
 	if err == nil && b.tooBig {
 		err = ErrTooLarge
 	}
@@ -191,7 +202,7 @@ func (b *Batch) Land(ctx context.Context, base, head gitpack.SHA, when time.Time
 	return l, nil
 }
 
-func (b *Batch) land(ctx context.Context, base, head gitpack.SHA, when time.Time) (Landed, error) {
+func (b *Batch) land(ctx context.Context, base, head gitpack.SHA, when time.Time, expect *gitpack.SHA) (Landed, error) {
 	if base == head {
 		return Landed{}, Invalid("base and head are the same commit")
 	}
@@ -204,12 +215,23 @@ func (b *Batch) land(ctx context.Context, base, head gitpack.SHA, when time.Time
 		return Landed{}, err
 	}
 	if head == b.tip {
-		return Landed{Old: head, New: head, Noop: true}, nil
+		tip, err := b.commit(ctx, head)
+		if err != nil {
+			return Landed{}, err
+		}
+		return Landed{Old: head, New: head, Noop: true}, stale(expect, tip.Tree)
 	}
 	if i := b.tipIndex(base, chain); i >= 0 {
-		return b.fastForward(ctx, head, baseCommit, chain)
+		return b.fastForward(ctx, head, baseCommit, chain, expect)
 	}
-	return b.rebase(ctx, base, baseCommit, chain, when)
+	return b.rebase(ctx, base, baseCommit, chain, when, expect)
+}
+
+func stale(expect *gitpack.SHA, tree gitpack.SHA) error {
+	if expect != nil && *expect != tree {
+		return &StaleError{Tree: tree}
+	}
+	return nil
 }
 
 func (b *Batch) tipIndex(base gitpack.SHA, chain []link) int {
@@ -219,8 +241,11 @@ func (b *Batch) tipIndex(base gitpack.SHA, chain []link) int {
 	return slices.IndexFunc(chain, func(l link) bool { return l.sha == b.tip })
 }
 
-func (b *Batch) fastForward(ctx context.Context, head gitpack.SHA, baseCommit Commit, chain []link) (Landed, error) {
+func (b *Batch) fastForward(ctx context.Context, head gitpack.SHA, baseCommit Commit, chain []link, expect *gitpack.SHA) (Landed, error) {
 	if _, _, err := b.scan(ctx, baseCommit, chain, false); err != nil {
+		return Landed{}, err
+	}
+	if err := stale(expect, chain[len(chain)-1].c.Tree); err != nil {
 		return Landed{}, err
 	}
 	tip, err := b.commit(ctx, b.tip)
@@ -302,7 +327,7 @@ func (b *Batch) scan(ctx context.Context, baseCommit Commit, chain []link, keep 
 	return changes, set, nil
 }
 
-func (b *Batch) rebase(ctx context.Context, base gitpack.SHA, baseCommit Commit, chain []link, when time.Time) (Landed, error) {
+func (b *Batch) rebase(ctx context.Context, base gitpack.SHA, baseCommit Commit, chain []link, when time.Time, expect *gitpack.SHA) (Landed, error) {
 	changes, set, err := b.scan(ctx, baseCommit, chain, true)
 	if err != nil {
 		return Landed{}, err
@@ -333,6 +358,9 @@ func (b *Batch) rebase(ctx context.Context, base gitpack.SHA, baseCommit Commit,
 		if b.bytes-b.markSize > MaxRewriteBytes {
 			return Landed{}, ErrTooLarge
 		}
+	}
+	if err := stale(expect, root); err != nil {
+		return Landed{}, err
 	}
 	out.New = prev
 	out.setPaths(paths)

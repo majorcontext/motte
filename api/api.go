@@ -18,6 +18,7 @@ const (
 	CodeRefProtected       Code = "vcs_ref_protected"
 	CodeEventsPruned       Code = "vcs_events_pruned"
 	CodeLandConflict       Code = "vcs_land_conflict"
+	CodeLandStale          Code = "vcs_land_stale"
 	CodeLandInvalid        Code = "vcs_land_invalid"
 	CodeLandTimeout        Code = "vcs_land_timeout"
 	CodeUnauthorized       Code = "unauthorized"
@@ -38,6 +39,7 @@ var statuses = map[Code]int{
 	CodeRefProtected:       http.StatusForbidden,
 	CodeEventsPruned:       http.StatusGone,
 	CodeLandConflict:       http.StatusConflict,
+	CodeLandStale:          http.StatusConflict,
 	CodeLandInvalid:        http.StatusBadRequest,
 	CodeLandTimeout:        http.StatusGatewayTimeout,
 	CodeUnauthorized:       http.StatusUnauthorized,
@@ -245,11 +247,13 @@ type Event struct {
 
 // LandRequest is the body of POST /v1/repos/{repo}/lands. Base..Head is a linear range of commits that the repository
 // already stores. ID is optional: a repeat of an accepted ID returns the first result and never lands twice.
+// ExpectTree is optional: when set, the land moves the ref only if the tree of the commit that Head becomes equals it.
 type LandRequest struct {
-	ID   string `json:"id,omitempty"`
-	Ref  string `json:"ref"`
-	Base string `json:"base"`
-	Head string `json:"head"`
+	ID         string `json:"id,omitempty"`
+	Ref        string `json:"ref"`
+	Base       string `json:"base"`
+	Head       string `json:"head"`
+	ExpectTree string `json:"expect_tree,omitempty"`
 }
 
 // LandedCommit is a commit of the range and the commit that replaced it on the ref.

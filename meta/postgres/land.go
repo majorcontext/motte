@@ -30,10 +30,10 @@ func (s *Store) EnqueueLand(ctx context.Context, r meta.LandRequest, now time.Ti
 	item := meta.LandItem{LandRequest: meta.LandRequest{ID: r.ID, Repo: r.Repo}}
 	var state string
 	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO land_queue (repo, id, ref, base, head, kind, enqueued_at) VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO land_queue (repo, id, ref, base, head, kind, expect_tree, enqueued_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (repo, id) DO UPDATE SET id = land_queue.id
-		RETURNING seq, ref, base, head, kind, state, result, COALESCE(generation, 0)`, r.Repo, r.ID, r.Ref, r.Base, r.Head, r.Kind, now).
-		Scan(&item.Seq, &item.Ref, &item.Base, &item.Head, &item.Kind, &state, &item.Result, &item.Generation)
+		RETURNING seq, ref, base, head, kind, expect_tree, state, result, COALESCE(generation, 0)`, r.Repo, r.ID, r.Ref, r.Base, r.Head, r.Kind, r.ExpectTree, now).
+		Scan(&item.Seq, &item.Ref, &item.Base, &item.Head, &item.Kind, &item.ExpectTree, &state, &item.Result, &item.Generation)
 	if err != nil {
 		return meta.LandItem{}, fmt.Errorf("postgres: enqueue land: %w", err)
 	}
@@ -44,8 +44,8 @@ func (s *Store) EnqueueLand(ctx context.Context, r meta.LandRequest, now time.Ti
 func (s *Store) LandItem(ctx context.Context, repo, id string) (meta.LandItem, error) {
 	item := meta.LandItem{LandRequest: meta.LandRequest{ID: id, Repo: repo}}
 	var state string
-	err := s.Pool.QueryRow(ctx, `SELECT seq, ref, base, head, kind, state, result, COALESCE(generation, 0) FROM land_queue WHERE repo = $1 AND id = $2`, repo, id).
-		Scan(&item.Seq, &item.Ref, &item.Base, &item.Head, &item.Kind, &state, &item.Result, &item.Generation)
+	err := s.Pool.QueryRow(ctx, `SELECT seq, ref, base, head, kind, expect_tree, state, result, COALESCE(generation, 0) FROM land_queue WHERE repo = $1 AND id = $2`, repo, id).
+		Scan(&item.Seq, &item.Ref, &item.Base, &item.Head, &item.Kind, &item.ExpectTree, &state, &item.Result, &item.Generation)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return meta.LandItem{}, meta.ErrNotFound
 	}
@@ -108,13 +108,13 @@ func (s *Store) ClaimLands(ctx context.Context, repo, ref, owner string, now tim
 			SELECT id FROM land_queue WHERE repo = $1 AND ref = $2 AND state <> 'done' AND EXISTS (SELECT 1 FROM lease)
 			ORDER BY seq LIMIT $5)
 		UPDATE land_queue q SET state = 'claimed', owner = $3 FROM picked WHERE q.repo = $1 AND q.id = picked.id
-		RETURNING q.id, q.seq, q.base, q.head, q.kind`, repo, ref, owner, now, limit)
+		RETURNING q.id, q.seq, q.base, q.head, q.kind, q.expect_tree`, repo, ref, owner, now, limit)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: claim lands: %w", err)
 	}
 	out, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (meta.LandItem, error) {
 		it := meta.LandItem{LandRequest: meta.LandRequest{Repo: repo, Ref: ref}}
-		err := r.Scan(&it.ID, &it.Seq, &it.Base, &it.Head, &it.Kind)
+		err := r.Scan(&it.ID, &it.Seq, &it.Base, &it.Head, &it.Kind, &it.ExpectTree)
 		return it, err
 	})
 	if err != nil {

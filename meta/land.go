@@ -10,9 +10,11 @@ import (
 const LandLogRetention = 10000
 
 // LandRequest is a land that a replica accepted. ID names it for the repo, so a repeat of an accepted request finds
-// the first one. Kind is the writer kind of the grant, WriterWrite or WriterMerge.
+// the first one. ExpectTree is empty or the tree that the land must make. Kind is the writer kind of the grant,
+// WriterWrite or WriterMerge.
 type LandRequest struct {
 	ID, Repo, Ref, Base, Head, Kind string
+	ExpectTree                      string
 }
 
 // LandItem is a queued land. Seq orders the queue of a repo. Result is set once the item is done, and is opaque to the

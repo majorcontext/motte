@@ -336,6 +336,7 @@ func (c *Client) ProtectedRefs(ctx context.Context, repo string) ([]string, erro
 // Land lands the commits base..head of req on the ref of req. repo is the repository text of the grant, and the grant
 // has the merge scope, or the write scope for an unprotected ref. The call waits for the result, at most
 // DefaultLandBudget unless WithBudget sets another. A conflict is ErrLandConflict and ConflictPaths returns its paths.
+// A land whose tree is not req.ExpectTree is ErrLandStale and StaleTree returns the tree that it would have made.
 // An invalid range is ErrLandInvalid, a land that the server did not end in time is ErrLandTimeout, and a repeat of
 // the same ID then returns the result once it exists.
 func (c *Client) Land(ctx context.Context, repo string, req api.LandRequest) (api.LandResponse, error) {
