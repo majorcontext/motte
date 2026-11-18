@@ -18,34 +18,21 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
-    defaults:
-      run:
-        working-directory: jj
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: Build in Debian bookworm
-        # The binary links the glibc of its build system. Building on bookworm
-        # (glibc 2.36) lets it run on bookworm and every newer glibc.
-        run: >
-          docker run --rm -v "$GITHUB_WORKSPACE:/w" -w /w/jj
-          rust:1.99.1-bookworm@sha256:e9da6f6c3ed5095fd5d33bf7cdf309830a178a8147888f1b2f76d5769bd9306c
-          cargo build --release --locked --bin jj
-      - name: Run the binary on Debian bookworm
-        run: >
-          docker run --rm -v "$GITHUB_WORKSPACE/jj/target/release:/b:ro"
-          debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
-          /b/jj --help
-      - name: Attach the binary and its sha256 sum to the release
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - name: Build, check and write the binary and its sha256 sum
+        working-directory: .
+        run: go run ./internal/release/cmd/release jj -arch ${{ matrix.arch }} -out dist
+      - name: Publish
+        working-directory: .
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-          ARCH: ${{ matrix.arch }}
           GH_REPO: ${{ github.repository }}
-        run: |
-          mkdir -p dist
-          cp target/release/jj "dist/jj-linux-$ARCH"
-          (cd dist && sha256sum "jj-linux-$ARCH" > "jj-linux-$ARCH.sha256")
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes "" || gh release view "$TAG" >/dev/null
-          gh release upload "$TAG" --clobber "dist/jj-linux-$ARCH" "dist/jj-linux-$ARCH.sha256"
+        run: >
+          go run ./internal/release/cmd/release publish -dir dist
+          -dest "${{ vars.JJ_RELEASE_DEST || 'github' }}" -tag "$GITHUB_REF_NAME"

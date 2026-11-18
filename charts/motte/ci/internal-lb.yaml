@@ -1,5 +1,6 @@
 replicas: 1
 image:
+  repository: registry.example/motte
   digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
 database:
   dsnSecret:

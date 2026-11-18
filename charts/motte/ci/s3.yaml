@@ -1,4 +1,5 @@
 image:
+  repository: registry.example/motte
   tag: v0.0.0
 database:
   dsnSecret:

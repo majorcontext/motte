@@ -387,7 +387,7 @@ Every external provider sits behind an interface that its consumer owns. A provi
 
 ## jj backend
 
-The crate `jj/` builds the binary `jj`: jj 0.47.1 (`jj-lib` and `jj-cli`, pinned exactly) with four shims and the subcommand `jj motte`. The binary keeps the name `jj` because it is jj with extra stores. A release attaches it for linux amd64 and arm64, with sha256 sums.
+The crate `jj/` builds the binary `jj`: jj 0.47.1 (`jj-lib` and `jj-cli`, pinned exactly) with four shims and the subcommand `jj motte`. The binary keeps the name `jj` because it is jj with extra stores. A release attaches it for linux amd64 and arm64, with sha256 sums. `go run ./internal/release/cmd/release jj` builds it and `publish` sends it (see Release entry points).
 
 ### Shims
 
@@ -514,7 +514,7 @@ Package `testserver` runs the real server in the process of a test, on a fresh s
 
 ## Deployment
 
-`images/motte/Dockerfile` builds the service image for `linux/amd64` and `linux/arm64`. It holds a static `cmd/motte` binary on a distroless non-root base that the Dockerfile pins by digest. The workflow `image.yml` builds it, and the `motte-vfsd` image, on a pull request. On a tag `v*` it publishes `ghcr.io/majorcontext/motte` with the same tag scheme as `motte-vfsd` and with provenance and SBOM attestations.
+`images/motte/Dockerfile` builds the service image for `linux/amd64` and `linux/arm64`. It holds a static `cmd/motte` binary on a distroless non-root base that the Dockerfile pins by digest. `go run ./internal/release/cmd/release image` builds it, and the `motte-vfsd` image (see Release entry points). The workflow `image.yml` is one caller of that command: it builds both images on a pull request, and on a tag `v*` it pushes them.
 
 `charts/motte` installs a `Deployment` (2 replicas by default), a `ServiceAccount` and a `Service`. The pod runs as non-root with a read-only root file system. The probes use `/health` and `/ready`, and `/metrics` is on the service port. Values set:
 
@@ -528,7 +528,7 @@ Package `testserver` runs the real server in the process of a test, on a fresh s
 - `trustedKeys`, a list of `{kid, key, scopes}`, `trustedKeysConfigMap`, an existing ConfigMap that holds the JSON list, or `trustedKeysSecret`, the name and key of an existing Secret that holds it. The Deployment sets `MOTTE_TRUSTED_KEYS` from the one source that is set. The chart fails to render when none or more than one is set.
 - `otlpEndpoint`, optional, and `extraEnv`.
 
-The chart creates no Secret and no namespace. A release needs `database.dsnSecret.name`, `bucket.url` and exactly one source of trusted keys. CI runs `helm lint` and `helm template` over the files in `charts/motte/ci`.
+The chart creates no Secret and no namespace. `image.repository` has no default: a release sets it, and the chart fails to render when it is empty. A release needs `database.dsnSecret.name`, `bucket.url` and exactly one source of trusted keys. CI runs `helm lint` and `helm template` over the files in `charts/motte/ci`.
 
 ## Virtual workspace daemon
 
@@ -650,9 +650,25 @@ A directory that merges a base directory at another path lists every base leaf b
 
 `token` and `dirty` return `<boot>:<fingerprint>`. The fingerprint comes from an `lstat` walk: the entry count, the newest change time, the sum of the sizes of the regular files, the sum of the change times and the sum of the inode numbers. A walk is settled only when the newest change time is at least 50 ms older than the start of the walk. An unsettled walk returns a token that equals no other token. `ScanStable` reads the token, scans, reads the token again, and retries up to 3 times while two settled tokens differ. The daemon runs no `syncfs`. A store through a mapping that is already dirty changes no token, so a consumer forces a snapshot at intervals.
 
+### Release entry points
+
+The release of an artifact does not depend on a CI provider. The command `go run ./internal/release/cmd/release` is the only code that builds or publishes a release artifact. A CI workflow is a caller: it sets inputs and runs the command, and it holds no build logic. The command needs `docker` with `buildx`, and `gh` only for the `github` destination.
+
+| Command | Effect |
+|---|---|
+| `image -name N -repo R [-version V] [-push] [-platforms P] [-file F] [-build-arg K=V] [-dry-run]` | Runs `docker buildx build` of `images/N/Dockerfile` (or `F`) for `P` (default `linux/amd64,linux/arm64`). `-version` must be semver. It tags `R:X.Y.Z` and, for a version that is not a prerelease, `R:X.Y`. Without `-push` it only builds, and it loads the image when `P` names one platform. With `-push` it needs `-version`, adds provenance (`mode=max`) and SBOM attestations, and pushes. |
+| `jj -out DIR [-arch amd64\|arm64] [-src jj] [-dry-run]` | Builds `jj` in the pinned Debian bookworm Rust image for `linux/ARCH`, runs `jj --help` in the pinned Debian bookworm base image, and writes `DIR/jj-linux-ARCH` and `DIR/jj-linux-ARCH.sha256`. |
+| `publish -dir DIR -dest D [-tag T] [-dry-run]` | Sends every file of `DIR` to `D`. `github` attaches them to the release of `T` through `gh`, and creates the release when it is missing. `dir=PATH` copies them to `PATH`. A destination that the command does not know is sent by the caller from `DIR`, which holds plain files. |
+
+`REGISTRY_USERNAME` and `REGISTRY_PASSWORD` make `image -push` run `docker login` for the registry host of `R`. When `REGISTRY_PASSWORD` is unset, the caller has signed in already. The registry host and path are inputs, never literals in code or in a chart default.
+
+GitHub is one caller. The workflow `image.yml` reads the repository variables `IMAGE_REGISTRY` (default `ghcr.io`), `IMAGE_NAMESPACE` (default the repository owner) and `REGISTRY_USERNAME` (default the actor), and the secret `REGISTRY_PASSWORD` (default `GITHUB_TOKEN`). With none set it pushes `ghcr.io/<owner>/motte` and `ghcr.io/<owner>/motte-vfsd`. The workflow `jj-release.yml` builds each architecture on a native runner and publishes to the destination in the variable `JJ_RELEASE_DEST` (default `github`).
+
+A consumer of the `jj` binary takes the download base URL as a setting and fetches `<base>/jj-linux-<arch>` and `<base>/jj-linux-<arch>.sha256`. The release does not fix the base. For the `github` destination it is `https://github.com/<owner>/<repo>/releases/download/<tag>`.
+
 ### Chart and image
 
-`charts/motte-vfsd` installs the `CSIDriver` and the DaemonSet with the plugin container and the kubelet registrar. Values set the image (digest or tag), the store URL `apiURL`, the Secret of the grant key, `allowedNamespaces` (required, no default), `driverName`, `kubeletDir`, `stateDir`, `runtimeClassName`, node selector, node affinity expressions, tolerations, resources and extra environment. The release namespace needs the privileged Pod Security level. The chart creates no Secret and no namespace. `images/motte-vfsd/Dockerfile` builds the image for `linux/amd64` and `linux/arm64`. It holds the daemon and `git`. The workflow `image.yml` builds both on a pull request. On a tag `v*` it publishes `ghcr.io/majorcontext/motte-vfsd` with the tag version and with provenance and SBOM attestations.
+`charts/motte-vfsd` installs the `CSIDriver` and the DaemonSet with the plugin container and the kubelet registrar. Values set the image (digest or tag), the store URL `apiURL`, the Secret of the grant key, `allowedNamespaces` (required, no default), `driverName`, `kubeletDir`, `stateDir`, `runtimeClassName`, node selector, node affinity expressions, tolerations, resources and extra environment. The release namespace needs the privileged Pod Security level. The chart creates no Secret and no namespace. `image.repository` has no default: a release sets it. `images/motte-vfsd/Dockerfile` builds the image for `linux/amd64` and `linux/arm64`. It holds the daemon and `git`. The workflow `image.yml` builds both on a pull request and pushes both on a tag `v*`, through the command in Release entry points.
 
 ### Tests
 

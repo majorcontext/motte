@@ -1,6 +1,7 @@
-# image is the motte-vfsd image. Set digest or tag; a digest wins.
+# image is the motte-vfsd image. Set repository: the chart has no default registry.
+# Set digest or tag; a digest wins.
 image:
-  repository: ghcr.io/majorcontext/motte-vfsd
+  repository: ""
   tag: ""
   digest: ""
 

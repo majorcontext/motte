@@ -2,8 +2,6 @@
 # One path or glob per line with a reason. internal/seams fails an entry that matches no file with a host.
 charts/motte/Chart.yaml # home and source URL of this project
 charts/motte-vfsd/Chart.yaml # home and source URL of this project
-charts/motte/values.yaml # default image repository of the published image
-charts/motte-vfsd/values.yaml # default image repository of the published image
 .github/workflows/*.yml # workflows run on GitHub and publish to its registry and releases
 internal/seams/providers.go # defines the host list and the SDK prefixes
 internal/seams/seams_test.go # fixtures that hold hosts and SDK import paths
