@@ -662,7 +662,7 @@ The release of an artifact does not depend on a CI provider. The command `go run
 
 `REGISTRY_USERNAME` and `REGISTRY_PASSWORD` make `image -push` run `docker login` for the registry host of `R`. When `REGISTRY_PASSWORD` is unset, the caller has signed in already. The registry host and path are inputs, never literals in code or in a chart default.
 
-GitHub is one caller. The workflow `image.yml` reads the repository variables `IMAGE_REGISTRY` (default `ghcr.io`), `IMAGE_NAMESPACE` (default the repository owner) and `REGISTRY_USERNAME` (default the actor), and the secret `REGISTRY_PASSWORD` (default `GITHUB_TOKEN`). With none set it pushes `ghcr.io/<owner>/motte` and `ghcr.io/<owner>/motte-vfsd`. The workflow `jj-release.yml` builds each architecture on a native runner and publishes to the destination in the variable `JJ_RELEASE_DEST` (default `github`).
+GitHub is one caller. The workflow `image.yml` reads the repository variables `IMAGE_REGISTRY` (default `ghcr.io`), `IMAGE_NAMESPACE` (default the repository owner, lowercased) and `REGISTRY_USERNAME` (default the actor), and the secret `REGISTRY_PASSWORD` (default `GITHUB_TOKEN`). With none set it pushes `ghcr.io/<owner>/motte` and `ghcr.io/<owner>/motte-vfsd`. The workflow `jj-release.yml` builds each architecture on a native runner and publishes to the destination in the variable `JJ_RELEASE_DEST` (default `github`).
 
 A consumer of the `jj` binary takes the download base URL as a setting and fetches `<base>/jj-linux-<arch>` and `<base>/jj-linux-<arch>.sha256`. The release does not fix the base. For the `github` destination it is `https://github.com/<owner>/<repo>/releases/download/<tag>`.
 

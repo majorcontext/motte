@@ -52,5 +52,5 @@ jobs:
           fi
           go run ./internal/release/cmd/release image \
             -name ${{ matrix.name }} \
-            -repo "$IMAGE_REGISTRY/$IMAGE_NAMESPACE/${{ matrix.name }}" \
+            -repo "$IMAGE_REGISTRY/${IMAGE_NAMESPACE,,}/${{ matrix.name }}" \
             "${args[@]}"
