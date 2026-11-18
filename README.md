@@ -8,4 +8,6 @@ Run it with no other service: `go test ./...` runs the tests that need no databa
 
 Read `docs/architecture.md` for the design. Read `AGENTS.md` before you change the repository.
 
+The GitHub repository is a read-only mirror. Changes land in the canonical motte repository through [ward](https://github.com/majorcontext/ward), which mirrors its branches and tags to GitHub. Pull requests on GitHub cannot merge. Open an issue to propose a change.
+
 License: MIT. The `jj/` crate is Apache-2.0, because it adapts code from jj-lib.
