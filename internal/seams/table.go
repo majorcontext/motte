@@ -3,7 +3,6 @@ package seams
 import (
 	"fmt"
 	"go/ast"
-	"path"
 	"sort"
 	"strings"
 )
@@ -198,7 +197,7 @@ func (m *Module) callsSuite(dir, suite string) bool {
 }
 
 // unlisted reports a package that implements a listed interface and is not in the table. A package implements an
-// interface when it sits directly under the directory of the interface (the suite excepted), or when it holds the
+// interface when it sits under the directory of the interface (the suite excepted), or when it holds the
 // assertion "var _ pkg.Iface = ...".
 func (m *Module) unlisted(seams []Seam) []string {
 	var out []string
@@ -217,7 +216,7 @@ func (m *Module) unlisted(seams []Seam) []string {
 			if gf.test {
 				continue
 			}
-			if gf.dir != ifaceDir && path.Dir(gf.dir) == ifaceDir && gf.dir != suiteDir {
+			if strings.HasPrefix(gf.dir, ifaceDir+"/") && gf.dir != suiteDir && !strings.HasPrefix(gf.dir, suiteDir+"/") {
 				flag[gf.dir] = "sits under " + ifaceDir
 			}
 			if gf.dir != ifaceDir && m.asserts(gf, ifaceDir, id) {

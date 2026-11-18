@@ -136,6 +136,7 @@ func TestCheckSeams(t *testing.T) {
 			f["kv/disk/disk_test.go"] = file("package disk\nimport \"example.test/m/kv/kvtest\"\nfunc helper() { kvtest.Run() }\n")
 		}, fixtureTable, "kv: implementation kv/disk has no test that calls kv/kvtest.Run"},
 		{"unlisted subpackage", func(f fstest.MapFS) { f["kv/s3/s3.go"] = file("package s3\n") }, fixtureTable, "kv: package kv/s3 sits under kv and is not in the implementations"},
+		{"unlisted nested subpackage", func(f fstest.MapFS) { f["kv/p/s3/s3.go"] = file("package s3\n") }, fixtureTable, "kv: package kv/p/s3 sits under kv and is not in the implementations"},
 		{"unlisted assertion", func(f fstest.MapFS) {
 			f["other/o.go"] = file("package other\nimport \"example.test/m/kv\"\nvar _ kv.Store = nil\n")
 		}, fixtureTable, "kv: package other asserts kv.Store and is not in the implementations"},
