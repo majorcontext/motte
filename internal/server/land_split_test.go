@@ -7,6 +7,7 @@ import (
 )
 
 func TestSplitObjectsKeepsOrderAndBothLimits(t *testing.T) {
+	t.Parallel()
 	objs := make([]gitpack.Object, 7)
 	for i := range objs {
 		objs[i] = gitpack.Object{Type: gitpack.Blob, Data: make([]byte, 10)}

@@ -107,6 +107,7 @@ func (e *env) want(r reply, status int, code string) {
 }
 
 func TestStaleEpochWritesAreRefusedAfterAClaimRaise(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	e.want(e.claim("ws1", 1, repoText), 200, "")
 	old := e.nodeGrant("ws1", 1)
@@ -132,6 +133,7 @@ func TestStaleEpochWritesAreRefusedAfterAClaimRaise(t *testing.T) {
 }
 
 func TestRefGenerationIsACompareAndSwapThatNeverRepeats(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	e.want(e.claim("ws1", 1, repoText), 200, "")
 	node := e.Client(e.nodeGrant("ws1", 1))
@@ -164,6 +166,7 @@ func TestRefGenerationIsACompareAndSwapThatNeverRepeats(t *testing.T) {
 }
 
 func TestImportedPackServesObjects(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	e.want(e.claim("ws1", 1, repoText), 200, "")
 	pack, idx, names := gitpack.Build([]gitpack.Object{{Type: gitpack.Blob, Data: []byte("hello")}})
@@ -189,6 +192,7 @@ func TestImportedPackServesObjects(t *testing.T) {
 }
 
 func TestDeletedWorkspaceRefusesReadsAndWrites(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	e.want(e.claim("ws1", 1, repoText), 200, "")
 	ctx := context.Background()
@@ -207,6 +211,7 @@ func TestDeletedWorkspaceRefusesReadsAndWrites(t *testing.T) {
 }
 
 func TestCreateRepoStartsOnARootCommitOfMain(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	ctx := context.Background()
 	op := e.Client(e.operator())
@@ -242,6 +247,7 @@ func TestCreateRepoStartsOnARootCommitOfMain(t *testing.T) {
 }
 
 func TestClaimBindsOwnerAndRepoOnce(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	ctx := context.Background()
 	op := e.Client(e.operator())
@@ -267,6 +273,7 @@ func TestClaimBindsOwnerAndRepoOnce(t *testing.T) {
 }
 
 func TestFlushOrdersByGenerationUnderTheEpochFence(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	ctx := context.Background()
 	op := e.Client(e.operator())
@@ -304,6 +311,7 @@ func TestFlushOrdersByGenerationUnderTheEpochFence(t *testing.T) {
 }
 
 func TestGrantScopeRefusals(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	e.want(e.claim("ws1", 1, repoText), 200, "")
 	node, read, imp, op := e.nodeGrant("ws1", 1), e.readGrant(repoText), e.importGrant(repoText), e.operator()
@@ -342,6 +350,7 @@ func TestGrantScopeRefusals(t *testing.T) {
 }
 
 func TestGrantWithoutTheBearerSchemeIsRefused(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	req, _ := http.NewRequest("GET", e.url+"/v1/repos", nil)
 	req.Header.Set("Authorization", e.operator())
@@ -366,6 +375,7 @@ func TestBodyOverTheLimitAnswersTooLarge(t *testing.T) {
 }
 
 func TestSlowUploadDoesNotStallOtherRequests(t *testing.T) {
+	t.Parallel()
 	for method, path := range map[string]string{"POST": "/v1/vcs/objects", "PUT": "/v1/vcs/ops/operations/0123456789abcdef"} {
 		t.Run(path, func(t *testing.T) {
 			e := newEnv(t)
@@ -391,6 +401,7 @@ func TestSlowUploadDoesNotStallOtherRequests(t *testing.T) {
 }
 
 func TestUnknownRouteAndMethodUseTheErrorEnvelope(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	e.want(e.call("GET", "/v1/nothing", e.operator(), nil), 404, "vcs_not_found")
 	e.want(e.call("DELETE", "/v1/repos", e.operator(), nil), 405, "method_not_allowed")

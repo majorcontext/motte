@@ -132,6 +132,7 @@ func (b *bubble) client(h http.Handler, c grant.Claims) *client.Client {
 }
 
 func TestEventsAreDeliveredSignedInOrderAndOnceAcrossReplicas(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		b := newBubble(t)
 		cfg := server.EventsConfig{Poll: 5 * time.Second}
@@ -196,6 +197,7 @@ func TestEventsAreDeliveredSignedInOrderAndOnceAcrossReplicas(t *testing.T) {
 }
 
 func TestOldEventsArePrunedAndAnOlderCursorIsRefused(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		b := newBubble(t)
 		stop, handler := b.replica("a", server.EventsConfig{Retention: 24 * time.Hour, Poll: 30 * time.Minute})
@@ -223,6 +225,7 @@ func TestOldEventsArePrunedAndAnOlderCursorIsRefused(t *testing.T) {
 }
 
 func TestAnEventOfThisReplicaIsDeliveredBeforeThePoll(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		b := newBubble(t)
 		stop, handler := b.replica("a", server.EventsConfig{Poll: time.Hour})

@@ -72,6 +72,7 @@ func (h *harness) call(t *testing.T, method, path string, body any) (int, string
 }
 
 func TestClaimWaitsForAWriteInFlight(t *testing.T) {
+	t.Parallel()
 	h := start(t)
 	h.serve(t)
 	claim := func(epoch int) (int, string) {
@@ -118,6 +119,7 @@ func TestClaimWaitsForAWriteInFlight(t *testing.T) {
 }
 
 func TestHandlerPanicIsLoggedAndAnswered(t *testing.T) {
+	t.Parallel()
 	h := start(t)
 	h.handle(h.mux, "GET /v1/early", func(http.ResponseWriter, *http.Request, call) error { panic("early") }, grant.ScopeOperator)
 	h.handle(h.mux, "GET /v1/late", func(w http.ResponseWriter, _ *http.Request, _ call) error {

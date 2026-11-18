@@ -160,6 +160,7 @@ func parentsOf(text string) []string {
 }
 
 func eachBackend(t *testing.T, fn func(t *testing.T, l *landEnv)) {
+	t.Parallel()
 	t.Run("sqlite", func(t *testing.T) {
 		t.Parallel()
 		ts := testserver.StartLocal(t)
