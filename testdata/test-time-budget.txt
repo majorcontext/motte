@@ -17,9 +17,8 @@ package default 10
 # The git tests run the real git binary, and the contract tests start a PostgreSQL schema each.
 package internal/server 20
 
-# PROVISIONAL: measured on a local linux arm64 virtual machine, not on the ubuntu-latest job. Read the line
-# "Calibration: ..." of the go job in CI and set this value from it before merge.
-calibrate 0.060
+# Measured on the ubuntu-latest go job; read the line "Calibration: ..." of that job to update it.
+calibrate 0.037
 
 # Each limit is the measured count plus a small margin. Servers and schemas are the contract tests, which start a
 # server on a PostgreSQL schema or a SQLite file each. Processes are the git commands of the test helpers.
