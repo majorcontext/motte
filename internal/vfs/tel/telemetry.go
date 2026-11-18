@@ -58,6 +58,8 @@ type Telemetry struct {
 	SlowOp time.Duration
 	// StatsEvery is the interval of the vfs.stats record; zero is 30 s.
 	StatsEvery time.Duration
+	// Tracer starts the spans; nil is the package tracer.
+	Tracer trace.Tracer
 }
 
 const (
@@ -74,7 +76,11 @@ func (t Telemetry) Log() *slog.Logger {
 
 // start begins a span that carries the correlation attributes.
 func (t Telemetry) Start(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
-	return tracer.Start(ctx, name, trace.WithAttributes(append(t.Corr.SpanAttrs(), attrs...)...))
+	tr := t.Tracer
+	if tr == nil {
+		tr = tracer
+	}
+	return tr.Start(ctx, name, trace.WithAttributes(append(t.Corr.SpanAttrs(), attrs...)...))
 }
 
 // finish ends a span and marks it failed when err is not nil.

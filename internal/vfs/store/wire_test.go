@@ -13,8 +13,8 @@ import (
 	"github.com/majorcontext/motte/client"
 	"github.com/majorcontext/motte/internal/gitpack"
 	"github.com/majorcontext/motte/internal/vfs/store"
+	"github.com/majorcontext/motte/internal/vfs/tel"
 	"github.com/majorcontext/motte/testserver"
-	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
@@ -102,13 +102,13 @@ func TestHTTPStoreFailsACallWhoseGrantFails(t *testing.T) {
 func TestHTTPStoreSpanRecordsTheStatusAndBytes(t *testing.T) {
 	t.Parallel()
 	rec := tracetest.NewSpanRecorder()
-	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)))
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(`{"refs":[]}`))
 	}))
 	defer srv.Close()
-	st := &store.HTTPStore{BaseURL: srv.URL, Grant: client.StaticGrant("g")}
+	st := &store.HTTPStore{BaseURL: srv.URL, Grant: client.StaticGrant("g"), Tel: tel.Telemetry{Tracer: tp.Tracer("test")}}
 	if _, err := st.Refs(t.Context()); err != nil {
 		t.Fatal(err)
 	}
