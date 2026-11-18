@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/rand/v2"
 	"net/http"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
@@ -18,11 +20,19 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 
 	"github.com/majorcontext/motte/bucket"
+	"github.com/majorcontext/motte/internal/clock"
+)
+
+const (
+	maxCreateAttempts = 8
+	backoffStart      = 20 * time.Millisecond
+	backoffCap        = time.Second
 )
 
 type s3Bucket struct {
-	c    *s3.Client
-	name string
+	c     *s3.Client
+	name  string
+	clock clock.Clock
 }
 
 // Options configures a client. Credentials come from the AWS SDK default
@@ -56,7 +66,7 @@ func NewClient(ctx context.Context, o Options) (*s3.Client, error) {
 }
 
 // New returns the Store of the bucket name.
-func New(client *s3.Client, name string) bucket.Store { return s3Bucket{client, name} }
+func New(client *s3.Client, name string) bucket.Store { return s3Bucket{client, name, clock.Real()} }
 
 func status(err error) int {
 	var re *awshttp.ResponseError
@@ -66,8 +76,11 @@ func status(err error) int {
 	return 0
 }
 
+// Create retries a 409, which means a write of the key is in flight, with
+// jittered exponential backoff, and fails after maxCreateAttempts answers.
 func (b s3Bucket) Create(ctx context.Context, key string, data []byte) (bool, error) {
-	for {
+	delay := backoffStart
+	for attempt := 1; ; attempt++ {
 		_, err := b.c.PutObject(ctx, &s3.PutObjectInput{
 			Bucket:      &b.name,
 			Key:         &key,
@@ -83,9 +96,14 @@ func (b s3Bucket) Create(ctx context.Context, key string, data []byte) (bool, er
 		case http.StatusPreconditionFailed:
 			return false, nil
 		case http.StatusConflict:
-			if err := ctx.Err(); err != nil {
+			if attempt == maxCreateAttempts {
+				return false, fmt.Errorf("bucket: write: still in conflict after %d attempts: %w", attempt, err)
+			}
+			wait := delay/2 + rand.N(delay/2+1)
+			if err := clock.Wait(ctx, b.clock, wait); err != nil {
 				return false, fmt.Errorf("bucket: write: %w", err)
 			}
+			delay = min(delay*2, backoffCap)
 		default:
 			return false, fmt.Errorf("bucket: write: %w", err)
 		}
