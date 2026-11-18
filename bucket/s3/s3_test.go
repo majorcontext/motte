@@ -20,6 +20,7 @@ const (
 )
 
 func TestConformance(t *testing.T) {
+	t.Parallel()
 	endpoint := os.Getenv(endpointEnv)
 	if endpoint == "" {
 		t.Skip(endpointEnv + " is not set: the test needs an S3-compatible endpoint such as MinIO, and AWS_* credentials")
