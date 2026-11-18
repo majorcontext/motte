@@ -161,7 +161,7 @@ func (m *Module) hasPackage(dir string) bool {
 	return false
 }
 
-// callsSuite reports whether a test file of dir calls the suite entry function.
+// callsSuite reports whether a test file of dir calls the suite entry function from a top-level Test function.
 func (m *Module) callsSuite(dir, suite string) bool {
 	suiteDir, entry := splitRef(suite)
 	found := false
@@ -170,18 +170,24 @@ func (m *Module) callsSuite(dir, suite string) bool {
 			continue
 		}
 		imports := importsOf(gf.f)
-		ast.Inspect(gf.f, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
+		for _, d := range gf.f.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Recv != nil || fn.Body == nil || !strings.HasPrefix(fn.Name.Name, "Test") {
+				continue
 			}
-			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == entry {
-				if id, ok := sel.X.(*ast.Ident); ok && m.pkgDir(imports[id.Name]) == suiteDir {
-					found = true
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
 				}
-			}
-			return true
-		})
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == entry {
+					if id, ok := sel.X.(*ast.Ident); ok && m.pkgDir(imports[id.Name]) == suiteDir {
+						found = true
+					}
+				}
+				return true
+			})
+		}
 	}
 	return found
 }

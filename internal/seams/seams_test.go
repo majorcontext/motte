@@ -131,6 +131,9 @@ func TestCheckSeams(t *testing.T) {
 		{"clean", func(fstest.MapFS) {}, fixtureTable, ""},
 		{"missing interface", func(f fstest.MapFS) { f["kv/kv.go"] = file("package kv\n") }, fixtureTable, "kv: interface kv.Store is not declared"},
 		{"implementation without suite call", func(f fstest.MapFS) { f["kv/disk/disk_test.go"] = file("package disk\n") }, fixtureTable, "kv: implementation kv/disk has no test that calls kv/kvtest.Run"},
+		{"suite call outside a test function", func(f fstest.MapFS) {
+			f["kv/disk/disk_test.go"] = file("package disk\nimport \"example.test/m/kv/kvtest\"\nfunc helper() { kvtest.Run() }\n")
+		}, fixtureTable, "kv: implementation kv/disk has no test that calls kv/kvtest.Run"},
 		{"unlisted subpackage", func(f fstest.MapFS) { f["kv/s3/s3.go"] = file("package s3\n") }, fixtureTable, "kv: package kv/s3 sits under kv and is not in the implementations"},
 		{"unlisted assertion", func(f fstest.MapFS) {
 			f["other/o.go"] = file("package other\nimport \"example.test/m/kv\"\nvar _ kv.Store = nil\n")
