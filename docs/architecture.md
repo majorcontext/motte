@@ -375,7 +375,7 @@ Every external provider sits behind an interface that its consumer owns. A provi
 | Seam | Interface | Suite | Implementations | Gap |
 |---|---|---|---|---|
 | meta-store | `meta.Store` | `meta/metatest.Run` | `meta/postgres`, `meta/sqlite` | |
-| bucket-store | `bucket.Store` | `bucket/buckettest.Run` | `bucket/gcs`, `bucket/fs` | |
+| bucket-store | `bucket.Store` | `bucket/buckettest.Run` | `bucket/gcs`, `bucket/fs`, `bucket/s3` | |
 
 - A cell that names Go code is `dir.Identifier`: the directory is relative to the module root.
 - A seam that meets the rule has an interface, a suite and at least two implementations. A seam that does not has a reason in the Gap column, and its name is a line of `testdata/seam-gaps.txt`. The list only shrinks: CI fails a gap that the merge base does not list.
