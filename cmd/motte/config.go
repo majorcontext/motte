@@ -9,8 +9,25 @@ import (
 	"os"
 	"time"
 
+	"github.com/majorcontext/motte/bucket/s3"
 	"github.com/majorcontext/motte/grant"
 )
+
+func loadS3(getenv func(string) string, c *config) error {
+	c.s3 = s3.Options{Endpoint: getenv("MOTTE_S3_ENDPOINT"), Region: getenv("MOTTE_S3_REGION")}
+	style := getenv("MOTTE_S3_PATH_STYLE")
+	switch style {
+	case "true":
+		c.s3.PathStyle = true
+	case "", "false":
+	default:
+		return errors.New("MOTTE_S3_PATH_STYLE must be true or false")
+	}
+	if c.bucketKind != "s3" && (c.s3 != s3.Options{} || style != "") {
+		return errors.New("MOTTE_S3_* variables need MOTTE_BUCKET_KIND=s3")
+	}
+	return nil
+}
 
 type config struct {
 	listen      string
@@ -19,6 +36,7 @@ type config struct {
 	sqlitePath  string
 	bucketKind  string
 	bucket      string
+	s3          s3.Options
 	keys        []grant.Key
 	otlp        bool
 	retention   time.Duration
@@ -30,8 +48,11 @@ type config struct {
 //	MOTTE_META          postgres (default) or sqlite
 //	MOTTE_DATABASE_URL  PostgreSQL DSN, for postgres
 //	MOTTE_SQLITE_PATH   database file, for sqlite
-//	MOTTE_BUCKET_KIND   gcs or fs
-//	MOTTE_BUCKET        bucket name for gcs, directory for fs
+//	MOTTE_BUCKET_KIND   gcs, s3 or fs
+//	MOTTE_BUCKET        bucket name for gcs and s3, directory for fs
+//	MOTTE_S3_ENDPOINT   optional, s3 only: base URL of an S3-compatible service
+//	MOTTE_S3_REGION     s3 only: bucket region, default from the AWS SDK chain
+//	MOTTE_S3_PATH_STYLE optional, s3 only: true or false, default false
 //	MOTTE_TRUSTED_KEYS  JSON list of {"kid","key","scopes"}; key is the base64 Ed25519 public key
 //	MOTTE_EVENT_RETENTION  how long a ref event is kept, a Go duration, default 336h
 //	OTEL_EXPORTER_OTLP_ENDPOINT  optional; enables trace export
@@ -61,8 +82,11 @@ func loadConfig(getenv func(string) string) (config, error) {
 	case c.bucket == "":
 		return config{}, errors.New("MOTTE_BUCKET is required")
 	}
-	if c.bucketKind != "gcs" && c.bucketKind != "fs" {
-		return config{}, errors.New("MOTTE_BUCKET_KIND must be gcs or fs")
+	if c.bucketKind != "gcs" && c.bucketKind != "s3" && c.bucketKind != "fs" {
+		return config{}, errors.New("MOTTE_BUCKET_KIND must be gcs, s3 or fs")
+	}
+	if err := loadS3(getenv, &c); err != nil {
+		return config{}, err
 	}
 	if text := getenv("MOTTE_EVENT_RETENTION"); text != "" {
 		d, err := time.ParseDuration(text)

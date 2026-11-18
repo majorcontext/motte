@@ -20,6 +20,7 @@ import (
 	"github.com/majorcontext/motte/bucket"
 	"github.com/majorcontext/motte/bucket/fs"
 	"github.com/majorcontext/motte/bucket/gcs"
+	"github.com/majorcontext/motte/bucket/s3"
 	"github.com/majorcontext/motte/grant"
 	"github.com/majorcontext/motte/internal/server"
 	"github.com/majorcontext/motte/meta"
@@ -42,6 +43,13 @@ func openBucket(ctx context.Context, c config) (bucket.Store, error) {
 			return nil, err
 		}
 		return root.Bucket("motte"), nil
+	}
+	if c.bucketKind == "s3" {
+		client, err := s3.NewClient(ctx, c.s3)
+		if err != nil {
+			return nil, err
+		}
+		return s3.New(client, c.bucket), nil
 	}
 	client, err := storage.NewClient(ctx)
 	if err != nil {

@@ -27,6 +27,9 @@ func TestLoadConfigChoosesBackendsAndRefusesUnknownOnes(t *testing.T) {
 		"sqlite and fs":        {map[string]string{"MOTTE_META": "sqlite", "MOTTE_SQLITE_PATH": "m.db", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d"}, true},
 		"sqlite needs a path":  {map[string]string{"MOTTE_META": "sqlite", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d"}, false},
 		"unknown meta":         {map[string]string{"MOTTE_META": "spanner", "MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d"}, false},
+		"s3 with options":      {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "s3", "MOTTE_BUCKET": "d", "MOTTE_S3_ENDPOINT": "http://m:9000", "MOTTE_S3_PATH_STYLE": "true"}, true},
+		"s3 variables need s3": {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "gcs", "MOTTE_BUCKET": "d", "MOTTE_S3_REGION": "auto"}, false},
+		"bad path style":       {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "s3", "MOTTE_BUCKET": "d", "MOTTE_S3_PATH_STYLE": "yes"}, false},
 		"unknown bucket kind":  {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "r2", "MOTTE_BUCKET": "d"}, false},
 		"postgres needs a DSN": {map[string]string{"MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d"}, false},
 	} {

@@ -1,0 +1,131 @@
+// Package s3 backs the bucket seam with an S3-compatible object store: AWS
+// S3, Cloudflare R2 or MinIO.
+package s3
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+	"net/http"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+
+	"github.com/majorcontext/motte/bucket"
+)
+
+type s3Bucket struct {
+	c    *s3.Client
+	name string
+}
+
+// Options configures a client. Credentials come from the AWS SDK default
+// chain. A zero Endpoint is the AWS endpoint of the region. A zero Region is
+// the region of the default chain.
+type Options struct {
+	Endpoint  string
+	Region    string
+	PathStyle bool
+}
+
+// NewClient returns a client that sends checksums only when the API needs
+// them: some S3-compatible services reject the default checksum headers.
+func NewClient(ctx context.Context, o Options) (*s3.Client, error) {
+	var load []func(*config.LoadOptions) error
+	if o.Region != "" {
+		load = append(load, config.WithRegion(o.Region))
+	}
+	cfg, err := config.LoadDefaultConfig(ctx, load...)
+	if err != nil {
+		return nil, fmt.Errorf("bucket: s3 config: %w", err)
+	}
+	return s3.NewFromConfig(cfg, func(so *s3.Options) {
+		if o.Endpoint != "" {
+			so.BaseEndpoint = aws.String(o.Endpoint)
+		}
+		so.UsePathStyle = o.PathStyle
+		so.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
+		so.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
+	}), nil
+}
+
+// New returns the Store of the bucket name.
+func New(client *s3.Client, name string) bucket.Store { return s3Bucket{client, name} }
+
+func status(err error) int {
+	var re *awshttp.ResponseError
+	if errors.As(err, &re) {
+		return re.HTTPStatusCode()
+	}
+	return 0
+}
+
+func (b s3Bucket) Create(ctx context.Context, key string, data []byte) (bool, error) {
+	for {
+		_, err := b.c.PutObject(ctx, &s3.PutObjectInput{
+			Bucket:      &b.name,
+			Key:         &key,
+			Body:        bytes.NewReader(data),
+			IfNoneMatch: new("*"),
+		})
+		switch status(err) {
+		case 0:
+			if err != nil {
+				return false, fmt.Errorf("bucket: write: %w", err)
+			}
+			return true, nil
+		case http.StatusPreconditionFailed:
+			return false, nil
+		case http.StatusConflict:
+			if err := ctx.Err(); err != nil {
+				return false, fmt.Errorf("bucket: write: %w", err)
+			}
+		default:
+			return false, fmt.Errorf("bucket: write: %w", err)
+		}
+	}
+}
+
+func (b s3Bucket) Get(ctx context.Context, key string) ([]byte, error) {
+	return b.read(ctx, key, nil, -1)
+}
+
+func (b s3Bucket) GetRange(ctx context.Context, key string, off, n int64) ([]byte, error) {
+	if off < 0 {
+		return nil, fmt.Errorf("bucket: read: negative offset %d", off)
+	}
+	spec := fmt.Sprintf("bytes=%d-", off)
+	if n >= 0 && off <= math.MaxInt64-n {
+		spec = fmt.Sprintf("bytes=%d-%d", off, off+max(n, 1)-1)
+	}
+	return b.read(ctx, key, &spec, n)
+}
+
+func (b s3Bucket) read(ctx context.Context, key string, rng *string, n int64) ([]byte, error) {
+	out, err := b.c.GetObject(ctx, &s3.GetObjectInput{Bucket: &b.name, Key: &key, Range: rng})
+	var nsk *types.NoSuchKey
+	switch {
+	case errors.As(err, &nsk) || status(err) == http.StatusNotFound:
+		return nil, bucket.ErrNotFound
+	case status(err) == http.StatusRequestedRangeNotSatisfiable:
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("bucket: read: %w", err)
+	}
+	defer func() { _ = out.Body.Close() }()
+	var r io.Reader = out.Body
+	if n >= 0 {
+		r = io.LimitReader(r, n)
+	}
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("bucket: read: %w", err)
+	}
+	return data, nil
+}
