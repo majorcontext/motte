@@ -296,6 +296,7 @@ func (s *sim) check() error {
 // TestScanMatchesOverlayModel runs random edit sequences against a model of the merged view and an upper
 // directory built by the overlayfs rules. A wrong Scan loses, keeps or invents a file of the merged view.
 func TestScanMatchesOverlayModel(t *testing.T) {
+	t.Parallel()
 	for seed := uint64(0); seed < 400; seed++ {
 		s := newSim(seed)
 		var ops []string

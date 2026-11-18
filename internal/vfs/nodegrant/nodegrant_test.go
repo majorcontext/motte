@@ -14,6 +14,7 @@ import (
 )
 
 func TestLoadAndMint(t *testing.T) {
+	t.Parallel()
 	pub, priv, _ := ed25519.GenerateKey(nil)
 	b64 := base64.StdEncoding.EncodeToString
 	write := func(doc string) string {

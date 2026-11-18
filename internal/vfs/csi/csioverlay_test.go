@@ -172,6 +172,7 @@ func wantCode(t *testing.T, err error, c codes.Code) {
 func exists(path string) bool { _, err := os.Lstat(path); return err == nil }
 
 func TestOverlayPublishAndUnpublishOrder(t *testing.T) {
+	t.Parallel()
 	p, f := newOverlayPlugin(t)
 	if err := publish(p, f, testCommit); err != nil {
 		t.Fatal(err)
@@ -195,6 +196,7 @@ func TestOverlayPublishAndUnpublishOrder(t *testing.T) {
 }
 
 func TestOverlayPublishFailureUndoesInReverse(t *testing.T) {
+	t.Parallel()
 	for _, c := range []struct {
 		fail  string
 		code  codes.Code
@@ -232,6 +234,7 @@ func TestOverlayPublishFailureUndoesInReverse(t *testing.T) {
 }
 
 func TestOverlayPublishAfterRestartTakesTheStalePath(t *testing.T) {
+	t.Parallel()
 	p, f := newOverlayPlugin(t)
 	f.ents = []mountEntry{{Mountpoint: f.tgt, FSType: "overlay", Opts: map[string]string{"upperdir": filepath.Join(f.volDir(), "upper")}}}
 	must(t, publish(p, f, testCommit))
@@ -241,6 +244,7 @@ func TestOverlayPublishAfterRestartTakesTheStalePath(t *testing.T) {
 }
 
 func TestOverlayPublishStale(t *testing.T) {
+	t.Parallel()
 	upper := func(f *fakeMnt) string { return filepath.Join(f.volDir(), "upper") }
 	seed := func(t *testing.T, f *fakeMnt) {
 		must(t, os.MkdirAll(filepath.Join(upper(f), "d"), 0o755))
@@ -301,6 +305,7 @@ func must(t *testing.T, err error) {
 }
 
 func TestOverlayBaseFileDecidesTheUpper(t *testing.T) {
+	t.Parallel()
 	for _, c := range []struct {
 		name, base string
 		keep       bool
@@ -333,6 +338,7 @@ func TestOverlayBaseFileDecidesTheUpper(t *testing.T) {
 }
 
 func TestOverlayUnpublishOfUnknownVolume(t *testing.T) {
+	t.Parallel()
 	setup := func(t *testing.T) (*NodePlugin, *fakeMnt) {
 		p, f := newOverlayPlugin(t)
 		must(t, os.MkdirAll(filepath.Join(f.volDir(), "upper"), 0o755))
@@ -362,6 +368,7 @@ func TestOverlayUnpublishOfUnknownVolume(t *testing.T) {
 }
 
 func TestParseMountinfo(t *testing.T) {
+	t.Parallel()
 	text := `22 28 0:21 / /sys rw,nosuid,nodev,noexec,relatime shared:7 - sysfs sysfs rw
 701 650 0:80 / /var/lib/kubelet/pods/u/volumes/kubernetes.io~csi/w/mount rw,relatime shared:1 master:2 - overlay overlay rw,lowerdir=/s/vol/a\040b/lower,upperdir=/s/vol/a\040b/upper,workdir=/s/vol/a\040b/work,redirect_dir=on,metacopy=on,index=off
 702 650 0:81 / /s/vol/a\040b/lower ro,nosuid,nodev - fuse.motte-vfs motte-vfs ro,user_id=0,group_id=0,allow_other
@@ -382,6 +389,7 @@ func TestParseMountinfo(t *testing.T) {
 }
 
 func TestOverlayUnpublishKeepsTheServedLowerWhileReferenced(t *testing.T) {
+	t.Parallel()
 	p, f := newOverlayPlugin(t)
 	must(t, publish(p, f, testCommit))
 	f.calls = nil
@@ -404,6 +412,7 @@ func TestOverlayUnpublishKeepsTheServedLowerWhileReferenced(t *testing.T) {
 }
 
 func TestCheckHostPID(t *testing.T) {
+	t.Parallel()
 	ns := func(m map[string]string) func(string) (string, error) {
 		return func(p string) (string, error) { return m[p], nil }
 	}
@@ -421,6 +430,7 @@ func TestCheckHostPID(t *testing.T) {
 }
 
 func TestOverlayPublishFailureKeepsAVolumeThatAMountReferences(t *testing.T) {
+	t.Parallel()
 	p, f := newOverlayPlugin(t)
 	f.fail["mountOverlay"] = errors.New("boom")
 	f.fail["unmount S/vol/v1/lower 2"] = syscall.EBUSY
@@ -432,6 +442,7 @@ func TestOverlayPublishFailureKeepsAVolumeThatAMountReferences(t *testing.T) {
 }
 
 func TestOverlayUnpublishNeverWalksIntoTheLowerMountPoint(t *testing.T) {
+	t.Parallel()
 	p, f := newOverlayPlugin(t)
 	must(t, os.MkdirAll(filepath.Join(f.volDir(), "upper"), 0o755))
 	must(t, os.MkdirAll(filepath.Join(f.volDir(), "lower"), 0o755))
@@ -444,6 +455,7 @@ func TestOverlayUnpublishNeverWalksIntoTheLowerMountPoint(t *testing.T) {
 }
 
 func TestHostMountsFailsClosed(t *testing.T) {
+	t.Parallel()
 	const ovl = "5 1 0:9 / /w rw - overlay overlay rw,upperdir=/u\n"
 	proc := t.TempDir()
 	write := func(pid, ns, mountinfo string) {
@@ -480,6 +492,7 @@ func TestHostMountsFailsClosed(t *testing.T) {
 // of the pod decides who may name a workspace. A pod of another namespace, or a request without pod info, mounts
 // nothing, and an empty list allows no pod.
 func TestPublishRefusesAPodOutsideTheAllowedNamespaces(t *testing.T) {
+	t.Parallel()
 	p, f := newOverlayPlugin(t)
 	wantCode(t, publishVol(p, "v1", "b", f.tgt, testCommit, "other"), codes.PermissionDenied)
 	wantCode(t, publishVol(p, "v1", "b", f.tgt, testCommit, ""), codes.InvalidArgument)
@@ -497,6 +510,7 @@ func TestPublishRefusesAPodOutsideTheAllowedNamespaces(t *testing.T) {
 // TestWorkspaceVolumesOfOnePodKeepSeparateControlDirectories: two workspace volumes in one pod must not share a
 // socket, and unpublishing one must not delete the socket of the other.
 func TestWorkspaceVolumesOfOnePodKeepSeparateControlDirectories(t *testing.T) {
+	t.Parallel()
 	p, f := newOverlayPlugin(t)
 	t1, t2 := filepath.Join(f.state, "t1"), filepath.Join(f.state, "t2")
 	must(t, publishVol(p, "v1", "b", t1, testCommit, "ws"))
@@ -515,6 +529,7 @@ func TestWorkspaceVolumesOfOnePodKeepSeparateControlDirectories(t *testing.T) {
 
 // TestUnpublishOfOneVolumeDoesNotBlockAnother: an unmount that hangs holds only its own volume. A failure hangs here until the test deadline.
 func TestUnpublishOfOneVolumeDoesNotBlockAnother(t *testing.T) {
+	t.Parallel()
 	p, f := newOverlayPlugin(t)
 	t1, t2 := filepath.Join(f.state, "t1"), filepath.Join(f.state, "t2")
 	must(t, publishVol(p, "v1", "b", t1, testCommit, "ws"))
@@ -546,6 +561,7 @@ func TestUnpublishOfOneVolumeDoesNotBlockAnother(t *testing.T) {
 // 64-byte workspace would pass it under any layout that names them. A state directory that is too long fails the
 // publish with a message that names the path.
 func TestControlSocketPathStaysUnderTheLimit(t *testing.T) {
+	t.Parallel()
 	p, f := newOverlayPlugin(t)
 	uid, ws := "01234567-89ab-cdef-0123-456789abcdef", strings.Repeat("w", 64)
 	pub := func(id string) error {

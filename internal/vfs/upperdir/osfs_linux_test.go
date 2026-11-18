@@ -15,6 +15,7 @@ import (
 // the upper root, as the sandbox can, after the listing and between the fstatat and the openat of the
 // descent. The walk must not list what lies outside, also where O_NOFOLLOW lets the open follow the link.
 func TestOSFSDoesNotDescendIntoASwappedSymlink(t *testing.T) {
+	t.Parallel()
 	for _, point := range []string{"afterEntries", "beforeOpen"} {
 		root, outside := t.TempDir(), t.TempDir()
 		for _, p := range []string{filepath.Join(root, "d", "inside"), filepath.Join(outside, "leak")} {
@@ -51,6 +52,7 @@ func TestOSFSDoesNotDescendIntoASwappedSymlink(t *testing.T) {
 // TestProbeTrustedNamesTheCapability requires a clear error without CAP_SYS_ADMIN, where a read of
 // trusted.overlay.* answers no data and Scan would be wrong without a sign.
 func TestProbeTrustedNamesTheCapability(t *testing.T) {
+	t.Parallel()
 	err := ProbeTrusted(t.TempDir())
 	if os.Geteuid() == 0 {
 		if err != nil {
@@ -66,6 +68,7 @@ func TestProbeTrustedNamesTheCapability(t *testing.T) {
 // TestOSFSReadsAnEntryTurnedIntoASocketAsGone swaps a file for a socket between the fstatat and the openat of
 // its attribute read, where open answers ENXIO. The scan must go on and list the file as it was found.
 func TestOSFSReadsAnEntryTurnedIntoASocketAsGone(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	p := filepath.Join(root, "f")
 	if err := os.WriteFile(p, nil, 0o644); err != nil {
@@ -85,6 +88,7 @@ func TestOSFSReadsAnEntryTurnedIntoASocketAsGone(t *testing.T) {
 // TestProbeTrustedBesideLeavesTheUpperDirectoryAlone: the probe of an unprivileged process names the
 // capability, and it neither writes into the upper directory nor leaves its sibling behind.
 func TestProbeTrustedBesideLeavesTheUpperDirectoryAlone(t *testing.T) {
+	t.Parallel()
 	parent := t.TempDir()
 	upper := filepath.Join(parent, "upper")
 	if err := os.Mkdir(upper, 0o755); err != nil {

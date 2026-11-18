@@ -19,6 +19,7 @@ func opq(p string) Entry { return Entry{Path: p, Kind: KindDir, Opaque: true} }
 // TestScanShapes pins the dirty set of each upper directory shape against a fixed base. A wrong entry means
 // a file that the snapshot would drop, keep or add by mistake.
 func TestScanShapes(t *testing.T) {
+	t.Parallel()
 	base := newBase("a/1", "a/2*", "b/1", "c/d/e", "c/d/f", "c/d/s/t", "c/g", "ln@", "top")
 	for _, tc := range []struct {
 		name  string

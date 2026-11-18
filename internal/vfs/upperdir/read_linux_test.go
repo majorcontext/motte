@@ -34,6 +34,7 @@ func readFixture(t *testing.T) (string, *MemFS) {
 // bytes, a symlink always reports its target, and a missing entry or a directory answers fs.ErrNotExist. A
 // wrong answer hashes a truncated blob into the change list.
 func TestDirRead(t *testing.T) {
+	t.Parallel()
 	dir, mem := readFixture(t)
 	type got struct {
 		size int64
@@ -80,6 +81,7 @@ func TestDirRead(t *testing.T) {
 // after the read. The first must answer gone, never the metadata of one inode with the bytes of another; the
 // second must report the new size and no bytes.
 func TestOSFSReadTakesModeSizeAndBytesFromOneInode(t *testing.T) {
+	t.Parallel()
 	dir, _ := readFixture(t)
 	f := filepath.Join(dir, "a/f")
 	o := &OSFS{Dir: dir}
@@ -118,6 +120,7 @@ func TestOSFSReadTakesModeSizeAndBytesFromOneInode(t *testing.T) {
 // TestOSFSReadSymlinkSwappedDuringTheReadIsGone: a symlink replaced by another between the first lstat and the
 // check after readlinkat must not report the old inode's mode with the new target.
 func TestOSFSReadSymlinkSwappedDuringTheReadIsGone(t *testing.T) {
+	t.Parallel()
 	dir, _ := readFixture(t)
 	ln := filepath.Join(dir, "a/ln")
 	o := &OSFS{Dir: dir}
@@ -143,6 +146,7 @@ func TestOSFSReadSymlinkSwappedDuringTheReadIsGone(t *testing.T) {
 // TestOSFSReadSymlinkTurnedIntoAFileIsGone: readlinkat answers EINVAL for a regular file swapped over the
 // symlink before the read. That is a vanished symlink, not an error that fails the whole walk.
 func TestOSFSReadSymlinkTurnedIntoAFileIsGone(t *testing.T) {
+	t.Parallel()
 	dir, _ := readFixture(t)
 	ln := filepath.Join(dir, "a/ln")
 	o := &OSFS{Dir: dir}

@@ -13,10 +13,12 @@ import (
 )
 
 func TestConformance(t *testing.T) {
+	t.Parallel()
 	metatest.Run(t, func(t *testing.T) meta.Store { return &postgres.Store{Pool: pgtest.Pool(t, "")} })
 }
 
 func TestAWriteDoesNotWaitForAnotherPartition(t *testing.T) {
+	t.Parallel()
 	pool := pgtest.Pool(t, "")
 	s := &postgres.Store{Pool: pool}
 	const repo = "gh:acme/widgets"

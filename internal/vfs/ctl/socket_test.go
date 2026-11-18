@@ -19,6 +19,7 @@ import (
 // TestOverLongLineGetsAnErrAnswer: a request line over MaxLine is answered line_too_long, not dropped with a closed
 // socket, and the next request on the connection is served.
 func TestOverLongLineGetsAnErrAnswer(t *testing.T) {
+	t.Parallel()
 	d := startDaemon(t, 1<<10)
 	long := `{"op":"put","type":"blob","data":"` + strings.Repeat("A", 4<<10) + `"}`
 	if ans := d.send(long); ans["code"] != "line_too_long" || ans["err"] == "" {
@@ -31,6 +32,7 @@ func TestOverLongLineGetsAnErrAnswer(t *testing.T) {
 
 // TestServeClosesConnectionsWhenItStops: a shim that holds a connection open must not outlive the workspace.
 func TestServeClosesConnectionsWhenItStops(t *testing.T) {
+	t.Parallel()
 	d := startDaemon(t, 0)
 	d.stop()
 	d.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -42,6 +44,7 @@ func TestServeClosesConnectionsWhenItStops(t *testing.T) {
 // TestListenRefusesAnOpenDirectory: the listener opens before the mount, so a socket directory that other users can
 // reach stops the start instead of leaving a mount that no shim can use.
 func TestListenRefusesAnOpenDirectory(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o777); err != nil {
 		t.Fatal(err)

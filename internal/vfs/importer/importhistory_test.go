@@ -56,6 +56,7 @@ func historyOrigin(t *testing.T, commits []int) string {
 // packs above a 4 MiB threshold, each reach the store only as packs of at most historyPackBytes, hold every object,
 // and an oversize pack is never read into memory.
 func TestImportHistoryBoundsEveryPack(t *testing.T) {
+	t.Parallel()
 	historyPackBytes, historyChunkBytes = 4<<20, 2<<20
 	t.Cleanup(func() { historyPackBytes, historyChunkBytes = 48<<20, 32<<20 })
 	for _, tc := range []struct {
@@ -96,6 +97,7 @@ func TestImportHistoryBoundsEveryPack(t *testing.T) {
 // TestChunkObjectsBoundsBytesAndCount: 300,000 small blobs stay under the byte bound but would make an index over
 // the 8 MiB limit of the store, so a chunk also stops at maxObjects; a blob over the byte bound stands alone.
 func TestChunkObjectsBoundsBytesAndCount(t *testing.T) {
+	t.Parallel()
 	var small []histObj
 	for i := range 250 {
 		small = append(small, histObj{0, 10, fmt.Sprint("b", i)})

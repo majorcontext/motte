@@ -7,6 +7,7 @@ import (
 )
 
 func TestBuildRoundTrip(t *testing.T) {
+	t.Parallel()
 	objs := []Object{{Blob, []byte("one")}, {Blob, []byte("two")}, {Blob, []byte("one")}, {Tree, nil}}
 	pack, idx, names := Build(objs)
 	p, err := NewPack(idx, bytes.NewReader(pack))
@@ -32,6 +33,7 @@ func TestBuildRoundTrip(t *testing.T) {
 }
 
 func TestVerifyRestoresReadState(t *testing.T) {
+	t.Parallel()
 	pack, idx, names := Build([]Object{{Blob, []byte("x")}})
 	p, _ := NewPack(idx, bytes.NewReader(pack))
 	ctx, cancel := context.WithCancel(context.Background())

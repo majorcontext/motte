@@ -9,6 +9,7 @@ import (
 // TestFingerprintSettleRule pins the token rules: a change moves the token, equal settled walks agree, and a
 // walk that starts within the settle window of the newest change never agrees with any token.
 func TestFingerprintSettleRule(t *testing.T) {
+	t.Parallel()
 	at := time.Unix(1000, 0)
 	put := func(u *MemFS, p string, size int64, age time.Duration) {
 		u.Put(p, MemNode{Mode: 0o644, Size: size, Ctime: at.Add(-age).UnixNano()})

@@ -8,6 +8,7 @@ import (
 )
 
 func TestVerify(t *testing.T) {
+	t.Parallel()
 	now := time.Unix(1000, 0)
 	pubA, privA, _ := ed25519.GenerateKey(nil)
 	pubB, privB, _ := ed25519.GenerateKey(nil)
@@ -57,6 +58,7 @@ func TestVerify(t *testing.T) {
 }
 
 func TestMintRejectsIncompleteClaims(t *testing.T) {
+	t.Parallel()
 	_, priv, _ := ed25519.GenerateKey(nil)
 	for _, c := range []Claims{{Scope: ScopeNode, Repo: "n:a"}, {Scope: ScopeRead}, {Scope: ScopeWrite}, {Scope: ScopeMerge}, {Scope: "x"}} {
 		if _, err := (Signer{Kid: "k", Key: priv}).Mint(c); err == nil {
@@ -66,6 +68,7 @@ func TestMintRejectsIncompleteClaims(t *testing.T) {
 }
 
 func TestRotation(t *testing.T) {
+	t.Parallel()
 	pubOld, privOld, _ := ed25519.GenerateKey(nil)
 	pubNew, privNew, _ := ed25519.GenerateKey(nil)
 	c := Claims{Scope: ScopeOperator, Exp: 2000}

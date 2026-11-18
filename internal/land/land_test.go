@@ -78,6 +78,7 @@ func (m mem) files(t *testing.T, commit gitpack.SHA) []string {
 }
 
 func TestRebaseAppliesTheChangesOnTheTip(t *testing.T) {
+	t.Parallel()
 	m := mem{}
 	base := m.commit(gitpack.SHA{}, m.tree(map[string]string{"a": "1", "d/x": "1", "d/y": "1"}), "")
 	tip := m.commit(base, m.tree(map[string]string{"a": "2", "d/x": "1", "d/y": "1"}), "")
@@ -112,6 +113,7 @@ func TestRebaseAppliesTheChangesOnTheTip(t *testing.T) {
 }
 
 func TestConflictsAreFileLevelAndNameTheirPaths(t *testing.T) {
+	t.Parallel()
 	m := mem{}
 	base := m.commit(gitpack.SHA{}, m.tree(map[string]string{"a": "1", "d/x": "1", "f/g": "1", "z": "1"}), "")
 	tip := m.commit(base, m.tree(map[string]string{"a": "2", "d/x": "1", "f/g": "2", "z": "1"}), "")
@@ -136,6 +138,7 @@ func TestConflictsAreFileLevelAndNameTheirPaths(t *testing.T) {
 }
 
 func TestAnEarlierLandOfTheBatchConflictsWithALaterOne(t *testing.T) {
+	t.Parallel()
 	m := mem{}
 	base := m.commit(gitpack.SHA{}, m.tree(map[string]string{"a": "1", "b": "1"}), "")
 	one := m.commit(base, m.tree(map[string]string{"a": "2", "b": "1"}), "")
@@ -155,6 +158,7 @@ func TestAnEarlierLandOfTheBatchConflictsWithALaterOne(t *testing.T) {
 }
 
 func TestFastForwardKeepsTheCommits(t *testing.T) {
+	t.Parallel()
 	m := mem{}
 	base := m.commit(gitpack.SHA{}, m.tree(map[string]string{"a": "1"}), "")
 	head := m.commit(base, m.tree(map[string]string{"a": "1", "b": "1"}), "")
@@ -165,6 +169,7 @@ func TestFastForwardKeepsTheCommits(t *testing.T) {
 }
 
 func TestARangeThatCannotLandIsInvalid(t *testing.T) {
+	t.Parallel()
 	m := mem{}
 	tree := m.tree(map[string]string{"a": "1"})
 	base := m.commit(gitpack.SHA{}, tree, "")
@@ -180,6 +185,7 @@ func TestARangeThatCannotLandIsInvalid(t *testing.T) {
 }
 
 func TestFastForwardRefusesAPathThatIsNotUTF8(t *testing.T) {
+	t.Parallel()
 	m := mem{}
 	base := m.commit(gitpack.SHA{}, m.tree(map[string]string{"a": "1"}), "")
 	head := m.commit(base, m.tree(map[string]string{"a": "1", "\xff": "1"}), "")
@@ -208,6 +214,7 @@ func TestTheLimitCountsDistinctPaths(t *testing.T) {
 }
 
 func TestFastForwardChecksEveryCommitOfTheRange(t *testing.T) {
+	t.Parallel()
 	m := mem{}
 	base := m.commit(gitpack.SHA{}, m.tree(map[string]string{"a": "1"}), "")
 	mid := m.commit(base, m.tree(map[string]string{"a": "1", "\xff": "1"}), "")

@@ -151,6 +151,7 @@ func match(got, want any) bool {
 }
 
 func TestControlProtocolFixtures(t *testing.T) {
+	t.Parallel()
 	files, err := filepath.Glob("../../../testdata/ctl/*.json")
 	if err != nil || len(files) == 0 {
 		t.Fatalf("no fixtures: %v", err)

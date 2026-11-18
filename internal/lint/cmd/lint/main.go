@@ -2,9 +2,10 @@
 package main
 
 import (
-	"golang.org/x/tools/go/analysis/singlechecker"
+	"golang.org/x/tools/go/analysis/multichecker"
 
+	"github.com/majorcontext/motte/internal/lint/paralleltests"
 	"github.com/majorcontext/motte/internal/lint/wallclock"
 )
 
-func main() { singlechecker.Main(wallclock.Analyzer) }
+func main() { multichecker.Main(wallclock.Analyzer, paralleltests.Analyzer) }

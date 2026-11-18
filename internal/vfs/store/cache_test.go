@@ -22,6 +22,7 @@ func (wrongBlobs) Blobs(_ context.Context, shas []gitpack.SHA) ([][]byte, error)
 // TestCacheRefusesABlobWhoseHashDiffers: the node cache is keyed by SHA and shared by all workspaces, so a blob that
 // the store answers under the wrong SHA must not enter it.
 func TestCacheRefusesABlobWhoseHashDiffers(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	c := store.NewCache(wrongBlobs{}, dir)
 	want := gitpack.Hash(gitpack.Blob, []byte("the blob"))

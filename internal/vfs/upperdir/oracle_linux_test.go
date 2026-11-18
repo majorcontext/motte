@@ -112,6 +112,7 @@ func editMerged(t *testing.T, m func(string) string) {
 // directory and requires that the entries of Scan, applied to the lower files, give the merged files.
 // It needs root and overlayfs with redirect_dir and metacopy, and skips otherwise.
 func TestScanMatchesKernelOverlay(t *testing.T) {
+	t.Parallel()
 	if os.Geteuid() != 0 {
 		t.Skip("needs root to mount overlayfs and read trusted.* attributes")
 	}

@@ -10,6 +10,7 @@ import (
 )
 
 func TestConformance(t *testing.T) {
+	t.Parallel()
 	buckettest.Run(t, func(t *testing.T) bucket.Store {
 		r, err := New(t.TempDir())
 		if err != nil {
@@ -20,6 +21,7 @@ func TestConformance(t *testing.T) {
 }
 
 func TestFileLayoutIsAHeaderBlockThenTheData(t *testing.T) {
+	t.Parallel()
 	r, err := New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)

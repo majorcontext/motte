@@ -75,6 +75,7 @@ var (
 // that the lower accepts lands outside the upper directory, where the dirty set never sees it. An open for
 // write or create fails.
 func TestOverlayModeAnswersEROFS(t *testing.T) {
+	t.Parallel()
 	v, _ := overlayFixture(t)
 	n, h, ctx := &Node{v: v}, &fhandle{v: v, fd: -1}, t.Context()
 	for name, call := range map[string]func() syscall.Errno{
@@ -103,6 +104,7 @@ func TestOverlayModeAnswersEROFS(t *testing.T) {
 
 // TestOverlayModeRefusesAMountWithoutWhatItNeeds: a mount with no upper directory has no dirty set.
 func TestOverlayModeRefusesAMountWithoutWhatItNeeds(t *testing.T) {
+	t.Parallel()
 	up := t.TempDir()
 	for _, tc := range []struct {
 		name string
@@ -121,6 +123,7 @@ func TestOverlayModeRefusesAMountWithoutWhatItNeeds(t *testing.T) {
 // TestOverlayDirtyAndToken pins the dirty set and the change token of the upper directory against the base: the
 // token moves with the walk, and an unsettled walk returns a token that equals no other.
 func TestOverlayDirtyAndToken(t *testing.T) {
+	t.Parallel()
 	v, up := overlayFixture(t)
 	up.Put("a", memFile("one", 0o644))
 	up.Put("d", memWhiteout)
@@ -151,6 +154,7 @@ func TestOverlayDirtyAndToken(t *testing.T) {
 // (its leaves carry the blob of the base), a metadata-only copy-up with a new mode, a deleted directory that
 // holds a submodule (reported like legacy mode, with the gitlink mode), and the reserved .jj.
 func TestOverlayCtlChanges(t *testing.T) {
+	t.Parallel()
 	v, up := overlayFixture(t)
 	up.Put("a", memFile("one", 0o644))
 	up.Put("n", memFile("new", 0o644))
@@ -198,6 +202,7 @@ func (c countFS) Open(p string) (upperdir.Dir, error) {
 // descent per entry. The 20 added files of one directory, and the moved directory, take one open of their
 // parent and none for the origin entries.
 func TestOverlayCtlChangesOpensEachDirectoryOnce(t *testing.T) {
+	t.Parallel()
 	v, up := overlayFixture(t)
 	up.Put("bulk", memDir)
 	for i := range 20 {
@@ -218,6 +223,7 @@ func TestOverlayCtlChangesOpensEachDirectoryOnce(t *testing.T) {
 // TestOverlayCtlChangesReportsAReplacedSubmodule: an opaque directory over a submodule deletes the gitlink, as in
 // legacy mode, and lists the new file.
 func TestOverlayCtlChangesReportsAReplacedSubmodule(t *testing.T) {
+	t.Parallel()
 	v, up := overlayFixture(t)
 	up.Put("g", memDir)
 	up.Put("g/sub", upperdir.MemNode{Mode: fs.ModeDir | 0o755, Xattr: map[string]string{upperdir.XattrOpaque: "y"}})
@@ -269,6 +275,7 @@ func (d swapDir) Read(name string, limit int64) (upperdir.Blob, error) {
 // fifo, a socket or a whiteout at the read is gone for this call; one that became a symlink is read as a
 // symlink. Treating any of them as a file reports a regular file that does not exist.
 func TestOverlayCtlChangesSkipsAnEntryThatChangedType(t *testing.T) {
+	t.Parallel()
 	v, up := overlayFixture(t)
 	swapped := map[string]fs.FileMode{
 		"n1": fs.ModeDir | 0o755, "n2": fs.ModeNamedPipe | 0o644, "n3": fs.ModeSocket | 0o644,
@@ -294,6 +301,7 @@ func TestOverlayCtlChangesSkipsAnEntryThatChangedType(t *testing.T) {
 // data but still used the read. The 64 MiB budget then ends after 32 files of 2 MiB, so a file that is resized
 // again and again cannot make the call read without limit.
 func TestOverlayCtlChangesChargesBytesItDiscarded(t *testing.T) {
+	t.Parallel()
 	v, up := overlayFixture(t)
 	up.Put("w", memDir)
 	for i := range 40 {
@@ -321,6 +329,7 @@ func TestOverlayCtlChangesChargesBytesItDiscarded(t *testing.T) {
 // TestOverlayCtlChangesDoesNotHashAMetacopyWithoutOrigin: the upper copy of a metacopy file whose origin is
 // unknown is sparse, so its bytes are not the content. The entry reports its mode and size and no new SHA.
 func TestOverlayCtlChangesDoesNotHashAMetacopyWithoutOrigin(t *testing.T) {
+	t.Parallel()
 	v, up := overlayFixture(t)
 	up.Put("a", upperdir.MemNode{Mode: 0o644, Size: 4, Data: []byte("junk"), Xattr: map[string]string{
 		upperdir.XattrMetacopy: "", upperdir.XattrRedirect: "/nowhere"}})

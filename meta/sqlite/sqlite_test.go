@@ -11,6 +11,7 @@ import (
 )
 
 func TestConformance(t *testing.T) {
+	t.Parallel()
 	metatest.Run(t, func(t *testing.T) meta.Store {
 		s, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "meta.db"))
 		if err != nil {
@@ -22,6 +23,7 @@ func TestConformance(t *testing.T) {
 }
 
 func TestReopenKeepsTheState(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "meta.db")
 	for epoch := uint64(1); epoch <= 2; epoch++ {

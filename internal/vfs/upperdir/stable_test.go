@@ -34,6 +34,7 @@ func (d mutDir) Xattr(name, attr string) (string, bool, error) {
 // TestScanStable requires that an edit during the first walk makes a second walk whose entries include it,
 // that an edit during every walk ends with an unsettled token, and that an unsettled first token costs one scan.
 func TestScanStable(t *testing.T) {
+	t.Parallel()
 	now := func() time.Time { return time.Unix(1000, 0) }
 	m := &mutating{MemFS: upper("f x")}
 	es, tok, err := ScanStable(t.Context(), m, "", newBase(), now)

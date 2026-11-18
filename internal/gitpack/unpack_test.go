@@ -61,6 +61,7 @@ func refDelta(base SHA, baseLen int, result []byte) []byte {
 }
 
 func TestUnpackResolvesAThinChainThatListsTheDependentFirst(t *testing.T) {
+	t.Parallel()
 	ext := []byte("external base")
 	extName := Hash(Blob, ext)
 	mid := []byte("middle object")
@@ -99,6 +100,7 @@ func TestUnpackCountsWholeObjectsInTheResolvedTotal(t *testing.T) {
 }
 
 func TestUnpackResolvesALongDependentFirstChain(t *testing.T) {
+	t.Parallel()
 	const n = 30000
 	ext := []byte("external base")
 	extName := Hash(Blob, ext)

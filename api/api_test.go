@@ -6,6 +6,7 @@ import (
 )
 
 func TestErrorBodyWire(t *testing.T) {
+	t.Parallel()
 	b, err := json.Marshal(ErrorBody{Error: Error{Code: CodeClaimLost, Message: "m", Details: map[string]any{}}})
 	if err != nil {
 		t.Fatal(err)

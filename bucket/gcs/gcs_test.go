@@ -15,6 +15,7 @@ import (
 const bucketEnv = "MOTTE_TEST_GCS_BUCKET"
 
 func TestConformance(t *testing.T) {
+	t.Parallel()
 	name := os.Getenv(bucketEnv)
 	if name == "" {
 		t.Skip(bucketEnv + " is not set: the test needs a Cloud Storage bucket and credentials")

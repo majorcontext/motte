@@ -17,6 +17,7 @@ import (
 // directory lists the leaves of the cached subtree at its new path, and a path that is no base directory has no
 // entries.
 func TestUpperScanReadsTheBaseThroughTheCache(t *testing.T) {
+	t.Parallel()
 	c := store.NewCache(nil, t.TempDir())
 	tree := func(es ...store.Entry) gitpack.SHA {
 		sha := gitpack.Hash(gitpack.Tree, store.EncodeTree(es))

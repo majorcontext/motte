@@ -16,6 +16,7 @@ import (
 )
 
 func TestWireCodesMapToSentinels(t *testing.T) {
+	t.Parallel()
 	cases := map[api.Code]error{
 		api.CodeNotFound:           client.ErrNotFound,
 		api.CodeGenerationConflict: client.ErrGenerationConflict,
@@ -51,6 +52,7 @@ func TestWireCodesMapToSentinels(t *testing.T) {
 }
 
 func TestRedirectIsAnErrorAndLeaksNoGrant(t *testing.T) {
+	t.Parallel()
 	var leaked bool
 	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { leaked = true }))
 	defer target.Close()
@@ -65,6 +67,7 @@ func TestRedirectIsAnErrorAndLeaksNoGrant(t *testing.T) {
 }
 
 func TestBudgetBoundsACall(t *testing.T) {
+	t.Parallel()
 	release := make(chan struct{})
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-release }))
 	defer ts.Close()
@@ -77,6 +80,7 @@ func TestBudgetBoundsACall(t *testing.T) {
 }
 
 func TestCallCarriesGrantAndTraceContext(t *testing.T) {
+	t.Parallel()
 	var auth, parent string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth, parent = r.Header.Get("Authorization"), r.Header.Get("Traceparent")
@@ -96,6 +100,7 @@ func TestCallCarriesGrantAndTraceContext(t *testing.T) {
 }
 
 func TestConflictKeepsALargeGeneration(t *testing.T) {
+	t.Parallel()
 	const gen = 9007199254740993
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusConflict)

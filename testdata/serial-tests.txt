@@ -1,0 +1,14 @@
+# Top-level tests that do not call t.Parallel, read by internal/lint/paralleltests.
+# One line for each test: package TestName reason
+# package is the import path below the module path. The reason says what shared state the test writes.
+# A serial test runs before any parallel test of its package resumes, so no running test reads the state while it changes.
+internal/server TestContractOnTheLocalBackend it swaps the package variable startServer that every test reads
+internal/server TestGitOnTheLocalBackend it swaps the package variable startServer that every test reads
+internal/server TestBodyOverTheLimitAnswersTooLarge LowerLimits writes the package size limits that every running server reads
+internal/server TestLargestObjectIsStored LowerLimits writes the package size limits that every running server reads
+internal/server TestLargeTreeIsRead LowerLimits writes the package size limits that every running server reads
+internal/server TestObjectsBodyStartingWithAHugeTokenAnswersTooLarge LowerLimits writes the package size limits that every running server reads
+internal/gitpack TestUnpackCountsWholeObjectsInTheResolvedTotal it writes the package variable unpackLimit that every Unpack reads
+internal/land TestTheLimitCountsDistinctPaths it writes the package variable MaxChangedPaths that every land reads
+internal/land TestTheCacheOfBaseDiffsIsBounded it writes the package variable MaxChangedPaths that every land reads
+internal/land TestALandThatMakesAnObjectAboveTheLimitFailsAloneAndLeavesNoTrace it writes the package variable MaxObjectBytes that every land reads

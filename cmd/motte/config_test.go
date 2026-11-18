@@ -6,6 +6,7 @@ import (
 )
 
 func TestParseKeysRefusesAnUnknownScope(t *testing.T) {
+	t.Parallel()
 	key := strings.Repeat("A", 43) + "="
 	for scopes, ok := range map[string]bool{`["node","operator"]`: true, `["read","write"]`: true, `["merge"]`: true, `["node","admin"]`: false, `["Node"]`: false} {
 		_, err := parseKeys(`[{"kid":"k","key":"` + key + `","scopes":` + scopes + `}]`)
@@ -16,6 +17,7 @@ func TestParseKeysRefusesAnUnknownScope(t *testing.T) {
 }
 
 func TestLoadConfigChoosesBackendsAndRefusesUnknownOnes(t *testing.T) {
+	t.Parallel()
 	keys := `[{"kid":"k","key":"` + strings.Repeat("A", 43) + `=","scopes":["node"]}]`
 	for name, c := range map[string]struct {
 		env map[string]string

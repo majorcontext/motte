@@ -21,6 +21,7 @@ import (
 
 // TestHTTPStoreSpeaksTheStoreWire drives HTTPStore against the real server, so a wire change in either breaks here.
 func TestHTTPStoreSpeaksTheStoreWire(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	srv := testserver.Start(t, "")
 	const repo = "gh:acme/widgets"
@@ -85,6 +86,7 @@ func TestHTTPStoreSpeaksTheStoreWire(t *testing.T) {
 // TestHTTPStoreFailsACallWhoseGrantFails: a grant that cannot be minted fails the call and sends no request, so
 // the store never sees an empty bearer token.
 func TestHTTPStoreFailsACallWhoseGrantFails(t *testing.T) {
+	t.Parallel()
 	var calls atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
 	defer srv.Close()
@@ -98,6 +100,7 @@ func TestHTTPStoreFailsACallWhoseGrantFails(t *testing.T) {
 // TestHTTPStoreSpanRecordsTheStatusAndBytes: a call that succeeds records the real status, not zero, and the bytes of
 // the answer.
 func TestHTTPStoreSpanRecordsTheStatusAndBytes(t *testing.T) {
+	t.Parallel()
 	rec := tracetest.NewSpanRecorder()
 	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
