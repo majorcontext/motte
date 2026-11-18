@@ -8,6 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/majorcontext/motte/internal/release/publish"
+	dirpub "github.com/majorcontext/motte/internal/release/publish/dir"
+	"github.com/majorcontext/motte/internal/release/publish/github"
 )
 
 // publishCmd sends every file of -dir to -dest. A dest is "github", which
@@ -40,51 +44,18 @@ func publishCmd(args []string, out io.Writer) error {
 		return fmt.Errorf("no files in %s", *dir)
 	}
 	r := runner{dryRun: *dry, out: out}
+	var p publish.Publisher
 	switch {
 	case *dest == "github":
-		return publishGitHub(r, *tag, files)
+		p = github.Publisher{Run: func(args ...string) error { return r.run("", "gh", args...) }}
 	case strings.HasPrefix(*dest, "dir="):
-		return publishDir(r, strings.TrimPrefix(*dest, "dir="), files)
-	}
-	return fmt.Errorf("unknown dest %q", *dest)
-}
-
-func publishGitHub(r runner, tag string, files []string) error {
-	if tag == "" {
-		return errors.New("github needs -tag")
-	}
-	// Two jobs may create the release at once; the loser reads the winner.
-	if r.run("", "gh", "release", "view", tag) == nil {
-		return upload(r, tag, files)
-	}
-	if err := r.run("", "gh", "release", "create", tag, "--title", tag, "--notes", ""); err != nil {
-		if err := r.run("", "gh", "release", "view", tag); err != nil {
-			return err
+		if *dry {
+			fmt.Fprintln(out, "+ copy", len(files), "files to", strings.TrimPrefix(*dest, "dir="))
+			return nil
 		}
+		p = dirpub.Publisher{To: strings.TrimPrefix(*dest, "dir=")}
+	default:
+		return fmt.Errorf("unknown dest %q", *dest)
 	}
-	return upload(r, tag, files)
-}
-
-func upload(r runner, tag string, files []string) error {
-	return r.run("", "gh", append([]string{"release", "upload", tag, "--clobber"}, files...)...)
-}
-
-func publishDir(r runner, to string, files []string) error {
-	if r.dryRun {
-		fmt.Fprintln(r.out, "+ copy", len(files), "files to", to)
-		return nil
-	}
-	if err := os.MkdirAll(to, 0o755); err != nil {
-		return err
-	}
-	for _, f := range files {
-		data, err := os.ReadFile(f)
-		if err != nil {
-			return err
-		}
-		if err := os.WriteFile(filepath.Join(to, filepath.Base(f)), data, 0o755); err != nil {
-			return err
-		}
-	}
-	return nil
+	return p.Publish(*tag, files)
 }

@@ -376,6 +376,7 @@ Every external provider sits behind an interface that its consumer owns. A provi
 |---|---|---|---|---|
 | meta-store | `meta.Store` | `meta/metatest.Run` | `meta/postgres`, `meta/sqlite` | |
 | bucket-store | `bucket.Store` | `bucket/buckettest.Run` | `bucket/gcs`, `bucket/fs`, `bucket/s3` | |
+| release-publisher | `internal/release/publish.Publisher` | `internal/release/publish/publishtest.Run` | `internal/release/publish/dir`, `internal/release/publish/github` | |
 
 - A cell that names Go code is `dir.Identifier`: the directory is relative to the module root.
 - A seam that meets the rule has an interface, a suite and at least two implementations. A seam that does not has a reason in the Gap column, and its name is a line of `testdata/seam-gaps.txt`. The list only shrinks: CI fails a gap that the merge base does not list.
@@ -658,7 +659,7 @@ The release of an artifact does not depend on a CI provider. The command `go run
 |---|---|
 | `image -name N -repo R [-version V] [-push] [-platforms P] [-file F] [-build-arg K=V] [-dry-run]` | Runs `docker buildx build` of `images/N/Dockerfile` (or `F`) for `P` (default `linux/amd64,linux/arm64`). `-version` must be semver. It tags `R:X.Y.Z` and, for a version that is not a prerelease, `R:X.Y`. Without `-push` it only builds, and it loads the image when `P` names one platform. With `-push` it needs `-version`, adds provenance (`mode=max`) and SBOM attestations, and pushes. |
 | `jj -out DIR [-arch amd64\|arm64] [-src jj] [-dry-run]` | Builds `jj` in the pinned Debian bookworm Rust image for `linux/ARCH`, runs `jj --help` in the pinned Debian bookworm base image, and writes `DIR/jj-linux-ARCH` and `DIR/jj-linux-ARCH.sha256`. |
-| `publish -dir DIR -dest D [-tag T] [-dry-run]` | Sends every file of `DIR` to `D`. `github` attaches them to the release of `T` through `gh`, and creates the release when it is missing. `dir=PATH` copies them to `PATH`. A destination that the command does not know is sent by the caller from `DIR`, which holds plain files. |
+| `publish -dir DIR -dest D [-tag T] [-dry-run]` | Sends every file of `DIR` to `D`. `github` attaches them to the release of `T` through `gh`, and creates the release when it is missing. `dir=PATH` copies them to `PATH`. Each destination is an implementation of `publish.Publisher`. A destination that the command does not know is sent by the caller from `DIR`, which holds plain files. |
 
 `REGISTRY_USERNAME` and `REGISTRY_PASSWORD` make `image -push` run `docker login` for the registry host of `R`. When `REGISTRY_PASSWORD` is unset, the caller has signed in already. The registry host and path are inputs, never literals in code or in a chart default.
 
