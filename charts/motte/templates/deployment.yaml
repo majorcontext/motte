@@ -1,6 +1,6 @@
 {{- $dsn := required "database.dsnSecret.name is required" .Values.database.dsnSecret.name -}}
 {{- $bucket := required "bucket.url is required" .Values.bucket.url -}}
-{{- if not (has .Values.bucket.kind (list "gcs" "fs")) }}{{ fail "bucket.kind must be gcs or fs" }}{{ end -}}
+{{- if not (has .Values.bucket.kind (list "gcs" "s3" "fs")) }}{{ fail "bucket.kind must be gcs, s3 or fs" }}{{ end -}}
 {{- if and (eq .Values.bucket.kind "fs") (gt (int .Values.replicas) 1) }}{{ fail "bucket.kind fs needs replicas 1" }}{{ end -}}
 {{- $keySources := add (ternary 1 0 (not (empty .Values.trustedKeys))) (ternary 1 0 (not (empty .Values.trustedKeysConfigMap.name))) (ternary 1 0 (not (empty .Values.trustedKeysSecret.name))) -}}
 {{- if ne (int $keySources) 1 }}{{ fail "set exactly one of trustedKeys, trustedKeysConfigMap.name and trustedKeysSecret.name" }}{{ end -}}
@@ -60,6 +60,20 @@ spec:
               value: {{ .Values.bucket.kind | quote }}
             - name: MOTTE_BUCKET
               value: {{ $bucket | quote }}
+            {{- if eq .Values.bucket.kind "s3" }}
+            {{- with .Values.bucket.s3.endpoint }}
+            - name: MOTTE_S3_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.bucket.s3.region }}
+            - name: MOTTE_S3_REGION
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.bucket.s3.pathStyle }}
+            - name: MOTTE_S3_PATH_STYLE
+              value: "true"
+            {{- end }}
+            {{- end }}
             - name: MOTTE_TRUSTED_KEYS
               {{- if .Values.trustedKeysConfigMap.name }}
               valueFrom:

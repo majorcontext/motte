@@ -524,7 +524,7 @@ Package `testserver` runs the real server in the process of a test, on a fresh s
 - `prometheusAnnotations` (default `true`), which adds the `prometheus.io` scrape annotations for `/metrics`, and `podAnnotations`, more annotations for the pod.
 - `service.type` (default `ClusterIP`), `service.loadBalancerIP` and `service.annotations`, so a caller can ask for an internal load balancer.
 - `database.dsnSecret`, the name and key of an existing Secret that holds the PostgreSQL DSN.
-- `bucket.kind` and `bucket.url`. An `fs` bucket is an `emptyDir` volume, for tests only, and the chart rejects it with more than 1 replica.
+- `bucket.kind` and `bucket.url`. For `s3`, `bucket.url` is the bucket name, and `bucket.s3.endpoint`, `bucket.s3.region` and `bucket.s3.pathStyle` become `MOTTE_S3_ENDPOINT`, `MOTTE_S3_REGION` and `MOTTE_S3_PATH_STYLE`. The values hold no S3 credential: the AWS SDK default chain reads it from `extraEnv` (a `secretKeyRef`), or from a role that `serviceAccount.annotations` grants. An `fs` bucket is an `emptyDir` volume, for tests only, and the chart rejects it with more than 1 replica.
 - `trustedKeys`, a list of `{kid, key, scopes}`, `trustedKeysConfigMap`, an existing ConfigMap that holds the JSON list, or `trustedKeysSecret`, the name and key of an existing Secret that holds it. The Deployment sets `MOTTE_TRUSTED_KEYS` from the one source that is set. The chart fails to render when none or more than one is set.
 - `otlpEndpoint`, optional, and `extraEnv`.
 

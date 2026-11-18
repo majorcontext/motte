@@ -1,0 +1,27 @@
+image:
+  tag: v0.0.0
+database:
+  dsnSecret:
+    name: motte-db
+bucket:
+  kind: s3
+  url: example-bucket
+  s3:
+    endpoint: https://storage.example
+    region: auto
+    pathStyle: true
+extraEnv:
+  - name: AWS_ACCESS_KEY_ID
+    valueFrom:
+      secretKeyRef:
+        name: motte-s3
+        key: access-key-id
+  - name: AWS_SECRET_ACCESS_KEY
+    valueFrom:
+      secretKeyRef:
+        name: motte-s3
+        key: secret-access-key
+trustedKeys:
+  - kid: control
+    key: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+    scopes: [operator, read, import]

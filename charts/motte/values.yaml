@@ -31,12 +31,21 @@ database:
     name: ""
     key: dsn
 
-# bucket sets MOTTE_BUCKET_KIND and MOTTE_BUCKET. kind is gcs or fs. An fs
+# bucket sets MOTTE_BUCKET_KIND and MOTTE_BUCKET. kind is gcs, s3 or fs. An fs
 # bucket is a directory on an emptyDir volume, so its data ends with the pod;
-# use it for tests only.
+# use it for tests only. For s3, url is the bucket name, and s3 sets the
+# endpoint (an S3-compatible service such as R2 or MinIO; empty is AWS), the
+# region and path-style addressing. The chart holds no S3 credential: the AWS
+# SDK default chain finds one from the environment (put AWS_ACCESS_KEY_ID and
+# AWS_SECRET_ACCESS_KEY in extraEnv with a secretKeyRef), the shared files or
+# a role of the service account (set serviceAccount.annotations).
 bucket:
   kind: gcs
   url: ""
+  s3:
+    endpoint: ""
+    region: ""
+    pathStyle: false
 
 # trustedKeys is the list of public keys that the store trusts. Each entry has
 # kid, key (standard base64 of an Ed25519 public key) and scopes. Set
