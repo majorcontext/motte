@@ -359,6 +359,9 @@ func (b *Batch) rebase(ctx context.Context, base gitpack.SHA, baseCommit Commit,
 			return Landed{}, ErrTooLarge
 		}
 	}
+	if b.tooBig {
+		return Landed{}, ErrTooLarge
+	}
 	if err := stale(expect, root); err != nil {
 		return Landed{}, err
 	}

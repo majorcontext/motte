@@ -252,6 +252,10 @@ func TestALandThatMakesAnObjectAboveTheLimitFailsAloneAndLeavesNoTrace(t *testin
 	if _, err := b.Land(context.Background(), base, two, time.Unix(1, 0)); !errors.Is(err, ErrTooLarge) || b.Bytes() != held {
 		t.Fatalf("err = %v, bytes = %d, want ErrTooLarge and %d", err, b.Bytes(), held)
 	}
+	wrong := m.tree(map[string]string{"x": "1"})
+	if _, err := b.LandExpecting(context.Background(), base, two, time.Unix(1, 0), &wrong); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("with a stale expect_tree: err = %v, want ErrTooLarge before the tree compare", err)
+	}
 	MaxObjectBytes = 1 << 20
 	if _, err := b.Land(context.Background(), base, two, time.Unix(1, 0)); err != nil {
 		t.Fatalf("a land after the refused one: %v", err)
