@@ -55,6 +55,12 @@ jobs:
       - run: |
           set -o pipefail
           go test -race -count=1 -json ./... | go run ./internal/testtime -title Unit -job go
+      # A skipped suite passes in the run above, so this step prints the suites and fails on a skip.
+      - run: |
+          set -o pipefail
+          go test -count=1 -v -run '^TestConformance$' ./bucket/s3 ./bucket/gcs | tee conformance.log
+          ! grep -q -e '--- SKIP' conformance.log
+          grep -q -e '--- PASS: TestConformance' conformance.log
       - run: test -z "$(gofmt -l .)"
       # ./... skips testdata directories, so the privileged harness tools are named.
       - run: go vet ./internal/vfs/testdata/vfsfuzz ./internal/vfs/testdata/overlaycheck ./internal/vfs/testdata/overlaykit
