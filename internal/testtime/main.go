@@ -12,6 +12,8 @@ import (
 	"os"
 	"sort"
 	"strings"
+
+	"github.com/majorcontext/motte/internal/testcount"
 )
 
 const modulePath = "github.com/majorcontext/motte"
@@ -34,6 +36,8 @@ type report struct {
 	tests    []result
 	packages []result
 	parents  map[string]bool
+	counts   map[string]map[string]int
+	note     string
 	failed   bool
 }
 
@@ -49,6 +53,10 @@ func main() {
 		os.Exit(1)
 	}
 	rep := consume(os.Stdin, os.Stdout)
+	measured := calibrate()
+	budget.factor = factorFor(measured, budget.calibrate)
+	rep.note = fmt.Sprintf("Calibration: %.3f s here, %.3f s on the reference runner, factor %.2f.", measured, budget.calibrate, budget.factor)
+	fmt.Println("\ntesttime:", rep.note)
 	over := rep.check(budget, *job)
 	text := summary(*title, rep, over)
 	fmt.Print("\n" + text)
@@ -68,7 +76,7 @@ func main() {
 // consume prints the log of the stream: package lines at once and the output
 // of a test only when that test fails.
 func consume(in io.Reader, out io.Writer) *report {
-	rep := &report{parents: map[string]bool{}}
+	rep := &report{parents: map[string]bool{}, counts: map[string]map[string]int{}}
 	held := map[string][]string{}
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 0, 1<<20), 64<<20)
@@ -83,7 +91,9 @@ func consume(in io.Reader, out io.Writer) *report {
 		key := ev.Package + "\x00" + ev.Test
 		switch ev.Action {
 		case "output":
-			if ev.Test == "" {
+			if c, ok := testcount.Parse(ev.Output); ok && ev.Test == "" {
+				rep.counts[shortPackage(ev.Package)] = c
+			} else if ev.Test == "" {
 				_, _ = fmt.Fprint(out, ev.Output)
 			} else {
 				held[key] = append(held[key], ev.Output)
@@ -153,7 +163,47 @@ func (r *report) check(b *budget, job string) []string {
 			over = append(over, fmt.Sprintf("package %s took %.1fs, budget %.1fs", p.pkg, p.elapsed, limit))
 		}
 	}
+	for _, pkg := range sortedKeys(r.counts) {
+		for _, name := range sortedKeys(r.counts[pkg]) {
+			if n, limit := r.counts[pkg][name], b.countLimit(pkg, name); n > limit {
+				over = append(over, fmt.Sprintf("package %s counted %d %s, limit %d", pkg, n, name, limit))
+			}
+		}
+	}
 	return over
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+type parallelism struct {
+	pkg                string
+	tests, wall, ratio float64
+}
+
+// parallelism returns, for each package that ran leaf tests, the sum of their times divided by the wall time of
+// the package, lowest ratio first.
+func (r *report) parallelism() []parallelism {
+	sums := map[string]float64{}
+	for _, t := range r.tests {
+		if !r.parents[t.pkg+"\x00"+t.name] {
+			sums[t.pkg] += t.elapsed
+		}
+	}
+	var out []parallelism
+	for _, p := range r.packages {
+		if sum := sums[p.pkg]; sum > 0 && p.elapsed > 0 {
+			out = append(out, parallelism{p.pkg, sum, p.elapsed, sum / p.elapsed})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ratio < out[j].ratio })
+	return out
 }
 
 func appendFile(path, text string) error {
@@ -189,6 +239,21 @@ func summary(title string, r *report, over []string) string {
 	sort.Slice(pkgs, func(i, j int) bool { return pkgs[i].elapsed > pkgs[j].elapsed })
 	for _, p := range pkgs[:min(5, len(pkgs))] {
 		fmt.Fprintf(&b, "| %.2f | `%s` |\n", p.elapsed, p.pkg)
+	}
+	fmt.Fprint(&b, "\nParallelism: test seconds divided by package seconds\n\n| Ratio | Test seconds | Package seconds | Package |\n| ---: | ---: | ---: | --- |\n")
+	for _, p := range r.parallelism() {
+		fmt.Fprintf(&b, "| %.2f | %.2f | %.2f | `%s` |\n", p.ratio, p.tests, p.wall, p.pkg)
+	}
+	fmt.Fprint(&b, "\nCounts\n\n| Package | Name | Count |\n| --- | --- | ---: |\n")
+	for _, pkg := range sortedKeys(r.counts) {
+		for _, name := range sortedKeys(r.counts[pkg]) {
+			if n := r.counts[pkg][name]; n > 0 {
+				fmt.Fprintf(&b, "| `%s` | %s | %d |\n", pkg, name, n)
+			}
+		}
+	}
+	if r.note != "" {
+		fmt.Fprintf(&b, "\n%s\n", r.note)
 	}
 	for _, line := range over {
 		fmt.Fprintf(&b, "\nOver budget: %s\n", line)

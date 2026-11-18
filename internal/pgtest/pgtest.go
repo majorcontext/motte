@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/majorcontext/motte/internal/testcount"
 	"github.com/majorcontext/motte/meta/postgres"
 )
 
@@ -26,6 +27,7 @@ func Pool(t testing.TB, dsn string) *pgxpool.Pool {
 	if dsn == "" {
 		t.Skip(DSNEnv + " is not set: the test needs a PostgreSQL database")
 	}
+	testcount.Add(t, testcount.Schemas)
 	ctx := context.Background()
 	admin, err := pgxpool.New(ctx, dsn)
 	if err != nil {

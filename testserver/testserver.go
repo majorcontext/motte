@@ -18,6 +18,7 @@ import (
 	"github.com/majorcontext/motte/grant"
 	"github.com/majorcontext/motte/internal/pgtest"
 	"github.com/majorcontext/motte/internal/server"
+	"github.com/majorcontext/motte/internal/testcount"
 	"github.com/majorcontext/motte/meta"
 	"github.com/majorcontext/motte/meta/postgres"
 	"github.com/majorcontext/motte/meta/sqlite"
@@ -69,6 +70,7 @@ func StartLocal(t testing.TB) *Server {
 
 func run(t testing.TB, store meta.Store) *Server {
 	t.Helper()
+	testcount.Add(t, testcount.Servers)
 	root, err := fs.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)

@@ -2,8 +2,13 @@
 #   leaf SECONDS                  a test that has no subtests
 #   package PATH|default SECONDS  wall time of one package; PATH@JOB sets it for one job
 #   test PATH NAME SECONDS        tests of PATH whose name starts with NAME
+#   count PATH|default NAME MAX   largest count of servers, schemas or processes that the helpers start in PATH;
+#                                 a package without a line and without a default has the limit 0
+#   calibrate SECONDS             calibration time of the reference runner; testtime multiplies every time limit by
+#                                 measured divided by this value, and never by less than 1
 # A test with subtests is not checked, because a parallel parent reports the time of the whole package.
 # A change that makes a test or package slower raises its number in the same diff and states why.
+# A change that raises a count raises its line in the same diff and states why.
 
 leaf 10
 package default 10
@@ -11,3 +16,19 @@ package default 10
 
 # The git tests run the real git binary, and the contract tests start a PostgreSQL schema each.
 package internal/server 20
+
+# PROVISIONAL: measured on a local linux arm64 virtual machine, not on the ubuntu-latest job. Read the line
+# "Calibration: ..." of the go job in CI and set this value from it before merge.
+calibrate 0.060
+
+# Each limit is the measured count plus a small margin. Servers and schemas are the contract tests, which start a
+# server on a PostgreSQL schema or a SQLite file each. Processes are the git commands of the test helpers.
+count internal/server servers 85
+count internal/server schemas 55
+count internal/server processes 150
+count meta/postgres schemas 45
+count internal/vfs/ctl servers 20
+count internal/vfs/ctl schemas 20
+count internal/vfs/store servers 2
+count internal/vfs/store schemas 2
+count internal/vfs/importer processes 12

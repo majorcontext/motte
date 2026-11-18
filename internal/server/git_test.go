@@ -17,6 +17,7 @@ import (
 
 	"github.com/majorcontext/motte/api"
 	"github.com/majorcontext/motte/internal/gitpack"
+	"github.com/majorcontext/motte/internal/testcount"
 	"github.com/majorcontext/motte/testserver"
 )
 
@@ -46,7 +47,7 @@ func (g *gitEnv) remote(repoPath, token string) string {
 // git runs git in dir and returns its output. It fails the test unless the command ends as wantOK says.
 func (g *gitEnv) git(dir string, wantOK bool, args ...string) string {
 	g.t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := testcount.Command(g.t, "git", args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "HOME="+dir, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0",
 		"GIT_AUTHOR_NAME=a", "GIT_AUTHOR_EMAIL=a@example.com", "GIT_COMMITTER_NAME=a", "GIT_COMMITTER_EMAIL=a@example.com")

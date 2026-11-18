@@ -6,12 +6,12 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"testing"
 
 	"github.com/majorcontext/motte/internal/gitpack"
+	"github.com/majorcontext/motte/internal/testcount"
 )
 
 type packSink struct {
@@ -31,7 +31,7 @@ func (s *packSink) ImportPack(_ context.Context, idx, pack []byte) error {
 func historyOrigin(t *testing.T, commits []int) string {
 	dir := t.TempDir()
 	git := func(args ...string) {
-		cmd := exec.Command("git", append([]string{"-c", "user.name=t", "-c", "user.email=t@t"}, args...)...)
+		cmd := testcount.Command(t, "git", append([]string{"-c", "user.name=t", "-c", "user.email=t@t"}, args...)...)
 		cmd.Dir = dir
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
