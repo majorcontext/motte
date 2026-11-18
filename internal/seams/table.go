@@ -117,7 +117,12 @@ func (m *Module) checkSeam(s Seam) []string {
 			bad("suite %s is not declared", s.Suite)
 		}
 	}
+	seen := map[string]bool{}
 	for _, impl := range s.Impls {
+		if seen[impl] {
+			bad("implementation %s is listed twice", impl)
+		}
+		seen[impl] = true
 		if !m.hasPackage(impl) {
 			bad("implementation %s has no Go package", impl)
 		} else if s.Suite != "" && !m.callsSuite(impl, s.Suite) {

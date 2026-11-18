@@ -130,6 +130,7 @@ func TestCheckSeams(t *testing.T) {
 	}{
 		{"clean", func(fstest.MapFS) {}, fixtureTable, ""},
 		{"missing interface", func(f fstest.MapFS) { f["kv/kv.go"] = file("package kv\n") }, fixtureTable, "kv: interface kv.Store is not declared"},
+		{"duplicate implementation", func(fstest.MapFS) {}, strings.Replace(fixtureTable, "`kv/mem`, `kv/disk`", "`kv/mem`, `kv/mem`", 1), "kv: implementation kv/mem is listed twice"},
 		{"implementation without suite call", func(f fstest.MapFS) { f["kv/disk/disk_test.go"] = file("package disk\n") }, fixtureTable, "kv: implementation kv/disk has no test that calls kv/kvtest.Run"},
 		{"suite call outside a test function", func(f fstest.MapFS) {
 			f["kv/disk/disk_test.go"] = file("package disk\nimport \"example.test/m/kv/kvtest\"\nfunc helper() { kvtest.Run() }\n")
