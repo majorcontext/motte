@@ -31,3 +31,4 @@ count internal/vfs/ctl schemas 20
 count internal/vfs/store servers 2
 count internal/vfs/store schemas 2
 count internal/vfs/importer processes 12
+count internal/seams processes 2

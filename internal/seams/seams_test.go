@@ -2,11 +2,14 @@ package seams
 
 import (
 	"os"
-	"os/exec"
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"github.com/majorcontext/motte/internal/testcount"
 )
+
+func TestMain(m *testing.M) { os.Exit(testcount.Run(m)) }
 
 func readAllow(t *testing.T, name string) map[string]string {
 	t.Helper()
@@ -29,14 +32,14 @@ func gapsAtMergeBase(t *testing.T) (map[string]string, bool) {
 	if ref == "" {
 		ref = "origin/main"
 	}
-	sha, err := exec.Command("git", "-C", "../..", "merge-base", "HEAD", ref).Output()
+	sha, err := testcount.Command(t, "git", "-C", "../..", "merge-base", "HEAD", ref).Output()
 	if err != nil {
 		if os.Getenv("SEAMS_REQUIRED") == "1" {
 			t.Fatalf("find the merge base of HEAD and %s: %v", ref, err)
 		}
 		return nil, false
 	}
-	raw, err := exec.Command("git", "-C", "../..", "show", strings.TrimSpace(string(sha))+":testdata/seam-gaps.txt").Output()
+	raw, err := testcount.Command(t, "git", "-C", "../..", "show", strings.TrimSpace(string(sha))+":testdata/seam-gaps.txt").Output()
 	if err != nil {
 		return nil, false
 	}
