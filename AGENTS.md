@@ -22,6 +22,16 @@ The CI job `leak` runs `internal/leaklint` against the secret `LEAK_DENYLIST`. N
 - Run Go tests with `-race`.
 - A test is at most 10 s and a package at most 10 s, unless `testdata/test-time-budget.txt` says more. Make a slow test fast; raise a budget only with a stated reason in the same change. `internal/testtime` enforces the budget in CI.
 
+### Test cost
+
+Test time differs by machine, so the repository limits the causes of slow tests exactly and keeps time only as a calibrated backstop.
+
+- Every top-level `TestXxx` calls `t.Parallel()` on its own `t`, directly or through a helper of the same package that calls it. A test that cannot run in parallel is listed in `testdata/serial-tests.txt`, one `package TestName reason` per line, where `package` is the import path below the module path. A line without a reason, and a line that names a test that does not exist or already runs in parallel, fails the analyzer `internal/lint/paralleltests`.
+- A test helper that starts a server (`testserver.Start`, `testserver.StartLocal`), creates a PostgreSQL schema (`pgtest.Pool`) or starts a process (`testcount.Command`) counts it through `internal/testcount`. A package that uses these helpers calls `testcount.Run` from its `TestMain`; the helpers fail a test in a package that does not. At the end of the run the package prints one line `motte-testcount {"processes":N,"schemas":N,"servers":N}`. Under `-count=N` the counts are those of one run. A cached run prints the same line.
+- `testdata/test-time-budget.txt` holds one limit for each count: `count PATH NAME MAX` for one package, `count default NAME MAX` for a package without its own line. A package or name without a line, and without a default, has the limit 0. `internal/testtime` fails a package whose count passes its limit and prints the counts. A change that raises a count raises its line in the same diff and states why.
+- `testtime` runs a fixed calibration workload (a CPU loop and a loop of file create, write, stat and remove) after the test stream ends, when the machine is idle. The line `calibrate SECONDS` of the budget file is the calibration time on the reference runner, the GitHub `ubuntu-latest` job. `testtime` multiplies every time budget by measured divided by reference, and never by less than 1. It prints the calibration time and the factor.
+- `testtime` prints, for each package, the sum of the time of its leaf tests divided by the wall time of the package. The ratio has no limit.
+
 ## Comments
 
 Write no comment by default. A comment states why: a constraint, a hazard, or a rejected alternative. It never restates the code. It carries no history, no date, no person, no pull request number and no path to justify the code.
