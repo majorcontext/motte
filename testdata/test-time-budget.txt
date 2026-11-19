@@ -6,6 +6,7 @@
 #                                 a package without a line and without a default has the limit 0
 #   calibrate SECONDS             calibration time of the reference runner; testtime multiplies every time limit by
 #                                 measured divided by this value, and never by less than 1
+# CI runs go test -p 1, so each package is timed alone, not while other packages share the cores.
 # A test with subtests is not checked, because a parallel parent reports the time of the whole package.
 # A change that makes a test or package slower raises its number in the same diff and states why.
 # A change that raises a count raises its line in the same diff and states why.
