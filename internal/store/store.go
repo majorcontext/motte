@@ -435,6 +435,9 @@ func (s *Service) Warm(ctx context.Context, repos []Repo, parallel int) error {
 	g.SetLimit(parallel)
 	start := s.evictions()
 	for _, repo := range repos {
+		if ctx.Err() != nil || s.evictions() != start {
+			break
+		}
 		v, err := s.view(ctx, repo)
 		if err != nil {
 			_ = g.Wait()
