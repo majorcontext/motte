@@ -62,6 +62,8 @@ Write no comment by default. A comment states why: a constraint, a hazard, or a 
 
 ## Checks
 
+ward lands a branch onto `main` only after it runs the checks of `.ward/checks.json`; the file mirrors the commands below.
+
 ```bash
 go build ./...
 go vet ./...
