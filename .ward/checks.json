@@ -1,0 +1,8 @@
+{
+  "checks": [
+    {"name": "build-vet", "run": ["sh", "-c", "go build ./... && go vet ./..."], "timeout_seconds": 600},
+    {"name": "lint", "run": ["go", "run", "./internal/lint/cmd/lint", "./..."], "timeout_seconds": 600},
+    {"name": "test", "run": ["go", "test", "-count=1", "./..."], "timeout_seconds": 900},
+    {"name": "gofmt", "run": ["sh", "-c", "test -z \"$(gofmt -l .)\""], "timeout_seconds": 120},
+  ],
+}
