@@ -22,6 +22,7 @@ type objects interface {
 	Reader(ctx context.Context, repo store.Repo) (*store.Reader, error)
 	ReceivePack(ctx context.Context, repo store.Repo, pack []byte) error
 	ImportPack(ctx context.Context, repo store.Repo, id string, idx, pack []byte) error
+	Warm(ctx context.Context, repos []store.Repo, parallel int) error
 	GetOp(ctx context.Context, ws string, kind store.OpKind, id string) ([]byte, error)
 	PutOp(ctx context.Context, ws string, kind store.OpKind, id string, data []byte) error
 }

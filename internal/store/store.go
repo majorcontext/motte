@@ -425,6 +425,32 @@ func (s *Service) openPack(ctx context.Context, st bucket.Store, prefix string, 
 	return e, nil
 }
 
+// Warm opens the pack indexes of repos, newest pack first, with at most parallel reads at a time. It stops opening
+// when the open packs fill the cache, because an index that it opens then only evicts another. It returns the first
+// error.
+func (s *Service) Warm(ctx context.Context, repos []Repo, parallel int) error {
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(parallel)
+	for _, repo := range repos {
+		v, err := s.view(ctx, repo)
+		if err != nil {
+			_ = g.Wait()
+			return err
+		}
+		for i := len(v.refs) - 1; i >= 0 && ctx.Err() == nil && !s.full(); i-- {
+			ref := v.refs[i]
+			g.Go(func() error { _, err := s.openPack(ctx, v.st, v.prefix, ref); return err })
+		}
+	}
+	return g.Wait()
+}
+
+func (s *Service) full() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.openBytes >= maxOpenBytes
+}
+
 // view is the packs of one repo as of one request.
 type view struct {
 	s      *Service

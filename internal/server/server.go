@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -16,6 +17,7 @@ import (
 	"github.com/majorcontext/motte/api"
 	"github.com/majorcontext/motte/bucket"
 	"github.com/majorcontext/motte/grant"
+	"github.com/majorcontext/motte/internal/clock"
 	"github.com/majorcontext/motte/internal/store"
 	"github.com/majorcontext/motte/meta"
 )
@@ -33,6 +35,10 @@ type Config struct {
 	Events EventsConfig
 	// Lands tunes the batched land. Zero values take the defaults.
 	Lands LandsConfig
+	// Warm makes the server answer /ready with 503 until Warm has opened every pack index.
+	Warm bool
+	// Clock paces the retry of Warm. It defaults to the real clock.
+	Clock clock.Clock
 }
 
 type Server struct {
@@ -45,6 +51,8 @@ type Server struct {
 	lands    LandsConfig
 	landing  landing
 	wake     chan struct{}
+	clock    clock.Clock
+	cold     atomic.Bool
 
 	requests *prometheus.CounterVec
 	latency  *prometheus.HistogramVec
@@ -55,7 +63,8 @@ type Server struct {
 
 // New returns a Server over the metadata of cfg.Meta and the object store cfg.Bucket.
 func New(cfg Config) *Server {
-	s := &Server{index: cfg.Meta, objects: store.New(cfg.Bucket, cfg.Meta), verifier: cfg.Verifier, logger: cfg.Logger, now: cfg.Now, readers: make(chan struct{}, uploadReaders), wake: make(chan struct{}, 1)}
+	s := &Server{index: cfg.Meta, objects: store.New(cfg.Bucket, cfg.Meta), verifier: cfg.Verifier, logger: cfg.Logger, now: cfg.Now, readers: make(chan struct{}, uploadReaders), wake: make(chan struct{}, 1), clock: clock.Or(cfg.Clock)}
+	s.cold.Store(cfg.Warm)
 	if s.now == nil {
 		s.now = time.Now
 	}
@@ -78,7 +87,7 @@ func New(cfg Config) *Server {
 	s.mux.HandleFunc("GET /ready", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
-		if s.index.Ping(ctx) != nil {
+		if s.cold.Load() || s.index.Ping(ctx) != nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
