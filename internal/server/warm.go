@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/majorcontext/motte/internal/clock"
-	"github.com/majorcontext/motte/internal/repos"
 	"github.com/majorcontext/motte/internal/store"
 )
 
@@ -31,13 +30,13 @@ func (s *Server) Warm(ctx context.Context) {
 }
 
 func (s *Server) warm(ctx context.Context) error {
-	all, err := s.index.Repos(ctx)
+	all, err := s.index.PackRepos(ctx)
 	if err != nil {
 		return err
 	}
 	rs := make([]store.Repo, 0, len(all))
-	for _, r := range all {
-		repo, err := store.ParseRepo(repos.Text(r.Path))
+	for _, text := range all {
+		repo, err := store.ParseRepo(text)
 		if err != nil {
 			return err
 		}

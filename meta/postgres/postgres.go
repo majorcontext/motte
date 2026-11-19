@@ -263,6 +263,18 @@ func (s *Store) Packs(ctx context.Context, repo string) ([]meta.Pack, error) {
 	return out, nil
 }
 
+func (s *Store) PackRepos(ctx context.Context) ([]string, error) {
+	rows, err := s.Pool.Query(ctx, `SELECT DISTINCT repo FROM packs ORDER BY repo COLLATE "C"`)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list pack repos: %w", err)
+	}
+	out, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list pack repos: %w", err)
+	}
+	return out, nil
+}
+
 func (s *Store) Ref(ctx context.Context, repo, name string) (meta.Ref, error) {
 	r := meta.Ref{Name: name}
 	err := s.Pool.QueryRow(ctx, `SELECT commit_sha, generation FROM refs WHERE repo = $1 AND name = $2`, repo, name).Scan(&r.Commit, &r.Generation)

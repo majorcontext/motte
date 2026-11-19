@@ -2,6 +2,8 @@ package server_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/majorcontext/motte/bucket"
 	"github.com/majorcontext/motte/client"
+	"github.com/majorcontext/motte/internal/gitpack"
 	"github.com/majorcontext/motte/internal/server"
 	"github.com/majorcontext/motte/testserver"
 )
@@ -45,12 +48,13 @@ func (b *idxBucket) Get(ctx context.Context, key string) ([]byte, error) {
 	return b.Store.Get(ctx, key)
 }
 
-// coldReplica is a second replica on the state of a store that holds one repo. It is cold until Warm returns.
-func coldReplica(t *testing.T, clk quartz.Clock) (*idxBucket, *server.Server, *client.Client, func() int) {
+// coldReplica is a second replica on the state of a store that holds one imported repo, which has no repos row. It is cold until Warm returns.
+func coldReplica(t *testing.T, clk quartz.Clock) (*idxBucket, *server.Server, func(context.Context) error, func() int) {
 	t.Helper()
 	ts := testserver.StartLocal(t)
-	path, err := ts.Client(ts.OperatorGrant(t)).CreateRepo(context.Background(), "widgets", "o1")
-	if err != nil {
+	pack, idx, names := gitpack.Build([]gitpack.Object{{Type: gitpack.Blob, Data: []byte("hello")}})
+	sum := sha256.Sum256(pack)
+	if err := ts.Client(ts.ImportGrant(t, repoText)).ImportPack(context.Background(), hex.EncodeToString(sum[:]), idx, pack); err != nil {
 		t.Fatal(err)
 	}
 	b := &idxBucket{Store: ts.Bucket, gate: make(chan struct{}), entered: make(chan struct{}, 1)}
@@ -65,7 +69,8 @@ func coldReplica(t *testing.T, clk quartz.Clock) (*idxBucket, *server.Server, *c
 		_ = res.Body.Close()
 		return res.StatusCode
 	}
-	return b, srv, client.New(hs.URL, client.StaticGrant(ts.ReadGrant(t, "native:"+path))), ready
+	read := client.New(hs.URL, client.StaticGrant(ts.ReadGrant(t, repoText)))
+	return b, srv, func(ctx context.Context) error { _, err := read.Object(ctx, names[0].String()); return err }, ready
 }
 
 func TestReadyWaitsForPackIndexesAndFirstReadFetchesNone(t *testing.T) {
@@ -83,11 +88,7 @@ func TestReadyWaitsForPackIndexesAndFirstReadFetchesNone(t *testing.T) {
 		t.Fatalf("ready after warm-up = %d, want 200", got)
 	}
 	before := b.reads.Load()
-	ref, err := read.Ref(t.Context(), "main")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := read.Object(t.Context(), ref.Commit); err != nil {
+	if err := read(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if got := b.reads.Load(); got != before {

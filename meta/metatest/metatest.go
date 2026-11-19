@@ -630,4 +630,7 @@ func packs(t *testing.T, s meta.Store) {
 	if none, err := s.Packs(ctx, "gh:acme/none"); err != nil || len(none) != 0 {
 		t.Errorf("packs of an unknown repo = %+v, %v", none, err)
 	}
+	if repos, err := s.PackRepos(ctx); err != nil || len(repos) != 2 || repos[0] != "gh:acme/other" || repos[1] != repoText {
+		t.Errorf("pack repos = %v, %v, want each repo of a pack once", repos, err)
+	}
 }

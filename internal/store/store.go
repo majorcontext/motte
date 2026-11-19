@@ -98,6 +98,7 @@ type Service struct {
 	open      map[string]*openPack
 	order     []string
 	openBytes int
+	evicted   int
 }
 
 // Reserve takes bytes of MemoryBudget, at most the whole budget, and waits while the budget is spent. The caller
@@ -387,6 +388,7 @@ func (s *Service) evict() {
 	old := s.open[s.order[0]]
 	s.openBytes -= old.charged
 	old.cached = false
+	s.evicted++
 	delete(s.open, s.order[0])
 	s.order = s.order[1:]
 }
@@ -426,18 +428,19 @@ func (s *Service) openPack(ctx context.Context, st bucket.Store, prefix string, 
 }
 
 // Warm opens the pack indexes of repos, newest pack first, with at most parallel reads at a time. It stops opening
-// when the open packs fill the cache, because an index that it opens then only evicts another. It returns the first
+// when the cache first evicts a pack, because an index that it opens then only evicts another. It returns the first
 // error.
 func (s *Service) Warm(ctx context.Context, repos []Repo, parallel int) error {
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(parallel)
+	start := s.evictions()
 	for _, repo := range repos {
 		v, err := s.view(ctx, repo)
 		if err != nil {
 			_ = g.Wait()
 			return err
 		}
-		for i := len(v.refs) - 1; i >= 0 && ctx.Err() == nil && !s.full(); i-- {
+		for i := len(v.refs) - 1; i >= 0 && ctx.Err() == nil && s.evictions() == start; i-- {
 			ref := v.refs[i]
 			g.Go(func() error { _, err := s.openPack(ctx, v.st, v.prefix, ref); return err })
 		}
@@ -445,10 +448,10 @@ func (s *Service) Warm(ctx context.Context, repos []Repo, parallel int) error {
 	return g.Wait()
 }
 
-func (s *Service) full() bool {
+func (s *Service) evictions() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.openBytes >= maxOpenBytes
+	return s.evicted
 }
 
 // view is the packs of one repo as of one request.

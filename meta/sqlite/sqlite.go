@@ -335,6 +335,26 @@ func (s *Store) Packs(ctx context.Context, repo string) ([]meta.Pack, error) {
 	return out, nil
 }
 
+func (s *Store) PackRepos(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT repo FROM packs ORDER BY repo`)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: list pack repos: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var r string
+		if err := rows.Scan(&r); err != nil {
+			return nil, fmt.Errorf("sqlite: list pack repos: %w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sqlite: list pack repos: %w", err)
+	}
+	return out, nil
+}
+
 func (s *Store) Ref(ctx context.Context, repo, name string) (meta.Ref, error) {
 	r := meta.Ref{Name: name}
 	err := s.db.QueryRowContext(ctx, `SELECT commit_sha, generation FROM refs WHERE repo = ? AND name = ?`, repo, name).Scan(&r.Commit, &r.Generation)

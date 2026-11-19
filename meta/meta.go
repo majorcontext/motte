@@ -235,6 +235,8 @@ type Store interface {
 	AddPack(ctx context.Context, repo, packID string, bytes int64) error
 	// Packs lists the packs of a repo, oldest first, ties by id.
 	Packs(ctx context.Context, repo string) ([]Pack, error)
+	// PackRepos lists the text of every repo that holds a pack, in byte order.
+	PackRepos(ctx context.Context) ([]string, error)
 }
 
 // Fence is the state of a workspace row that every fenced write checks. A
