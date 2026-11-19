@@ -264,7 +264,7 @@ func (s *Store) Packs(ctx context.Context, repo string) ([]meta.Pack, error) {
 }
 
 func (s *Store) PackRepos(ctx context.Context) ([]string, error) {
-	rows, err := s.Pool.Query(ctx, `SELECT DISTINCT repo FROM packs ORDER BY repo COLLATE "C"`)
+	rows, err := s.Pool.Query(ctx, `SELECT repo FROM packs GROUP BY repo ORDER BY repo COLLATE "C"`)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list pack repos: %w", err)
 	}
