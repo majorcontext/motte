@@ -40,7 +40,7 @@ func (s *Server) registerGit(mux *http.ServeMux) {
 	s.register(mux, "POST /git/{path...}", s.gitService, scopes, s.gitAuthenticate, gitChallenge)
 }
 
-// gitAuthenticate tries the grant of the request, then the Access identity when the server has one.
+// gitAuthenticate tries the grant of the request, then a person: the identity of the server, then a per-user token.
 func (s *Server) gitAuthenticate(r *http.Request) (grant.Claims, error) {
 	repo, _, err := gitRoute(r.PathValue("path"))
 	text := ""
@@ -50,8 +50,8 @@ func (s *Server) gitAuthenticate(r *http.Request) (grant.Claims, error) {
 	if c, err := s.bearerGit(r); err == nil {
 		return c, nil
 	}
-	if s.access != nil && text != "" {
-		if c, err := s.access.Authenticate(r, text); err == nil {
+	if text != "" {
+		if c, err := s.gitHuman.Authenticate(r, text); err == nil {
 			return c, nil
 		}
 	}

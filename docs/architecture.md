@@ -51,10 +51,14 @@ The store plane serves the node daemon and the jj backend. The control plane ser
 | `MOTTE_S3_REGION` | `s3` only. Region of the bucket. Default: the region of the AWS SDK default chain. Use `auto` for R2. |
 | `MOTTE_S3_PATH_STYLE` | Optional, `s3` only. `true` addresses the bucket in the URL path, not the host name. Default `false`. MinIO needs `true`. |
 | `MOTTE_TRUSTED_KEYS` | JSON list of `{"kid","key","scopes"}`. `key` is the standard base64 of an Ed25519 public key. `scopes` holds only `node`, `read`, `write`, `import`, `operator` and `merge`. The service refuses to start on any other scope text. |
-| `MOTTE_ACCESS_TEAM_DOMAIN` | Optional. Host name of a Cloudflare Access team. Turns on Access identities on the git routes (see Access identities). Off by default. |
-| `MOTTE_ACCESS_AUD` | The AUD tag of the Access application. Required with the team domain. |
-| `MOTTE_ACCESS_RULES` | JSON list of `{"principals","repos","scope"}`. A principal is an email or `@domain`. `repos` holds repository texts such as `native:repo_X`. `scope` is `read` or `write`, or `admin` with no `repos` (see Access identities). Required with the team domain. The service refuses to start on any other scope. |
-| `MOTTE_ACCESS_KEYS_URL` | Optional. Address of the key set. Default `https://<team domain>/cdn-cgi/access/certs`. |
+| `MOTTE_OIDC_ISSUER` | Optional. The exact `iss` claim of an OIDC issuer. Turns on OIDC identities on the git routes (see Human identities). Off by default. |
+| `MOTTE_OIDC_AUDIENCE` | The `aud` claim. Required with the issuer. |
+| `MOTTE_OIDC_RULES` | JSON list of `{"principals","repos","scope"}`. A principal is a claim value (an email by default) or `@domain`. `repos` holds repository texts such as `native:repo_X`. `scope` is `read` or `write`, or `admin` with no `repos`. Required with the issuer. The service refuses to start on any other scope. |
+| `MOTTE_OIDC_KEYS_URL` | Optional. Address of the key set. Default: the `jwks_uri` of `<issuer>/.well-known/openid-configuration`. |
+| `MOTTE_OIDC_HEADER` | Optional. Header that carries the JWT. Default `Authorization` (a Bearer token, or the password of Basic). Any other header carries the bare JWT. |
+| `MOTTE_OIDC_CLAIM` | Optional. Claim that the rules match. Default `email`. |
+| `MOTTE_OIDC_ALGS` | Optional. Comma-separated algorithms from `RS256`, `RS384`, `RS512`, `ES256`, `ES384`. Default `RS256`. |
+| `MOTTE_TLS_CERT`, `MOTTE_TLS_KEY` | Optional. PEM files. When both are set the service serves TLS itself. When neither is set it serves plain HTTP for a reverse proxy, a tunnel or a local run. One without the other is an error. |
 | `MOTTE_EVENT_RETENTION` | Optional. How long a ref event is kept, as a Go duration. Default `336h`. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Optional. Enables OTLP trace export. |
 
@@ -67,6 +71,8 @@ The service runs with the `sqlite` metadata backend and the `fs` bucket and no o
 ```
 openssl genpkey -algorithm ed25519 -out motte.key && MOTTE_META=sqlite MOTTE_SQLITE_PATH=motte.db MOTTE_BUCKET_KIND=fs MOTTE_BUCKET=objects MOTTE_TRUSTED_KEYS="[{\"kid\":\"local\",\"key\":\"$(openssl pkey -in motte.key -pubout -outform DER | tail -c 32 | base64)\",\"scopes\":[\"node\",\"read\",\"import\",\"operator\"]}]" go run ./cmd/motte
 ```
+
+The local loop of a person needs no identity provider, no tunnel and no workspace box. `motte operator-grant --key motte.key --kid local` prints an operator grant for `MOTTE_TOKEN`. With it, issue a token, and use plain `git` with it as the password; `ward check` runs the checks of the repository and `ward land` lands a branch (see README "Developing"). The service serves TLS itself when `MOTTE_TLS_CERT` and `MOTTE_TLS_KEY` are set.
 
 A Go test starts the same composition with `testserver.StartLocal`, which needs no service and never skips. `testserver.Start` runs on PostgreSQL and skips without `MOTTE_TEST_DATABASE_URL`. One process uses one SQLite file and one `fs` directory.
 
@@ -126,7 +132,7 @@ Ordinary `git` clones, fetches and pushes a repository over HTTPS. The routes ne
 
 - Repository: the URL names the repository as `<prefix>/<path>` where the grant names `<prefix>:<path>`, for example `/git/native/repo_X.git` for `native:repo_X`. The path may hold `/`. The part up to the last `.git/` is the repository. The repository of the URL must equal the `repo` claim of the grant, or the answer is 403 `vcs_repo_forbidden`. A repository that does not exist answers 404 `vcs_not_found`, so a push never creates one: the control plane creates repositories. A repository exists when it has a `repos` row (prefix `native`), or has at least one ref (any other prefix).
 - Grant: the client sends HTTP Basic with any user name and a grant as the password, or `Authorization: Bearer <grant>`. A missing or refused grant answers 401 with `WWW-Authenticate: Basic realm="motte"`, so git asks for credentials or runs its credential helper. A grant of another scope for the route (a `read` grant for receive-pack) answers 403.
-- Access identity: when `MOTTE_ACCESS_TEAM_DOMAIN` is set, a request with no accepted grant is also tried with the header `Cf-Access-Jwt-Assertion` (see Access identities). A grant is always tried first.
+- Human identity: a request with no accepted grant is also tried as an OIDC JWT when `MOTTE_OIDC_ISSUER` is set, and as a per-user token (see Human identities). A grant is always tried first.
 - Protocols: fetch speaks protocol v2 only (`Git-Protocol: version=2`, git 2.26 and later). The advertisement lists `ls-refs`, `fetch=filter` and `object-format=sha1`. A request for upload-pack without v2 answers 400. Push speaks v0 and v1 receive-pack with the capabilities `report-status`, `delete-refs`, `ofs-delta` and `object-format=sha1`. The dumb protocol, `shallow` and `deepen` requests, `want-ref`, `packfile-uris`, `atomic`, `push-options`, signed pushes and `side-band` on receive-pack are not offered. A filter other than `blob:none` is refused with 400.
 - Ref names: a stored ref named `main` is the git ref `refs/heads/main`. A stored name that starts with `refs/` other than `refs/heads/` has the same git name. HEAD names `refs/heads/main` when it exists. A push may write `refs/heads/<name>` and any other `refs/...` name that is valid, and `<name>` must not start with `refs/`. A stored ref named under `refs/heads/` has no git name and is not listed.
 - Fetch: a `want` may name any object of the repository. The service lists the commits that the wants reach and the `have` commits that it holds do not reach, walking by commit time. It adds the trees and blobs that those commits reach and that the trees of the edge commits (the held parents) do not hold. With `filter=blob:none` it adds no blob that a tree names, and it sends a blob that a `want` names. It never sends a delta: the pack holds whole objects, so `thin-pack`, `ofs-delta`, `include-tag` and `no-progress` have no effect. A client fetches an annotated tag that it needs with a second `want`. It answers `ready` as soon as one `have` is common, and the pack then leaves out what that commit holds. It streams the pack through side-band 1 with one object in memory at a time, and reads each pack through the cache of ranged reads.
@@ -147,6 +153,7 @@ Ordinary `git` clones, fetches and pushes a repository over HTTPS. The routes ne
 | `DELETE /v1/workspaces/{id}` | `operator` |
 | `PUT /v1/repos/{repo}/protected-refs` with `{patterns}` replaces the list and answers 200 with `{patterns}`. `GET` of the same path returns it. `{repo}` is the repository text, with `/` as `%2F`. | `operator` |
 | `POST /v1/repos/{repo}/lands` with `{id, ref, base, head, expect_tree}` lands the commits `base..head` on `ref` and answers 200 with `{id, ref, generation, tip, fast_forward, commits}`. See Land. `{repo}` is the repository text, with `/` as `%2F`. | `merge`, `write` |
+| `POST /v1/tokens` with `{principal, scope, repos, ttl_seconds}` answers 201 with `{token, user_token}`. `GET /v1/tokens` lists the records, newest first. `DELETE /v1/tokens/{id}` revokes and answers 204. See Human identities. | `operator`, a signed grant only |
 | `GET /v1/events?cursor=<cursor>&limit=<n>` returns `{events, cursor}` | `operator` |
 | `POST /v1/subscriptions` with `{url, secret, repo}` answers 201 with the subscription | `operator` |
 | `GET /v1/subscriptions` lists the subscriptions, oldest first | `operator` |
@@ -293,6 +300,7 @@ Every method that writes is one atomic unit. The unit is one conditional stateme
 - Failed condition: a write whose condition fails changes nothing. The backend then reads the workspace row, and the ref or op-heads row when the method names it, and picks the error. `meta.Fence` holds the precedence, so every backend gives the same one: `ErrClaimLost` wins over a generation conflict. These reads are not part of the unit. The error answers for a state that is at least as new as the write attempt.
 - Generation: the generation of a ref is positive and unique in the store. No ref ever takes a generation that was taken before, including a ref that is deleted and created again. The backend takes it from one counter in the unit of the write. A generation is not ordered across refs, and a failed write can skip one.
 - Order: names, repositories, pack ids and workspace ids are opaque text. A list sorts them by byte value of their UTF-8 text.
+- User tokens: `meta.UserTokenStore` keeps the SHA-256 hex of a token, never the token. `CreateUserToken` answers `ErrExists` for a repeated ID or hash. `RevokeUserToken` keeps the first revocation time and answers `ErrNotFound` for an unknown ID. `UserTokens` lists newest first, ties by ID descending.
 - Time: `Repo.CreatedAt` and the creation time of a pack come from the clock of the backend, with a resolution of 1 millisecond or finer.
 - Racers: of N concurrent calls that need the same free condition, exactly one wins and the others get the error of a lost condition.
 - Events: every write that creates, moves or deletes a ref appends one event in the same unit as the ref write, and a write that changes nothing appends none. The event holds the repo, the ref, the old and new commit (empty when absent), the generation (that of the deleted ref for a delete), the writer kind and the time. The kind is `node` for `SwapRef` and `DeleteRef`, `merge` for `MergeRef` and `MergeDeleteRef`, the `kind` argument for `UpdateRef`, and `operator` for the `main` that `CreateRepo` writes.
@@ -381,7 +389,7 @@ Every external provider sits behind an interface that its consumer owns. A provi
 |---|---|---|---|---|
 | meta-store | `meta.Store` | `meta/metatest.Run` | `meta/postgres`, `meta/sqlite` | |
 | bucket-store | `bucket.Store` | `bucket/buckettest.Run` | `bucket/gcs`, `bucket/fs`, `bucket/s3` | |
-| identity | `internal/identity.Authenticator` | `internal/identity/identitytest.Run` | `internal/identity/token`, `internal/identity/cfaccess` | |
+| identity | `internal/identity.Authenticator` | `internal/identity/identitytest.Run` | `internal/identity/token`, `internal/identity/oidc`, `internal/identity/usertoken` | |
 | release-publisher | `internal/release/publish.Publisher` | `internal/release/publish/publishtest.Run` | `internal/release/publish/dir`, `internal/release/publish/github` | |
 
 - A cell that names Go code is `dir.Identifier`: the directory is relative to the module root.
@@ -454,15 +462,25 @@ The swaps are not atomic across refs: the first failure stops the push, and the 
 
 `jj motte fetch [-b <bookmark>...]` probes the claim, lists the refs with `refs`, and takes the named bookmarks, or the default branch and the first 99 others in name order. It refuses a named bookmark with no ref and no `NAME@origin`. A bookmark with no ref but with a `NAME@origin` was deleted: the command forgets `NAME@origin`, keeps the local bookmark and prints `NAME: deleted on origin`. For each other bookmark it reads the commit with `get` and refuses a missing commit or an object that is not a commit. It walks the commits that the jj index lacks, at most 1,000 for each bookmark, with the shallow-root rules of the git fetch. One jj transaction adds the roots to the `shallow` file, makes the tips heads and sets `NAME@origin` with the local-bookmark rules of the git fetch.
 
-### Access identities
+### Human identities
 
-A deployment behind Cloudflare Access can let a person use `git` on the git routes with no grant. Access signs a JWT that names the user and adds it to the request in the header `Cf-Access-Jwt-Assertion`. The service verifies it; it trusts no header that is not a valid JWT.
+A person uses `git` on the git routes with no grant in one of two ways, and neither needs a vendor. Each is a `identity.Authenticator`, tried after the grant. The same rules apply to both: a person never holds `merge`, `operator`, `import` or `node`, never mints a grant and never reaches a route except git and repository creation. A `write` person pushes as a `write` grant does, so a protected ref refuses it (see Protected refs). A deployment that gives `write` protects the default branch of each repository, so that only the control plane lands it with a `merge` grant.
 
-- The JWT must be RS256, signed by a key of the key set of the team (cached for 1 hour; a `kid` that the cache does not hold causes one new fetch a minute), with `iss` equal to `https://<team domain>`, `aud` holding the configured AUD tag, `now < exp`, `nbf <= now` and an `email` claim. Any failure answers 401 like a refused grant.
-- The rules (`MOTTE_ACCESS_RULES`) map the email to a scope on the repository of the URL. A rule gives `read` or `write`, never `merge`, `operator`, `import` or `node`. When several rules match, `write` wins. No matching rule answers 401.
-- The result is the claims of a grant with the scope, the repository of the URL and the email as `subject`, but it is never a signed grant and it works only on the git routes: every other route reads a grant only. An Access identity cannot mint a grant.
-- A rule with the scope `admin` and no `repos` lets its principals create a repository: `POST /v1/repos` accepts the identity as an `operator` grant. It is the only route besides git that accepts an Access identity. `motte repo create [--owner OWNER] NAME` calls that route with `MOTTE_URL` and an operator grant in `MOTTE_TOKEN`, or the output of `cloudflared access token` in `MOTTE_ACCESS_TOKEN`, and prints the path. It needs no other system.
-- A `write` identity pushes as a `write` grant does, so a protected ref refuses it (see Protected refs). A deployment that turns on `write` rules protects the default branch of each repository, so that only the control plane lands it with a `merge` grant.
+OIDC identity (`internal/identity/oidc`). The service verifies a JWT from the issuer that `MOTTE_OIDC_ISSUER` names. It trusts no header that is not a valid JWT.
+
+- The JWT must use an algorithm of `MOTTE_OIDC_ALGS`, be signed by a key of the key set (cached for 1 hour; a `kid` that the cache does not hold causes one new fetch a minute; a cache that is 1 hour past its last good fetch is refused), with `iss` equal to the issuer, `aud` holding the audience, `now < exp`, `nbf <= now` and a non-empty value in the claim `MOTTE_OIDC_CLAIM`. Any failure answers 401 like a refused grant.
+- The rules (`MOTTE_OIDC_RULES`) map the claim value to a scope on the repository of the URL. When several rules match, `write` wins. No matching rule answers 401.
+- The result is the claims of a grant with the scope, the repository of the URL and the claim value as `subject`. It is never a signed grant.
+- Cloudflare Access is one configuration, not a separate implementation: `MOTTE_OIDC_HEADER=Cf-Access-Jwt-Assertion`, `MOTTE_OIDC_ISSUER=https://<team>.cloudflareaccess.com`, `MOTTE_OIDC_AUDIENCE=<AUD tag>` and `MOTTE_OIDC_KEYS_URL=https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`.
+
+Per-user tokens (`internal/identity/usertoken`). They need no issuer. An administrator with an `operator` grant issues one with `POST /v1/tokens`, or `motte token create --principal P --scope S [--repo R]... [--ttl D]`. A person cannot issue one, whatever the identity.
+
+- A token is `mtu_` and 43 characters of base64url from 32 random bytes. The response shows it once. The service keeps the SHA-256 hex of it with the principal, the scope, the repositories, the expiry and the revocation time (`user_tokens`). The record has an ID `ut_<16 hex>`.
+- The scope is `read` or `write` with at least one repository, or `admin` with none. A token with `admin` creates a repository (`POST /v1/repos` accepts it as an `operator` grant) and nothing else. A token answers only for the repositories that it lists.
+- A token is accepted as `Authorization: Bearer <token>` or as the password of HTTP Basic, so `git clone https://user:<token>@host/git/<path>.git` works. A token that is unknown, revoked or past its expiry answers 401.
+- `motte token list` and `motte token revoke ID` call `GET /v1/tokens` and `DELETE /v1/tokens/{id}`.
+
+The command `motte login` runs the OAuth device authorization flow (RFC 8628) against the issuer of `MOTTE_OIDC_ISSUER`, with the client of `MOTTE_OIDC_CLIENT_ID`. It reads the endpoints from the discovery document, polls the token endpoint with `slow_down` and `authorization_pending` handled, and saves the ID token (else the access token) in `<user config dir>/motte/login.json` with mode 0600. `motte login --print` prints it for `git -c http.extraHeader="Authorization: Bearer $(motte login --print)"`. `motte repo create` and `motte token` use it when `MOTTE_TOKEN` is unset. `motte repo create [--owner OWNER] NAME` prints the path of the new repository.
 
 ## Grant
 

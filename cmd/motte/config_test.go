@@ -31,9 +31,10 @@ func TestLoadConfigChoosesBackendsAndRefusesUnknownOnes(t *testing.T) {
 		"s3 variables need s3": {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "gcs", "MOTTE_BUCKET": "d", "MOTTE_S3_REGION": "auto"}, false},
 		"bad path style":       {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "s3", "MOTTE_BUCKET": "d", "MOTTE_S3_PATH_STYLE": "yes"}, false},
 		"unknown bucket kind":  {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "r2", "MOTTE_BUCKET": "d"}, false},
-		"access on":            {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_ACCESS_TEAM_DOMAIN": "t.example", "MOTTE_ACCESS_AUD": "a", "MOTTE_ACCESS_RULES": `[{"principals":["a@b"],"repos":["native:r"],"scope":"write"}]`}, true},
-		"access never merges":  {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_ACCESS_TEAM_DOMAIN": "t.example", "MOTTE_ACCESS_AUD": "a", "MOTTE_ACCESS_RULES": `[{"principals":["a@b"],"repos":["native:r"],"scope":"merge"}]`}, false},
-		"access needs a team":  {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_ACCESS_AUD": "a"}, false},
+		"oidc on":              {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_OIDC_ISSUER": "https://t.example", "MOTTE_OIDC_AUDIENCE": "a", "MOTTE_OIDC_RULES": `[{"principals":["a@b"],"repos":["native:r"],"scope":"write"}]`}, true},
+		"oidc never merges":    {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_OIDC_ISSUER": "https://t.example", "MOTTE_OIDC_AUDIENCE": "a", "MOTTE_OIDC_RULES": `[{"principals":["a@b"],"repos":["native:r"],"scope":"merge"}]`}, false},
+		"oidc needs an issuer": {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_OIDC_AUDIENCE": "a"}, false},
+		"tls needs both":       {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_TLS_CERT": "c.pem"}, false},
 		"postgres needs a DSN": {map[string]string{"MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d"}, false},
 	} {
 		c.env["MOTTE_TRUSTED_KEYS"] = keys

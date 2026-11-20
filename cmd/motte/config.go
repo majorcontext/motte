@@ -7,11 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/majorcontext/motte/bucket/s3"
 	"github.com/majorcontext/motte/grant"
-	"github.com/majorcontext/motte/internal/identity/cfaccess"
+	"github.com/majorcontext/motte/internal/identity"
+	"github.com/majorcontext/motte/internal/identity/oidc"
 )
 
 func loadS3(getenv func(string) string, c *config) error {
@@ -41,7 +43,9 @@ type config struct {
 	keys        []grant.Key
 	otlp        bool
 	retention   time.Duration
-	access      *cfaccess.Config
+	oidc        *oidc.Config
+	tlsCert     string
+	tlsKey      string
 }
 
 // loadConfig reads the configuration from the environment.
@@ -56,10 +60,15 @@ type config struct {
 //	MOTTE_S3_REGION     s3 only: bucket region, default from the AWS SDK chain
 //	MOTTE_S3_PATH_STYLE optional, s3 only: true or false, default false
 //	MOTTE_TRUSTED_KEYS  JSON list of {"kid","key","scopes"}; key is the base64 Ed25519 public key
-//	MOTTE_ACCESS_TEAM_DOMAIN  optional; enables Access identities on the git routes: host name of the Access team
-//	MOTTE_ACCESS_AUD          the AUD tag of the Access application; required with the team domain
-//	MOTTE_ACCESS_RULES        JSON list of {"principals","repos","scope"}; scope is read or write; required with the team domain
-//	MOTTE_ACCESS_KEYS_URL     optional; the address of the key set, default from the team domain
+//	MOTTE_OIDC_ISSUER   optional; enables OIDC identities on the git routes: the exact iss claim
+//	MOTTE_OIDC_AUDIENCE the aud claim; required with the issuer
+//	MOTTE_OIDC_RULES    JSON list of {"principals","repos","scope"}; scope is read or write, or admin with no repos; required with the issuer
+//	MOTTE_OIDC_KEYS_URL optional; the address of the key set, default the jwks_uri of the discovery document of the issuer
+//	MOTTE_OIDC_HEADER   optional; the header that carries the JWT, default Authorization
+//	MOTTE_OIDC_CLAIM    optional; the claim that the rules match, default email
+//	MOTTE_OIDC_ALGS     optional; comma-separated algorithms, default RS256
+//	MOTTE_TLS_CERT      optional; PEM certificate chain; serves TLS with MOTTE_TLS_KEY
+//	MOTTE_TLS_KEY       optional; PEM private key
 //	MOTTE_EVENT_RETENTION  how long a ref event is kept, a Go duration, default 336h
 //	OTEL_EXPORTER_OTLP_ENDPOINT  optional; enables trace export
 func loadConfig(getenv func(string) string) (config, error) {
@@ -106,33 +115,37 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, err
 	}
 	c.keys = keys
-	if c.access, err = loadAccess(getenv); err != nil {
+	if c.oidc, err = loadOIDC(getenv); err != nil {
 		return config{}, err
+	}
+	c.tlsCert, c.tlsKey = getenv("MOTTE_TLS_CERT"), getenv("MOTTE_TLS_KEY")
+	if (c.tlsCert == "") != (c.tlsKey == "") {
+		return config{}, errors.New("MOTTE_TLS_CERT and MOTTE_TLS_KEY go together")
 	}
 	return c, nil
 }
 
-func loadAccess(getenv func(string) string) (*cfaccess.Config, error) {
-	team := getenv("MOTTE_ACCESS_TEAM_DOMAIN")
-	if team == "" {
-		if getenv("MOTTE_ACCESS_AUD") != "" || getenv("MOTTE_ACCESS_RULES") != "" || getenv("MOTTE_ACCESS_KEYS_URL") != "" {
-			return nil, errors.New("MOTTE_ACCESS_* variables need MOTTE_ACCESS_TEAM_DOMAIN")
+func loadOIDC(getenv func(string) string) (*oidc.Config, error) {
+	issuer := getenv("MOTTE_OIDC_ISSUER")
+	if issuer == "" {
+		for _, k := range []string{"AUDIENCE", "RULES", "KEYS_URL", "HEADER", "CLAIM", "ALGS"} {
+			if getenv("MOTTE_OIDC_"+k) != "" {
+				return nil, errors.New("MOTTE_OIDC_* variables need MOTTE_OIDC_ISSUER")
+			}
 		}
 		return nil, nil
 	}
-	var raw []struct {
-		Principals []string    `json:"principals"`
-		Repos      []string    `json:"repos"`
-		Scope      grant.Scope `json:"scope"`
+	cfg := &oidc.Config{Issuer: issuer, Audience: getenv("MOTTE_OIDC_AUDIENCE"), KeysURL: getenv("MOTTE_OIDC_KEYS_URL"),
+		Header: getenv("MOTTE_OIDC_HEADER"), Claim: getenv("MOTTE_OIDC_CLAIM")}
+	if algs := getenv("MOTTE_OIDC_ALGS"); algs != "" {
+		cfg.Algs = strings.Split(algs, ",")
 	}
-	if err := json.Unmarshal([]byte(getenv("MOTTE_ACCESS_RULES")), &raw); err != nil || len(raw) == 0 {
-		return nil, errors.New("MOTTE_ACCESS_RULES must be a non-empty JSON list")
+	var rules []identity.Rule
+	if err := json.Unmarshal([]byte(getenv("MOTTE_OIDC_RULES")), &rules); err != nil || len(rules) == 0 {
+		return nil, errors.New("MOTTE_OIDC_RULES must be a non-empty JSON list")
 	}
-	cfg := &cfaccess.Config{TeamDomain: team, Audience: getenv("MOTTE_ACCESS_AUD"), KeysURL: getenv("MOTTE_ACCESS_KEYS_URL")}
-	for _, r := range raw {
-		cfg.Rules = append(cfg.Rules, cfaccess.Rule{Principals: r.Principals, Repos: r.Repos, Scope: r.Scope})
-	}
-	if _, err := cfaccess.New(*cfg); err != nil {
+	cfg.Rules = rules
+	if _, err := oidc.New(*cfg); err != nil {
 		return nil, err
 	}
 	return cfg, nil

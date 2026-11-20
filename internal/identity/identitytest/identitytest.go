@@ -19,6 +19,9 @@ type Fixture struct {
 	Expired func(repo string) *http.Request
 	// Forged carries a credential that gives write on repo and is signed by a key that the Authenticator does not trust.
 	Forged func(repo string) *http.Request
+	// Revoked carries a credential that gave write on repo and was revoked. It is nil for a credential that
+	// cannot be revoked.
+	Revoked func(repo string) *http.Request
 }
 
 const repoA, repoB = "native:repo_A", "native:repo_B"
@@ -50,6 +53,13 @@ func Run(t *testing.T, newFixture func(t *testing.T) Fixture) {
 	t.Run("refuses an expired credential", func(t *testing.T) {
 		f := newFixture(t)
 		refuse(t, f, f.Expired(repoA), repoA)
+	})
+	t.Run("refuses a revoked credential", func(t *testing.T) {
+		f := newFixture(t)
+		if f.Revoked == nil {
+			t.Skip("the credential cannot be revoked")
+		}
+		refuse(t, f, f.Revoked(repoA), repoA)
 	})
 	t.Run("refuses a forged credential", func(t *testing.T) {
 		f := newFixture(t)

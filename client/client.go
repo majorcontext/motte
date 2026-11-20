@@ -303,6 +303,25 @@ func (c *Client) Repo(ctx context.Context, path string) (api.Repo, error) {
 	return out, err
 }
 
+// CreateUserToken issues a per-user token. The text of the token is in the response and nowhere else.
+func (c *Client) CreateUserToken(ctx context.Context, req api.CreateUserTokenRequest) (api.CreateUserTokenResponse, error) {
+	var out api.CreateUserTokenResponse
+	err := c.do(ctx, http.MethodPost, "/v1/tokens", req, &out)
+	return out, err
+}
+
+// UserTokens lists the per-user tokens, newest first.
+func (c *Client) UserTokens(ctx context.Context) ([]api.UserToken, error) {
+	var out api.UserTokens
+	err := c.do(ctx, http.MethodGet, "/v1/tokens", nil, &out)
+	return out.Tokens, err
+}
+
+// RevokeUserToken revokes the token with id.
+func (c *Client) RevokeUserToken(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/tokens"+segs(id), nil, nil)
+}
+
 // Claim binds or raises the epoch of a workspace and returns its stored state.
 func (c *Client) Claim(ctx context.Context, workspace string, req api.ClaimRequest) (api.ClaimResponse, error) {
 	var out api.ClaimResponse

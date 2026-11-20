@@ -58,7 +58,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 			c.fn(t, newStore(t))
 		})
 	}
-	for _, c := range append(policyCases, landCases...) {
+	for _, c := range append(append(policyCases, landCases...), userTokenCases...) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			c.fn(t, newStore(t))

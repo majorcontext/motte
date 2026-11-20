@@ -18,6 +18,7 @@ func (s *Server) registerControlPlane(mux *http.ServeMux) {
 	s.handle(mux, "PUT /v1/workspaces/{id}/claim", s.claim, grant.ScopeOperator)
 	s.handle(mux, "POST /v1/workspaces/{id}/flush", s.flush, grant.ScopeOperator)
 	s.handle(mux, "DELETE /v1/workspaces/{id}", s.deleteWorkspace, grant.ScopeOperator)
+	s.registerUserTokens(mux)
 	s.registerRefPolicy(mux)
 	s.registerLands(mux)
 	s.registerEvents(mux)
@@ -125,10 +126,10 @@ func (s *Server) deleteWorkspace(w http.ResponseWriter, r *http.Request, _ call)
 	return nil
 }
 
-// adminAuthenticate tries the grant of the request, then the Access identity of an administrator.
+// adminAuthenticate tries the grant of the request, then a person who holds the scope admin.
 func (s *Server) adminAuthenticate(r *http.Request) (grant.Claims, error) {
-	if c, err := s.bearer(r); err == nil || s.access == nil {
-		return c, err
+	if c, err := s.bearer(r); err == nil {
+		return c, nil
 	}
-	return s.access.Authenticate(r, "")
+	return s.adminHuman.Authenticate(r, "")
 }

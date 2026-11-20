@@ -20,6 +20,7 @@ import (
 	"github.com/majorcontext/motte/internal/clock"
 	"github.com/majorcontext/motte/internal/identity"
 	"github.com/majorcontext/motte/internal/identity/token"
+	"github.com/majorcontext/motte/internal/identity/usertoken"
 	"github.com/majorcontext/motte/internal/store"
 	"github.com/majorcontext/motte/meta"
 )
@@ -30,9 +31,10 @@ type Config struct {
 	Meta     meta.Store
 	Bucket   bucket.Store
 	Verifier *grant.Verifier
-	// Access, when set, also authenticates the git routes and the creation of a repository. A grant is tried first.
-	Access identity.Authenticator
-	Logger *slog.Logger
+	// Identity, when set, authenticates a person on the git routes and the creation of a repository. A grant is tried
+	// first, then Identity, then the per-user tokens of Meta.
+	Identity identity.Authenticator
+	Logger   *slog.Logger
 	// Now is the clock of grant expiry and the root commit. It defaults to time.Now.
 	Now func() time.Time
 	// Events tunes the delivery and the retention of ref events. Zero values take the defaults.
@@ -46,19 +48,20 @@ type Config struct {
 }
 
 type Server struct {
-	index     meta.Store
-	objects   objects
-	bearer    authenticate
-	bearerGit authenticate
-	access    identity.Authenticator
-	logger    *slog.Logger
-	now       func() time.Time
-	events    EventsConfig
-	lands     LandsConfig
-	landing   landing
-	wake      chan struct{}
-	clock     clock.Clock
-	cold      atomic.Bool
+	index      meta.Store
+	objects    objects
+	bearer     authenticate
+	bearerGit  authenticate
+	gitHuman   identity.Authenticator
+	adminHuman identity.Authenticator
+	logger     *slog.Logger
+	now        func() time.Time
+	events     EventsConfig
+	lands      LandsConfig
+	landing    landing
+	wake       chan struct{}
+	clock      clock.Clock
+	cold       atomic.Bool
 
 	requests *prometheus.CounterVec
 	latency  *prometheus.HistogramVec
@@ -78,7 +81,8 @@ func New(cfg Config) *Server {
 	s.bearer = func(r *http.Request) (grant.Claims, error) { return bearerAuth.Authenticate(r, "") }
 	gitAuth := token.Authenticator{Verifier: cfg.Verifier, Now: s.now, Token: gitToken}
 	s.bearerGit = func(r *http.Request) (grant.Claims, error) { return gitAuth.Authenticate(r, "") }
-	s.access = cfg.Access
+	s.gitHuman = identity.Chain(cfg.Identity, usertoken.Authenticator{Store: cfg.Meta, Now: s.now, Token: gitToken})
+	s.adminHuman = identity.Chain(cfg.Identity, usertoken.Authenticator{Store: cfg.Meta, Now: s.now, Token: bearerToken})
 	s.events = cfg.Events.withDefaults()
 	s.lands = cfg.Lands.withDefaults()
 	s.landing = landing{leaders: map[meta.LandKey]*leader{}, waiters: map[landWaiter][]chan landOutcome{}}

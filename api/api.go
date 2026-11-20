@@ -198,6 +198,36 @@ type Repos struct {
 	Repos []Repo `json:"repos"`
 }
 
+// CreateUserTokenRequest is the body of POST /v1/tokens. Scope is read or write with at least one repository text in
+// Repos, or admin with none. TTLSeconds is 0 for a token with no expiry.
+type CreateUserTokenRequest struct {
+	Principal  string   `json:"principal"`
+	Scope      string   `json:"scope"`
+	Repos      []string `json:"repos"`
+	TTLSeconds int64    `json:"ttl_seconds"`
+}
+
+// CreateUserTokenResponse holds the token text. The service keeps only its hash and never shows the text again.
+type CreateUserTokenResponse struct {
+	Token     string    `json:"token"`
+	UserToken UserToken `json:"user_token"`
+}
+
+// UserToken is the record of a per-user token. The times are RFC 3339, empty when unset.
+type UserToken struct {
+	ID        string   `json:"id"`
+	Principal string   `json:"principal"`
+	Scope     string   `json:"scope"`
+	Repos     []string `json:"repos"`
+	CreatedAt string   `json:"created_at"`
+	ExpiresAt string   `json:"expires_at,omitempty"`
+	RevokedAt string   `json:"revoked_at,omitempty"`
+}
+
+type UserTokens struct {
+	Tokens []UserToken `json:"tokens"`
+}
+
 // ClaimRequest is the body of PUT /v1/workspaces/{id}/claim.
 type ClaimRequest struct {
 	Epoch uint64 `json:"epoch"`

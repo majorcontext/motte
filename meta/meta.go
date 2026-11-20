@@ -230,6 +230,7 @@ type Store interface {
 	AdvanceCursor(ctx context.Context, id string, partition int, owner string, cursor int64) error
 
 	LandStore
+	UserTokenStore
 
 	// AddPack records a pack once. A repeat is a no-op.
 	AddPack(ctx context.Context, repo, packID string, bytes int64) error
