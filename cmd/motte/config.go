@@ -11,6 +11,7 @@ import (
 
 	"github.com/majorcontext/motte/bucket/s3"
 	"github.com/majorcontext/motte/grant"
+	"github.com/majorcontext/motte/internal/identity/cfaccess"
 )
 
 func loadS3(getenv func(string) string, c *config) error {
@@ -40,6 +41,7 @@ type config struct {
 	keys        []grant.Key
 	otlp        bool
 	retention   time.Duration
+	access      *cfaccess.Config
 }
 
 // loadConfig reads the configuration from the environment.
@@ -54,6 +56,10 @@ type config struct {
 //	MOTTE_S3_REGION     s3 only: bucket region, default from the AWS SDK chain
 //	MOTTE_S3_PATH_STYLE optional, s3 only: true or false, default false
 //	MOTTE_TRUSTED_KEYS  JSON list of {"kid","key","scopes"}; key is the base64 Ed25519 public key
+//	MOTTE_ACCESS_TEAM_DOMAIN  optional; enables Access identities on the git routes: host name of the Access team
+//	MOTTE_ACCESS_AUD          the AUD tag of the Access application; required with the team domain
+//	MOTTE_ACCESS_RULES        JSON list of {"principals","repos","scope"}; scope is read or write; required with the team domain
+//	MOTTE_ACCESS_KEYS_URL     optional; the address of the key set, default from the team domain
 //	MOTTE_EVENT_RETENTION  how long a ref event is kept, a Go duration, default 336h
 //	OTEL_EXPORTER_OTLP_ENDPOINT  optional; enables trace export
 func loadConfig(getenv func(string) string) (config, error) {
@@ -100,7 +106,36 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, err
 	}
 	c.keys = keys
+	if c.access, err = loadAccess(getenv); err != nil {
+		return config{}, err
+	}
 	return c, nil
+}
+
+func loadAccess(getenv func(string) string) (*cfaccess.Config, error) {
+	team := getenv("MOTTE_ACCESS_TEAM_DOMAIN")
+	if team == "" {
+		if getenv("MOTTE_ACCESS_AUD") != "" || getenv("MOTTE_ACCESS_RULES") != "" || getenv("MOTTE_ACCESS_KEYS_URL") != "" {
+			return nil, errors.New("MOTTE_ACCESS_* variables need MOTTE_ACCESS_TEAM_DOMAIN")
+		}
+		return nil, nil
+	}
+	var raw []struct {
+		Principals []string    `json:"principals"`
+		Repos      []string    `json:"repos"`
+		Scope      grant.Scope `json:"scope"`
+	}
+	if err := json.Unmarshal([]byte(getenv("MOTTE_ACCESS_RULES")), &raw); err != nil || len(raw) == 0 {
+		return nil, errors.New("MOTTE_ACCESS_RULES must be a non-empty JSON list")
+	}
+	cfg := &cfaccess.Config{TeamDomain: team, Audience: getenv("MOTTE_ACCESS_AUD"), KeysURL: getenv("MOTTE_ACCESS_KEYS_URL")}
+	for _, r := range raw {
+		cfg.Rules = append(cfg.Rules, cfaccess.Rule{Principals: r.Principals, Repos: r.Repos, Scope: r.Scope})
+	}
+	if _, err := cfaccess.New(*cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
 func parseKeys(text string) ([]grant.Key, error) {

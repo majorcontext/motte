@@ -18,6 +18,8 @@ import (
 	"github.com/majorcontext/motte/bucket"
 	"github.com/majorcontext/motte/grant"
 	"github.com/majorcontext/motte/internal/clock"
+	"github.com/majorcontext/motte/internal/identity"
+	"github.com/majorcontext/motte/internal/identity/token"
 	"github.com/majorcontext/motte/internal/store"
 	"github.com/majorcontext/motte/meta"
 )
@@ -28,7 +30,9 @@ type Config struct {
 	Meta     meta.Store
 	Bucket   bucket.Store
 	Verifier *grant.Verifier
-	Logger   *slog.Logger
+	// Access, when set, also authenticates the git routes and the creation of a repository. A grant is tried first.
+	Access identity.Authenticator
+	Logger *slog.Logger
 	// Now is the clock of grant expiry and the root commit. It defaults to time.Now.
 	Now func() time.Time
 	// Events tunes the delivery and the retention of ref events. Zero values take the defaults.
@@ -42,17 +46,19 @@ type Config struct {
 }
 
 type Server struct {
-	index    meta.Store
-	objects  objects
-	verifier *grant.Verifier
-	logger   *slog.Logger
-	now      func() time.Time
-	events   EventsConfig
-	lands    LandsConfig
-	landing  landing
-	wake     chan struct{}
-	clock    clock.Clock
-	cold     atomic.Bool
+	index     meta.Store
+	objects   objects
+	bearer    authenticate
+	bearerGit authenticate
+	access    identity.Authenticator
+	logger    *slog.Logger
+	now       func() time.Time
+	events    EventsConfig
+	lands     LandsConfig
+	landing   landing
+	wake      chan struct{}
+	clock     clock.Clock
+	cold      atomic.Bool
 
 	requests *prometheus.CounterVec
 	latency  *prometheus.HistogramVec
@@ -63,11 +69,16 @@ type Server struct {
 
 // New returns a Server over the metadata of cfg.Meta and the object store cfg.Bucket.
 func New(cfg Config) *Server {
-	s := &Server{index: cfg.Meta, objects: store.New(cfg.Bucket, cfg.Meta), verifier: cfg.Verifier, logger: cfg.Logger, now: cfg.Now, readers: make(chan struct{}, uploadReaders), wake: make(chan struct{}, 1), clock: clock.Or(cfg.Clock)}
+	s := &Server{index: cfg.Meta, objects: store.New(cfg.Bucket, cfg.Meta), logger: cfg.Logger, now: cfg.Now, readers: make(chan struct{}, uploadReaders), wake: make(chan struct{}, 1), clock: clock.Or(cfg.Clock)}
 	s.cold.Store(cfg.Warm)
 	if s.now == nil {
 		s.now = time.Now
 	}
+	bearerAuth := token.Authenticator{Verifier: cfg.Verifier, Now: s.now, Token: bearerToken}
+	s.bearer = func(r *http.Request) (grant.Claims, error) { return bearerAuth.Authenticate(r, "") }
+	gitAuth := token.Authenticator{Verifier: cfg.Verifier, Now: s.now, Token: gitToken}
+	s.bearerGit = func(r *http.Request) (grant.Claims, error) { return gitAuth.Authenticate(r, "") }
+	s.access = cfg.Access
 	s.events = cfg.Events.withDefaults()
 	s.lands = cfg.Lands.withDefaults()
 	s.landing = landing{leaders: map[meta.LandKey]*leader{}, waiters: map[landWaiter][]chan landOutcome{}}

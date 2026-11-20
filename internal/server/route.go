@@ -68,12 +68,12 @@ func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 // for a node grant the workspace fence, runs fn and answers a failure. The
 // span and the metrics carry the route, never the grant or a path.
 func (s *Server) handle(mux *http.ServeMux, pattern string, fn handlerFunc, scopes ...grant.Scope) {
-	s.register(mux, pattern, fn, scopes, bearerToken, "")
+	s.register(mux, pattern, fn, scopes, s.bearer, "")
 }
 
-// register is handle with the way that the route reads its grant. A route with a challenge answers a refused grant
-// with a WWW-Authenticate header of it.
-func (s *Server) register(mux *http.ServeMux, pattern string, fn handlerFunc, scopes []grant.Scope, token func(*http.Request) string, challenge string) {
+// register is handle with the way that the route reads its credential. A route with a challenge answers a refused
+// credential with a WWW-Authenticate header of it.
+func (s *Server) register(mux *http.ServeMux, pattern string, fn handlerFunc, scopes []grant.Scope, authn authenticate, challenge string) {
 	op := opName(pattern)
 	mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -105,7 +105,7 @@ func (s *Server) register(mux *http.ServeMux, pattern string, fn handlerFunc, sc
 				}
 			}
 		}()
-		c, err := s.auth(r, token(r), scopes)
+		c, err := s.auth(r, authn, scopes)
 		if err == nil {
 			err = fn(sw, r, c)
 		}
@@ -118,8 +118,11 @@ func (s *Server) register(mux *http.ServeMux, pattern string, fn handlerFunc, sc
 	})
 }
 
-func (s *Server) auth(r *http.Request, token string, scopes []grant.Scope) (call, error) {
-	claims, err := s.verifier.Verify(token, s.now())
+// authenticate turns the credential of a request into claims.
+type authenticate func(r *http.Request) (grant.Claims, error)
+
+func (s *Server) auth(r *http.Request, authn authenticate, scopes []grant.Scope) (call, error) {
+	claims, err := authn(r)
 	if err != nil || !slices.Contains(scopes, claims.Scope) {
 		return call{}, errUnauthorized
 	}

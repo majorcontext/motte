@@ -51,6 +51,10 @@ The store plane serves the node daemon and the jj backend. The control plane ser
 | `MOTTE_S3_REGION` | `s3` only. Region of the bucket. Default: the region of the AWS SDK default chain. Use `auto` for R2. |
 | `MOTTE_S3_PATH_STYLE` | Optional, `s3` only. `true` addresses the bucket in the URL path, not the host name. Default `false`. MinIO needs `true`. |
 | `MOTTE_TRUSTED_KEYS` | JSON list of `{"kid","key","scopes"}`. `key` is the standard base64 of an Ed25519 public key. `scopes` holds only `node`, `read`, `write`, `import`, `operator` and `merge`. The service refuses to start on any other scope text. |
+| `MOTTE_ACCESS_TEAM_DOMAIN` | Optional. Host name of a Cloudflare Access team. Turns on Access identities on the git routes (see Access identities). Off by default. |
+| `MOTTE_ACCESS_AUD` | The AUD tag of the Access application. Required with the team domain. |
+| `MOTTE_ACCESS_RULES` | JSON list of `{"principals","repos","scope"}`. A principal is an email or `@domain`. `repos` holds repository texts such as `native:repo_X`. `scope` is `read` or `write`, or `admin` with no `repos` (see Access identities). Required with the team domain. The service refuses to start on any other scope. |
+| `MOTTE_ACCESS_KEYS_URL` | Optional. Address of the key set. Default `https://<team domain>/cdn-cgi/access/certs`. |
 | `MOTTE_EVENT_RETENTION` | Optional. How long a ref event is kept, as a Go duration. Default `336h`. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Optional. Enables OTLP trace export. |
 
@@ -122,6 +126,7 @@ Ordinary `git` clones, fetches and pushes a repository over HTTPS. The routes ne
 
 - Repository: the URL names the repository as `<prefix>/<path>` where the grant names `<prefix>:<path>`, for example `/git/native/repo_X.git` for `native:repo_X`. The path may hold `/`. The part up to the last `.git/` is the repository. The repository of the URL must equal the `repo` claim of the grant, or the answer is 403 `vcs_repo_forbidden`. A repository that does not exist answers 404 `vcs_not_found`, so a push never creates one: the control plane creates repositories. A repository exists when it has a `repos` row (prefix `native`), or has at least one ref (any other prefix).
 - Grant: the client sends HTTP Basic with any user name and a grant as the password, or `Authorization: Bearer <grant>`. A missing or refused grant answers 401 with `WWW-Authenticate: Basic realm="motte"`, so git asks for credentials or runs its credential helper. A grant of another scope for the route (a `read` grant for receive-pack) answers 403.
+- Access identity: when `MOTTE_ACCESS_TEAM_DOMAIN` is set, a request with no accepted grant is also tried with the header `Cf-Access-Jwt-Assertion` (see Access identities). A grant is always tried first.
 - Protocols: fetch speaks protocol v2 only (`Git-Protocol: version=2`, git 2.26 and later). The advertisement lists `ls-refs`, `fetch=filter` and `object-format=sha1`. A request for upload-pack without v2 answers 400. Push speaks v0 and v1 receive-pack with the capabilities `report-status`, `delete-refs`, `ofs-delta` and `object-format=sha1`. The dumb protocol, `shallow` and `deepen` requests, `want-ref`, `packfile-uris`, `atomic`, `push-options`, signed pushes and `side-band` on receive-pack are not offered. A filter other than `blob:none` is refused with 400.
 - Ref names: a stored ref named `main` is the git ref `refs/heads/main`. A stored name that starts with `refs/` other than `refs/heads/` has the same git name. HEAD names `refs/heads/main` when it exists. A push may write `refs/heads/<name>` and any other `refs/...` name that is valid, and `<name>` must not start with `refs/`. A stored ref named under `refs/heads/` has no git name and is not listed.
 - Fetch: a `want` may name any object of the repository. The service lists the commits that the wants reach and the `have` commits that it holds do not reach, walking by commit time. It adds the trees and blobs that those commits reach and that the trees of the edge commits (the held parents) do not hold. With `filter=blob:none` it adds no blob that a tree names, and it sends a blob that a `want` names. It never sends a delta: the pack holds whole objects, so `thin-pack`, `ofs-delta`, `include-tag` and `no-progress` have no effect. A client fetches an annotated tag that it needs with a second `want`. It answers `ready` as soon as one `have` is common, and the pack then leaves out what that commit holds. It streams the pack through side-band 1 with one object in memory at a time, and reads each pack through the cache of ranged reads.
@@ -376,6 +381,7 @@ Every external provider sits behind an interface that its consumer owns. A provi
 |---|---|---|---|---|
 | meta-store | `meta.Store` | `meta/metatest.Run` | `meta/postgres`, `meta/sqlite` | |
 | bucket-store | `bucket.Store` | `bucket/buckettest.Run` | `bucket/gcs`, `bucket/fs`, `bucket/s3` | |
+| identity | `internal/identity.Authenticator` | `internal/identity/identitytest.Run` | `internal/identity/token`, `internal/identity/cfaccess` | |
 | release-publisher | `internal/release/publish.Publisher` | `internal/release/publish/publishtest.Run` | `internal/release/publish/dir`, `internal/release/publish/github` | |
 
 - A cell that names Go code is `dir.Identifier`: the directory is relative to the module root.
@@ -447,6 +453,16 @@ A native workspace has no git origin: the store is the origin. `init` and `resto
 The swaps are not atomic across refs: the first failure stops the push, and the error names the bookmarks that this call moved. There is no force option: a rewrite is a compare-and-swap against `NAME@origin`. `jj motte push --delete NAME` (repeatable, never with `-b`) deletes refs of a native repository only. It refuses the default branch and the start branch, and a name with no ref and no `NAME@origin`. It ends as `stale` when the stored commit differs from the commit that `NAME@origin` records. It forgets `NAME@origin` without a swap when the ref is already gone, sends `swapref` with `delete` for the rest, and forgets `NAME@origin` of the deleted refs in one transaction. The local bookmark stays.
 
 `jj motte fetch [-b <bookmark>...]` probes the claim, lists the refs with `refs`, and takes the named bookmarks, or the default branch and the first 99 others in name order. It refuses a named bookmark with no ref and no `NAME@origin`. A bookmark with no ref but with a `NAME@origin` was deleted: the command forgets `NAME@origin`, keeps the local bookmark and prints `NAME: deleted on origin`. For each other bookmark it reads the commit with `get` and refuses a missing commit or an object that is not a commit. It walks the commits that the jj index lacks, at most 1,000 for each bookmark, with the shallow-root rules of the git fetch. One jj transaction adds the roots to the `shallow` file, makes the tips heads and sets `NAME@origin` with the local-bookmark rules of the git fetch.
+
+### Access identities
+
+A deployment behind Cloudflare Access can let a person use `git` on the git routes with no grant. Access signs a JWT that names the user and adds it to the request in the header `Cf-Access-Jwt-Assertion`. The service verifies it; it trusts no header that is not a valid JWT.
+
+- The JWT must be RS256, signed by a key of the key set of the team (cached for 1 hour; a `kid` that the cache does not hold causes one new fetch a minute), with `iss` equal to `https://<team domain>`, `aud` holding the configured AUD tag, `now < exp`, `nbf <= now` and an `email` claim. Any failure answers 401 like a refused grant.
+- The rules (`MOTTE_ACCESS_RULES`) map the email to a scope on the repository of the URL. A rule gives `read` or `write`, never `merge`, `operator`, `import` or `node`. When several rules match, `write` wins. No matching rule answers 401.
+- The result is the claims of a grant with the scope, the repository of the URL and the email as `subject`, but it is never a signed grant and it works only on the git routes: every other route reads a grant only. An Access identity cannot mint a grant.
+- A rule with the scope `admin` and no `repos` lets its principals create a repository: `POST /v1/repos` accepts the identity as an `operator` grant. It is the only route besides git that accepts an Access identity. `motte repo create [--owner OWNER] NAME` calls that route with `MOTTE_URL` and an operator grant in `MOTTE_TOKEN`, or the output of `cloudflared access token` in `MOTTE_ACCESS_TOKEN`, and prints the path. It needs no other system.
+- A `write` identity pushes as a `write` grant does, so a protected ref refuses it (see Protected refs). A deployment that turns on `write` rules protects the default branch of each repository, so that only the control plane lands it with a `merge` grant.
 
 ## Grant
 

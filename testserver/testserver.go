@@ -51,24 +51,27 @@ type Server struct {
 func Start(t testing.TB, dsn string) *Server {
 	t.Helper()
 	pool := pgtest.Pool(t, dsn)
-	s := run(t, &postgres.Store{Pool: pool})
+	s := run(t, &postgres.Store{Pool: pool}, nil)
 	s.Pool = pool
 	return s
 }
 
 // StartLocal runs a server on a temporary SQLite database and a temporary
 // filesystem bucket. It needs no other service and never skips. Pool is nil.
-func StartLocal(t testing.TB) *Server {
+func StartLocal(t testing.TB) *Server { return StartLocalWith(t, nil) }
+
+// StartLocalWith is StartLocal with a change to the server configuration. A nil change leaves it as is.
+func StartLocalWith(t testing.TB, change func(*server.Config)) *Server {
 	t.Helper()
 	db, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "meta.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return run(t, db)
+	return run(t, db, change)
 }
 
-func run(t testing.TB, store meta.Store) *Server {
+func run(t testing.TB, store meta.Store, change func(*server.Config)) *Server {
 	t.Helper()
 	testcount.Add(t, testcount.Servers)
 	root, err := fs.New(t.TempDir())
@@ -81,7 +84,11 @@ func run(t testing.TB, store meta.Store) *Server {
 	verifier := grant.NewVerifier(
 		grant.Key{Kid: "cp", Public: cpPub, Scopes: []grant.Scope{grant.ScopeNode, grant.ScopeRead, grant.ScopeWrite, grant.ScopeImport, grant.ScopeOperator, grant.ScopeMerge}},
 		grant.Key{Kid: "node", Public: nodePub, Scopes: []grant.Scope{grant.ScopeNode}})
-	srv := server.New(server.Config{Meta: store, Bucket: bkt, Verifier: verifier})
+	cfg := server.Config{Meta: store, Bucket: bkt, Verifier: verifier}
+	if change != nil {
+		change(&cfg)
+	}
+	srv := server.New(cfg)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return &Server{

@@ -22,6 +22,7 @@ import (
 	"github.com/majorcontext/motte/bucket/gcs"
 	"github.com/majorcontext/motte/bucket/s3"
 	"github.com/majorcontext/motte/grant"
+	"github.com/majorcontext/motte/internal/identity/cfaccess"
 	"github.com/majorcontext/motte/internal/server"
 	"github.com/majorcontext/motte/meta"
 	"github.com/majorcontext/motte/meta/postgres"
@@ -29,6 +30,9 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "repo" {
+		os.Exit(runRepo(context.Background(), os.Args[2:], os.Getenv, os.Stdout, os.Stderr))
+	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	if err := run(log); err != nil {
 		log.Error("motte stopped", "error", err)
@@ -101,7 +105,13 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	srv := server.New(server.Config{Meta: db, Bucket: bucket, Verifier: grant.NewVerifier(cfg.keys...), Logger: log, Events: server.EventsConfig{Retention: cfg.retention}, Warm: true})
+	scfg := server.Config{Meta: db, Bucket: bucket, Verifier: grant.NewVerifier(cfg.keys...), Logger: log, Events: server.EventsConfig{Retention: cfg.retention}, Warm: true}
+	if cfg.access != nil {
+		if scfg.Access, err = cfaccess.New(*cfg.access); err != nil {
+			return err
+		}
+	}
+	srv := server.New(scfg)
 	workCtx, stopWork := context.WithCancel(ctx)
 	workers := make(chan struct{})
 	go func() { _ = srv.Run(workCtx); close(workers) }()

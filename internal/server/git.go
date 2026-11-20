@@ -36,8 +36,26 @@ var errProtocolV2 = gitproto.RequestError("protocol v2 is required: use git 2.26
 
 func (s *Server) registerGit(mux *http.ServeMux) {
 	scopes := []grant.Scope{grant.ScopeRead, grant.ScopeWrite, grant.ScopeMerge}
-	s.register(mux, "GET /git/{path...}", s.gitInfoRefs, scopes, gitToken, gitChallenge)
-	s.register(mux, "POST /git/{path...}", s.gitService, scopes, gitToken, gitChallenge)
+	s.register(mux, "GET /git/{path...}", s.gitInfoRefs, scopes, s.gitAuthenticate, gitChallenge)
+	s.register(mux, "POST /git/{path...}", s.gitService, scopes, s.gitAuthenticate, gitChallenge)
+}
+
+// gitAuthenticate tries the grant of the request, then the Access identity when the server has one.
+func (s *Server) gitAuthenticate(r *http.Request) (grant.Claims, error) {
+	repo, _, err := gitRoute(r.PathValue("path"))
+	text := ""
+	if err == nil {
+		text = repo.String()
+	}
+	if c, err := s.bearerGit(r); err == nil {
+		return c, nil
+	}
+	if s.access != nil && text != "" {
+		if c, err := s.access.Authenticate(r, text); err == nil {
+			return c, nil
+		}
+	}
+	return grant.Claims{}, errUnauthorized
 }
 
 // gitToken reads the grant from a Bearer header, or from the password of a Basic header.

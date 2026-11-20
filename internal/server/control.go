@@ -12,7 +12,7 @@ import (
 )
 
 func (s *Server) registerControlPlane(mux *http.ServeMux) {
-	s.handle(mux, "POST /v1/repos", s.createRepo, grant.ScopeOperator)
+	s.register(mux, "POST /v1/repos", s.createRepo, []grant.Scope{grant.ScopeOperator}, s.adminAuthenticate, "")
 	s.handle(mux, "GET /v1/repos", s.listRepos, grant.ScopeOperator)
 	s.handle(mux, "GET /v1/repos/{path}", s.getRepo, grant.ScopeOperator)
 	s.handle(mux, "PUT /v1/workspaces/{id}/claim", s.claim, grant.ScopeOperator)
@@ -123,4 +123,12 @@ func (s *Server) deleteWorkspace(w http.ResponseWriter, r *http.Request, _ call)
 	}
 	w.WriteHeader(http.StatusNoContent)
 	return nil
+}
+
+// adminAuthenticate tries the grant of the request, then the Access identity of an administrator.
+func (s *Server) adminAuthenticate(r *http.Request) (grant.Claims, error) {
+	if c, err := s.bearer(r); err == nil || s.access == nil {
+		return c, err
+	}
+	return s.access.Authenticate(r, "")
 }
