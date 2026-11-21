@@ -6,11 +6,18 @@ This document is the contract for motte. A change in behavior updates this docum
 
 Goal: motte stores the repositories of coding agents and the state of their virtual workspaces. A control plane (the caller) creates repositories, claims workspaces and flushes their state. A node daemon and the jj backend read and write objects, refs and operation logs.
 
+Scale goals:
+
+- Large repositories: tens of millions of objects in one repository.
+- Many concurrent clients: clones, fetches, pushes, ref updates and lands run in parallel.
+- Regional read replicas with a single writer. A replica serves reads in its region. Every write goes to the writer.
+- Monotonic ref generations on every replica: a reader never sees a ref generation go back.
+- Tenancy is per deployment. One deployment serves one tenant.
+
 Non-goals:
 
 - No git dumb HTTP, web UI, review or pull-request model, access lists, or users.
 - No policy about review or merging. The store keeps protected ref patterns and ref events, and the caller decides what they mean.
-- No multi-region store. One store serves all callers.
 - No compaction or deletion of packs, and no purge of deleted workspaces.
 
 ## Components
