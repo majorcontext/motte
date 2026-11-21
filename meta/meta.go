@@ -28,6 +28,8 @@ var (
 	ErrWrongRepo = errors.New("meta: workspace is on another repo")
 	// ErrEventsPruned is a read of events from a sequence that retention removed.
 	ErrEventsPruned = errors.New("meta: events pruned")
+	// ErrManifestStale is a manifest write whose expected generation is not the stored one.
+	ErrManifestStale = errors.New("meta: manifest generation conflict")
 	// ErrLeaseHeld is a lease or cursor write by an owner that does not hold the lease.
 	ErrLeaseHeld = errors.New("meta: lease held by another owner")
 )
@@ -126,6 +128,21 @@ type Lease struct {
 type Pack struct {
 	ID    string
 	Bytes int64
+}
+
+// Retired is a file of a repo that no manifest needs. Key is relative to the prefix of the repo.
+type Retired struct {
+	Key string
+	At  time.Time
+	// Deleting is set by BeginDelete: a collector has taken the file and is deleting it.
+	Deleting   bool
+	DeletingAt time.Time
+}
+
+// Manifest is the stored pack manifest of a repo. The store keeps Body as opaque bytes. Generation starts at 1.
+type Manifest struct {
+	Generation int64
+	Body       []byte
 }
 
 // Store is the metadata of the service. Every method that writes is one
@@ -236,6 +253,25 @@ type Store interface {
 	AddPack(ctx context.Context, repo, packID string, bytes int64) error
 	// Packs lists the packs of a repo, oldest first, ties by id.
 	Packs(ctx context.Context, repo string) ([]Pack, error)
+	// RemovePack forgets a pack of a repo. A missing pack is not an error.
+	RemovePack(ctx context.Context, repo, packID string) error
+	// Manifest returns the manifest of a repo, or ErrNotFound.
+	Manifest(ctx context.Context, repo string) (Manifest, error)
+	// SwapManifest stores body as the manifest of repo when the stored generation is expect (0 when none is stored),
+	// and returns the new generation. A lost swap is ErrManifestStale.
+	SwapManifest(ctx context.Context, repo string, expect int64, body []byte) (int64, error)
+	// RetireFiles records keys as retired at at. A key that is already recorded and not deleting takes the new time.
+	RetireFiles(ctx context.Context, repo string, keys []string, at time.Time) error
+	// RetiredFiles lists the retired files of a repo, oldest first, then by key.
+	RetiredFiles(ctx context.Context, repo string) ([]Retired, error)
+	// BeginDelete marks each of keys as deleting at now, and returns the keys that it marked. It skips a key that is
+	// deleting since after staleBefore, which another collector owns. Of concurrent callers, exactly one marks a key.
+	BeginDelete(ctx context.Context, repo string, keys []string, now, staleBefore time.Time) ([]string, error)
+	// ClaimRetired removes each of keys that is retired and not deleting, so no collector takes it, and reports whether
+	// any of keys is deleting. A writer that stores a file again calls it first, and waits while it reports true.
+	ClaimRetired(ctx context.Context, repo string, keys []string) (deleting bool, err error)
+	// ForgetRetired removes keys from the retired files of a repo. A missing key is not an error.
+	ForgetRetired(ctx context.Context, repo string, keys []string) error
 	// PackRepos lists the text of every repo that holds a pack, in byte order.
 	PackRepos(ctx context.Context) ([]string, error)
 }

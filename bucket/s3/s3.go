@@ -110,6 +110,14 @@ func (b s3Bucket) Create(ctx context.Context, key string, data []byte) (bool, er
 	}
 }
 
+func (b s3Bucket) Delete(ctx context.Context, key string) error {
+	_, err := b.c.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &b.name, Key: &key})
+	if err != nil && status(err) != http.StatusNotFound {
+		return fmt.Errorf("bucket: delete: %w", err)
+	}
+	return nil
+}
+
 func (b s3Bucket) Get(ctx context.Context, key string) ([]byte, error) {
 	return b.read(ctx, key, nil, -1)
 }

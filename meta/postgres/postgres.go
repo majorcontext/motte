@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -261,6 +262,115 @@ func (s *Store) Packs(ctx context.Context, repo string) ([]meta.Pack, error) {
 		return nil, fmt.Errorf("postgres: list packs: %w", err)
 	}
 	return out, nil
+}
+
+func (s *Store) RemovePack(ctx context.Context, repo, packID string) error {
+	if _, err := s.Pool.Exec(ctx, `DELETE FROM packs WHERE repo = $1 AND pack_id = $2`, repo, packID); err != nil {
+		return fmt.Errorf("postgres: remove pack: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) Manifest(ctx context.Context, repo string) (meta.Manifest, error) {
+	var m meta.Manifest
+	err := s.Pool.QueryRow(ctx, `SELECT generation, body FROM pack_manifests WHERE repo = $1`, repo).Scan(&m.Generation, &m.Body)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return meta.Manifest{}, meta.ErrNotFound
+	}
+	if err != nil {
+		return meta.Manifest{}, fmt.Errorf("postgres: read manifest: %w", err)
+	}
+	return m, nil
+}
+
+func (s *Store) SwapManifest(ctx context.Context, repo string, expect int64, body []byte) (int64, error) {
+	var tag pgconn.CommandTag
+	var err error
+	if expect == 0 {
+		tag, err = s.Pool.Exec(ctx, `INSERT INTO pack_manifests (repo, generation, body) VALUES ($1, 1, $2) ON CONFLICT (repo) DO NOTHING`, repo, body)
+	} else {
+		tag, err = s.Pool.Exec(ctx, `UPDATE pack_manifests SET generation = generation + 1, body = $3, updated_at = now() WHERE repo = $1 AND generation = $2`, repo, expect, body)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("postgres: swap manifest: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return 0, meta.ErrManifestStale
+	}
+	return expect + 1, nil
+}
+
+func (s *Store) RetireFiles(ctx context.Context, repo string, keys []string, at time.Time) error {
+	if _, err := s.Pool.Exec(ctx, `INSERT INTO pack_retired (repo, key, retired_at) SELECT $1, k, $3 FROM unnest($2::text[]) AS k ON CONFLICT (repo, key) DO UPDATE SET retired_at = EXCLUDED.retired_at WHERE pack_retired.deleting_at IS NULL`, repo, keys, at); err != nil {
+		return fmt.Errorf("postgres: retire files: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) RetiredFiles(ctx context.Context, repo string) ([]meta.Retired, error) {
+	rows, err := s.Pool.Query(ctx, `SELECT key, retired_at, deleting_at FROM pack_retired WHERE repo = $1 ORDER BY retired_at, key COLLATE "C"`, repo)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list retired files: %w", err)
+	}
+	out, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (meta.Retired, error) {
+		var x meta.Retired
+		var at *time.Time
+		if err := r.Scan(&x.Key, &x.At, &at); err != nil {
+			return x, err
+		}
+		if at != nil {
+			x.Deleting, x.DeletingAt = true, *at
+		}
+		return x, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list retired files: %w", err)
+	}
+	return out, nil
+}
+
+func (s *Store) BeginDelete(ctx context.Context, repo string, keys []string, now, staleBefore time.Time) ([]string, error) {
+	rows, err := s.Pool.Query(ctx, `UPDATE pack_retired SET deleting_at = $3 WHERE repo = $1 AND key = ANY($2) AND (deleting_at IS NULL OR deleting_at <= $4) RETURNING key`, repo, keys, now, staleBefore)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: begin delete: %w", err)
+	}
+	out, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("postgres: begin delete: %w", err)
+	}
+	return out, nil
+}
+
+// ClaimRetired locks the rows first, so a mark that is not yet committed is seen: the lock waits for it, and the
+// statements after it read the row as it is.
+func (s *Store) ClaimRetired(ctx context.Context, repo string, keys []string) (bool, error) {
+	var deleting bool
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT deleting_at IS NOT NULL FROM pack_retired WHERE repo = $1 AND key = ANY($2) FOR UPDATE`, repo, keys)
+		if err != nil {
+			return err
+		}
+		marks, err := pgx.CollectRows(rows, pgx.RowTo[bool])
+		if err != nil {
+			return err
+		}
+		for _, m := range marks {
+			deleting = deleting || m
+		}
+		_, err = tx.Exec(ctx, `DELETE FROM pack_retired WHERE repo = $1 AND key = ANY($2) AND deleting_at IS NULL`, repo, keys)
+		return err
+	})
+	if err != nil {
+		return false, fmt.Errorf("postgres: claim retired: %w", err)
+	}
+	return deleting, nil
+}
+
+func (s *Store) ForgetRetired(ctx context.Context, repo string, keys []string) error {
+	if _, err := s.Pool.Exec(ctx, `DELETE FROM pack_retired WHERE repo = $1 AND key = ANY($2)`, repo, keys); err != nil {
+		return fmt.Errorf("postgres: forget retired files: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) PackRepos(ctx context.Context) ([]string, error) {

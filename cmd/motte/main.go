@@ -107,7 +107,7 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	scfg := server.Config{Meta: db, Bucket: bucket, Verifier: grant.NewVerifier(cfg.keys...), Logger: log, Events: server.EventsConfig{Retention: cfg.retention}, Warm: true}
+	scfg := server.Config{Meta: db, Bucket: bucket, Verifier: grant.NewVerifier(cfg.keys...), Logger: log, Events: server.EventsConfig{Retention: cfg.retention}, Compaction: server.CompactionConfig{Interval: cfg.compactEvery, Grace: cfg.compactGrace}, Warm: true}
 	if cfg.oidc != nil {
 		if scfg.Identity, err = oidc.New(*cfg.oidc); err != nil {
 			return err
@@ -119,6 +119,9 @@ func run(log *slog.Logger) error {
 	go func() { _ = srv.Run(workCtx); close(workers) }()
 	defer func() { stopWork(); <-workers }()
 	go srv.Warm(workCtx)
+	if cfg.compaction {
+		go srv.Compact(workCtx)
+	}
 	hs := &http.Server{Addr: cfg.listen, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 1)
 	go func() {

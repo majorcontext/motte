@@ -36,6 +36,13 @@ func (g gcsBucket) Create(ctx context.Context, key string, data []byte) (bool, e
 	return true, nil
 }
 
+func (g gcsBucket) Delete(ctx context.Context, key string) error {
+	if err := g.b.Object(key).Delete(ctx); err != nil && !errors.Is(err, storage.ErrObjectNotExist) {
+		return fmt.Errorf("bucket: delete: %w", err)
+	}
+	return nil
+}
+
 func (g gcsBucket) Get(ctx context.Context, key string) ([]byte, error) {
 	return g.read(ctx, key, 0, -1)
 }

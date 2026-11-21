@@ -41,6 +41,13 @@ func (b *memBucket) Get(_ context.Context, key string) ([]byte, error) {
 	return nil, bucket.ErrNotFound
 }
 
+func (b *memBucket) Delete(_ context.Context, key string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.m, key)
+	return nil
+}
+
 func (b *memBucket) GetRange(ctx context.Context, key string, off, n int64) ([]byte, error) {
 	d, err := b.Get(ctx, key)
 	if err != nil || off >= int64(len(d)) {

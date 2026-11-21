@@ -33,19 +33,22 @@ func loadS3(getenv func(string) string, c *config) error {
 }
 
 type config struct {
-	listen      string
-	meta        string
-	databaseURL string
-	sqlitePath  string
-	bucketKind  string
-	bucket      string
-	s3          s3.Options
-	keys        []grant.Key
-	otlp        bool
-	retention   time.Duration
-	oidc        *oidc.Config
-	tlsCert     string
-	tlsKey      string
+	listen       string
+	meta         string
+	databaseURL  string
+	sqlitePath   string
+	bucketKind   string
+	bucket       string
+	s3           s3.Options
+	keys         []grant.Key
+	otlp         bool
+	retention    time.Duration
+	oidc         *oidc.Config
+	tlsCert      string
+	tlsKey       string
+	compaction   bool
+	compactEvery time.Duration
+	compactGrace time.Duration
 }
 
 // loadConfig reads the configuration from the environment.
@@ -70,6 +73,9 @@ type config struct {
 //	MOTTE_TLS_CERT      optional; PEM certificate chain; serves TLS with MOTTE_TLS_KEY
 //	MOTTE_TLS_KEY       optional; PEM private key
 //	MOTTE_EVENT_RETENTION  how long a ref event is kept, a Go duration, default 336h
+//	MOTTE_COMPACTION       false (default) or true; true runs pack compaction, layer merges and file deletion on this replica
+//	MOTTE_COMPACTION_INTERVAL  wait between maintenance passes, a Go duration, default 30s
+//	MOTTE_COMPACTION_GRACE     how long a retired file stays before deletion, a Go duration, default 1h
 //	OTEL_EXPORTER_OTLP_ENDPOINT  optional; enables trace export
 func loadConfig(getenv func(string) string) (config, error) {
 	c := config{
@@ -109,6 +115,25 @@ func loadConfig(getenv func(string) string) (config, error) {
 			return config{}, errors.New("MOTTE_EVENT_RETENTION must be a positive duration")
 		}
 		c.retention = d
+	}
+	switch getenv("MOTTE_COMPACTION") {
+	case "", "false":
+	case "true":
+		c.compaction = true
+	default:
+		return config{}, errors.New("MOTTE_COMPACTION must be true or false")
+	}
+	for _, v := range []struct {
+		name string
+		to   *time.Duration
+	}{{"MOTTE_COMPACTION_INTERVAL", &c.compactEvery}, {"MOTTE_COMPACTION_GRACE", &c.compactGrace}} {
+		if text := getenv(v.name); text != "" {
+			d, err := time.ParseDuration(text)
+			if err != nil || d <= 0 {
+				return config{}, errors.New(v.name + " must be a positive duration")
+			}
+			*v.to = d
+		}
 	}
 	keys, err := parseKeys(getenv("MOTTE_TRUSTED_KEYS"))
 	if err != nil {

@@ -14,9 +14,9 @@ var ErrNotFound = errors.New("bucket: object not found")
 
 type Store interface {
 	// Create writes data when key is absent and reports whether it wrote. A
-	// stored object is never replaced or deleted. Of concurrent creators of
-	// one key, exactly one gets created true. A later read of the key sees
-	// the whole object.
+	// stored object is never replaced. Of concurrent creators of one key,
+	// exactly one gets created true. A later read of the key sees the whole
+	// object.
 	Create(ctx context.Context, key string, data []byte) (created bool, err error)
 	// Get returns the object, or ErrNotFound.
 	Get(ctx context.Context, key string) ([]byte, error)
@@ -24,4 +24,7 @@ type Store interface {
 	// object, and none when off is at or past the end. A negative n reads to
 	// the end. A missing key is ErrNotFound.
 	GetRange(ctx context.Context, key string, off, n int64) ([]byte, error)
+	// Delete removes the object. A missing key is not an error. Only the
+	// removal of a retired file calls it.
+	Delete(ctx context.Context, key string) error
 }

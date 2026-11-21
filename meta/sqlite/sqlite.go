@@ -335,6 +335,115 @@ func (s *Store) Packs(ctx context.Context, repo string) ([]meta.Pack, error) {
 	return out, nil
 }
 
+func (s *Store) RemovePack(ctx context.Context, repo, packID string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM packs WHERE repo = ? AND pack_id = ?`, repo, packID); err != nil {
+		return fmt.Errorf("sqlite: remove pack: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) Manifest(ctx context.Context, repo string) (meta.Manifest, error) {
+	var m meta.Manifest
+	err := s.db.QueryRowContext(ctx, `SELECT generation, body FROM pack_manifests WHERE repo = ?`, repo).Scan(&m.Generation, &m.Body)
+	if errors.Is(err, sql.ErrNoRows) {
+		return meta.Manifest{}, meta.ErrNotFound
+	}
+	if err != nil {
+		return meta.Manifest{}, fmt.Errorf("sqlite: read manifest: %w", err)
+	}
+	return m, nil
+}
+
+func (s *Store) SwapManifest(ctx context.Context, repo string, expect int64, body []byte) (int64, error) {
+	var res sql.Result
+	var err error
+	if expect == 0 {
+		res, err = s.db.ExecContext(ctx, `INSERT INTO pack_manifests (repo, generation, body, updated_at) VALUES (?, 1, ?, ?) ON CONFLICT (repo) DO NOTHING`, repo, body, micros())
+	} else {
+		res, err = s.db.ExecContext(ctx, `UPDATE pack_manifests SET generation = generation + 1, body = ?, updated_at = ? WHERE repo = ? AND generation = ?`, body, micros(), repo, expect)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: swap manifest: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return 0, meta.ErrManifestStale
+	}
+	return expect + 1, nil
+}
+
+func (s *Store) RetireFiles(ctx context.Context, repo string, keys []string, at time.Time) error {
+	for _, k := range keys {
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO pack_retired (repo, key, retired_at) VALUES (?, ?, ?) ON CONFLICT (repo, key) DO UPDATE SET retired_at = excluded.retired_at WHERE deleting_at IS NULL`, repo, k, at.UnixMicro()); err != nil {
+			return fmt.Errorf("sqlite: retire files: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) RetiredFiles(ctx context.Context, repo string) ([]meta.Retired, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT key, retired_at, deleting_at FROM pack_retired WHERE repo = ? ORDER BY retired_at, key`, repo)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: list retired files: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []meta.Retired
+	for rows.Next() {
+		var r meta.Retired
+		var at int64
+		var del sql.NullInt64
+		if err := rows.Scan(&r.Key, &at, &del); err != nil {
+			return nil, fmt.Errorf("sqlite: list retired files: %w", err)
+		}
+		r.At = time.UnixMicro(at).UTC()
+		if del.Valid {
+			r.Deleting, r.DeletingAt = true, time.UnixMicro(del.Int64).UTC()
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sqlite: list retired files: %w", err)
+	}
+	return out, nil
+}
+
+func (s *Store) BeginDelete(ctx context.Context, repo string, keys []string, now, staleBefore time.Time) ([]string, error) {
+	var out []string
+	for _, k := range keys {
+		res, err := s.db.ExecContext(ctx, `UPDATE pack_retired SET deleting_at = ? WHERE repo = ? AND key = ? AND (deleting_at IS NULL OR deleting_at <= ?)`, now.UnixMicro(), repo, k, staleBefore.UnixMicro())
+		if err != nil {
+			return nil, fmt.Errorf("sqlite: begin delete: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			out = append(out, k)
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) ClaimRetired(ctx context.Context, repo string, keys []string) (bool, error) {
+	deleting := false
+	for _, k := range keys {
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM pack_retired WHERE repo = ? AND key = ? AND deleting_at IS NULL`, repo, k); err != nil {
+			return false, fmt.Errorf("sqlite: claim retired: %w", err)
+		}
+		var n int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pack_retired WHERE repo = ? AND key = ?`, repo, k).Scan(&n); err != nil {
+			return false, fmt.Errorf("sqlite: claim retired: %w", err)
+		}
+		deleting = deleting || n > 0
+	}
+	return deleting, nil
+}
+
+func (s *Store) ForgetRetired(ctx context.Context, repo string, keys []string) error {
+	for _, k := range keys {
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM pack_retired WHERE repo = ? AND key = ?`, repo, k); err != nil {
+			return fmt.Errorf("sqlite: forget retired files: %w", err)
+		}
+	}
+	return nil
+}
+
 func (s *Store) PackRepos(ctx context.Context) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT repo FROM packs ORDER BY repo`)
 	if err != nil {

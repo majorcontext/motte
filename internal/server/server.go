@@ -41,6 +41,8 @@ type Config struct {
 	Events EventsConfig
 	// Lands tunes the batched land. Zero values take the defaults.
 	Lands LandsConfig
+	// Compaction tunes Compact. Zero values take the defaults.
+	Compaction CompactionConfig
 	// Warm makes the server answer /ready with 503 until Warm has opened every pack index.
 	Warm bool
 	// Clock paces the retry of Warm. It defaults to the real clock.
@@ -58,6 +60,7 @@ type Server struct {
 	now        func() time.Time
 	events     EventsConfig
 	lands      LandsConfig
+	compaction CompactionConfig
 	landing    landing
 	wake       chan struct{}
 	clock      clock.Clock
@@ -72,7 +75,7 @@ type Server struct {
 
 // New returns a Server over the metadata of cfg.Meta and the object store cfg.Bucket.
 func New(cfg Config) *Server {
-	s := &Server{index: cfg.Meta, objects: store.New(cfg.Bucket, cfg.Meta), logger: cfg.Logger, now: cfg.Now, readers: make(chan struct{}, uploadReaders), wake: make(chan struct{}, 1), clock: clock.Or(cfg.Clock)}
+	s := &Server{index: cfg.Meta, objects: store.New(cfg.Bucket, cfg.Meta, store.WithClock(clock.Or(cfg.Clock)), store.WithGrace(cfg.Compaction.withDefaults().Grace)), compaction: cfg.Compaction.withDefaults(), logger: cfg.Logger, now: cfg.Now, readers: make(chan struct{}, uploadReaders), wake: make(chan struct{}, 1), clock: clock.Or(cfg.Clock)}
 	s.cold.Store(cfg.Warm)
 	if s.now == nil {
 		s.now = time.Now
@@ -170,12 +173,32 @@ func (s *Server) registerCacheMetrics() {
 	gauge := func(name, help string, f func(store.CacheStats) int64) {
 		s.registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: name, Help: help}, func() float64 { return float64(f(s.objects.CacheStats())) }))
 	}
-	counter("motte_pack_cache_hits_total", "Pack lookups served by an open pack.", func(c store.CacheStats) int64 { return c.Hits })
-	counter("motte_pack_cache_misses_total", "Pack lookups that read an index from the bucket.", func(c store.CacheStats) int64 { return c.Misses })
+	counter("motte_pack_cache_hits_total", "Pack opens served by an open pack.", func(c store.CacheStats) int64 { return c.Hits })
+	counter("motte_pack_cache_misses_total", "Pack opens that made a new open pack.", func(c store.CacheStats) int64 { return c.Misses })
 	counter("motte_pack_cache_evictions_total", "Open packs evicted for the byte budget.", func(c store.CacheStats) int64 { return c.Evictions })
-	counter("motte_bucket_index_read_bytes_total", "Bytes of pack indexes read from the bucket.", func(c store.CacheStats) int64 { return c.IndexBytes })
+	counter("motte_bucket_index_read_bytes_total", "Bytes of index layers read from the bucket.", func(c store.CacheStats) int64 { return c.IndexBytes })
 	counter("motte_bucket_range_reads_total", "Range reads of packs from the bucket.", func(c store.CacheStats) int64 { return c.RangeReads })
 	counter("motte_bucket_range_read_bytes_total", "Bytes of range reads of packs from the bucket.", func(c store.CacheStats) int64 { return c.RangeBytes })
+	counter("motte_index_cache_hits_total", "Lookups of a layer or a block of records served by the layer cache.", func(c store.CacheStats) int64 { return c.IndexHits })
+	counter("motte_index_cache_misses_total", "Lookups of a layer or a block of records that read the bucket.", func(c store.CacheStats) int64 { return c.IndexMisses })
+	counter("motte_index_cache_evictions_total", "Layers and blocks evicted for the byte budget of the layer cache.", func(c store.CacheStats) int64 { return c.IndexEvictions })
+	gauge("motte_index_cache_bytes", "Bytes charged to the layer cache.", func(c store.CacheStats) int64 { return c.IndexResident })
 	gauge("motte_pack_cache_open_packs", "Packs in the open-pack cache.", func(c store.CacheStats) int64 { return c.OpenPacks })
 	gauge("motte_pack_cache_open_bytes", "Bytes charged to the open-pack cache.", func(c store.CacheStats) int64 { return c.OpenBytes })
+	mcounter := func(name, help string, f func(store.MaintStats) int64) {
+		s.registry.MustRegister(prometheus.NewCounterFunc(prometheus.CounterOpts{Name: name, Help: help}, func() float64 { return float64(f(s.objects.MaintStats())) }))
+	}
+	mgauge := func(name, help string, f func(store.MaintStats) int64) {
+		s.registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: name, Help: help}, func() float64 { return float64(f(s.objects.MaintStats())) }))
+	}
+	mcounter("motte_compaction_runs_total", "Compactions of packs into one pack.", func(m store.MaintStats) int64 { return m.CompactRuns })
+	mcounter("motte_compaction_bytes_total", "Bytes of the packs that compaction wrote.", func(m store.MaintStats) int64 { return m.CompactBytes })
+	mcounter("motte_compaction_objects_total", "Objects that compaction copied.", func(m store.MaintStats) int64 { return m.CompactObjects })
+	mcounter("motte_layer_merge_runs_total", "Merges of layers into one layer.", func(m store.MaintStats) int64 { return m.MergeRuns })
+	mcounter("motte_layer_merge_objects_total", "Records that layer merges read.", func(m store.MaintStats) int64 { return m.MergeObjects })
+	mcounter("motte_retired_files_deleted_total", "Retired pack and layer files deleted after their grace.", func(m store.MaintStats) int64 { return m.Deleted })
+	mcounter("motte_maintenance_failures_total", "Maintenance passes of a repository that failed.", func(m store.MaintStats) int64 { return m.Failures })
+	mgauge("motte_manifest_layers_max", "Most layers of any repository that maintenance has seen.", func(m store.MaintStats) int64 { return m.LayersMax })
+	mgauge("motte_manifest_layers_sum", "Layers of all repositories that maintenance has seen.", func(m store.MaintStats) int64 { return m.LayersSum })
+	mgauge("motte_manifest_repos", "Repositories that maintenance has seen.", func(m store.MaintStats) int64 { return m.Repos })
 }

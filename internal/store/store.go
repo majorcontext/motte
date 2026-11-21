@@ -24,9 +24,12 @@ import (
 
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/majorcontext/motte/bucket"
+	"github.com/majorcontext/motte/internal/clock"
 	"github.com/majorcontext/motte/internal/gitpack"
+	"github.com/majorcontext/motte/internal/midx"
 	"github.com/majorcontext/motte/meta"
 )
 
@@ -46,8 +49,10 @@ const (
 	MaxBatch     = 100000
 	maxTreeBytes = gitpack.MaxObjectBytes
 	maxOpenBytes = 256 << 20
-	blockSize    = 256 << 10
-	maxBlocks    = 4
+	// maxIndexBytes is the memory of the layer cache: layer directories, index layers and blocks of records.
+	maxIndexBytes = 128 << 20
+	blockSize     = 256 << 10
+	maxBlocks     = 4
 	// MemoryBudget is the bytes that requests may hold while they work, apart from the bodies that are still being read.
 	MemoryBudget = 512 << 20
 	blockTimeout = 30 * time.Second
@@ -68,10 +73,18 @@ func ParseRepo(s string) (Repo, error) {
 	return Repo{Prefix: prefix, Path: path}, nil
 }
 
-// PackIndex lists the packs of a repo, oldest first.
+// PackIndex is the metadata that the store keeps about the packs of a repo: the packs, and the manifest of layers.
 type PackIndex interface {
 	AddPack(ctx context.Context, repo, packID string, bytes int64) error
 	Packs(ctx context.Context, repo string) ([]meta.Pack, error)
+	RemovePack(ctx context.Context, repo, packID string) error
+	RetireFiles(ctx context.Context, repo string, keys []string, at time.Time) error
+	RetiredFiles(ctx context.Context, repo string) ([]meta.Retired, error)
+	ForgetRetired(ctx context.Context, repo string, keys []string) error
+	BeginDelete(ctx context.Context, repo string, keys []string, now, staleBefore time.Time) ([]string, error)
+	ClaimRetired(ctx context.Context, repo string, keys []string) (bool, error)
+	Manifest(ctx context.Context, repo string) (meta.Manifest, error)
+	SwapManifest(ctx context.Context, repo string, expect int64, body []byte) (int64, error)
 }
 
 type OpKind string
@@ -92,8 +105,15 @@ var (
 type Service struct {
 	st    bucket.Store
 	index PackIndex
+	clk   clock.Clock
+	grace time.Duration
 
 	budget *semaphore.Weighted
+
+	icache *lru
+	loads  singleflight.Group
+	maint  sync.Map
+	stats  maintStats
 
 	mu        sync.Mutex
 	open      map[string]*openPack
@@ -102,14 +122,18 @@ type Service struct {
 	evicted   int
 
 	hits, misses, idxBytes, rangeReads, rangeBytes atomic.Int64
+	ihits, imisses                                 atomic.Int64
 }
 
-// CacheStats counts the open-pack cache and the bucket reads that fill it.
+// CacheStats counts the open-pack cache, the layer cache and the bucket reads that fill them.
 type CacheStats struct {
 	Hits, Misses, Evictions int64
 	OpenPacks, OpenBytes    int64
 	IndexBytes              int64
 	RangeReads, RangeBytes  int64
+	IndexHits, IndexMisses  int64
+	IndexEvictions          int64
+	IndexResident           int64
 }
 
 // CacheStats returns the counters of the open-pack cache.
@@ -117,9 +141,11 @@ func (s *Service) CacheStats() CacheStats {
 	s.mu.Lock()
 	open, bytes, ev := len(s.open), s.openBytes, s.evicted
 	s.mu.Unlock()
+	resident, iev := s.icache.stats()
 	return CacheStats{
 		Hits: s.hits.Load(), Misses: s.misses.Load(), Evictions: int64(ev), OpenPacks: int64(open), OpenBytes: int64(bytes),
 		IndexBytes: s.idxBytes.Load(), RangeReads: s.rangeReads.Load(), RangeBytes: s.rangeBytes.Load(),
+		IndexHits: s.ihits.Load(), IndexMisses: s.imisses.Load(), IndexEvictions: int64(iev), IndexResident: int64(resident),
 	}
 }
 
@@ -133,8 +159,38 @@ func (s *Service) Reserve(ctx context.Context, bytes int64) (release func(), err
 	return func() { s.budget.Release(n) }, nil
 }
 
-func New(st bucket.Store, index PackIndex) *Service {
-	return &Service{st: st, index: index, open: map[string]*openPack{}, budget: semaphore.NewWeighted(MemoryBudget)}
+// Option tunes a Service.
+type Option func(*Service)
+
+// WithClock sets the clock that stamps retired files. It defaults to the real clock.
+func WithClock(c clock.Clock) Option { return func(s *Service) { s.clk = c } }
+
+// WithGrace sets how long a retired file stays before Maintain deletes it. A request that began within the grace
+// reads a consistent set. A value of zero or less keeps DefaultGrace.
+func WithGrace(d time.Duration) Option {
+	return func(s *Service) {
+		if d > 0 {
+			s.grace = d
+		}
+	}
+}
+
+// tryReserve is Reserve that returns nil at once when the budget lacks the bytes. A caller that already holds a
+// reservation uses it, because waiting for a second reservation while holding the first can deadlock.
+func (s *Service) tryReserve(bytes int64) (release func()) {
+	n := min(bytes, MemoryBudget)
+	if !s.budget.TryAcquire(n) {
+		return nil
+	}
+	return func() { s.budget.Release(n) }
+}
+
+func New(st bucket.Store, index PackIndex, opts ...Option) *Service {
+	s := &Service{st: st, index: index, clk: clock.Real(), grace: DefaultGrace, open: map[string]*openPack{}, budget: semaphore.NewWeighted(MemoryBudget), icache: newLRU(maxIndexBytes)}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
 func mapNotFound(err error) error {
@@ -264,13 +320,19 @@ func (s *Service) putPack(ctx context.Context, repo Repo, id string, idx, pack [
 	if err != nil {
 		return err
 	}
+	if err := s.claim(ctx, repo, id+".pack", id+".idx"); err != nil {
+		return err
+	}
 	var g errgroup.Group
 	g.Go(func() error { _, err := s.st.Create(ctx, prefix+"/"+id+".idx", idx); return err })
 	g.Go(func() error { _, err := s.st.Create(ctx, prefix+"/"+id+".pack", pack); return err })
 	if err := g.Wait(); err != nil {
 		return err
 	}
-	return s.index.AddPack(ctx, repo.String(), id, int64(len(pack)))
+	if err := s.index.AddPack(ctx, repo.String(), id, int64(len(pack))); err != nil {
+		return err
+	}
+	return s.appendPack(ctx, repo, id, int64(len(pack)), idx)
 }
 
 type bytesReader []byte
@@ -418,52 +480,41 @@ func (s *Service) evict() {
 	s.order = s.order[1:]
 }
 
-func (s *Service) openPack(ctx context.Context, st bucket.Store, prefix string, ref meta.Pack) (*openPack, error) {
+func (s *Service) openPack(prefix string, ref midx.Pack) *openPack {
 	key := prefix + "|" + ref.ID
 	s.mu.Lock()
 	if e, ok := s.open[key]; ok {
 		s.mu.Unlock()
 		s.hits.Add(1)
-		return e, nil
+		return e
 	}
 	s.mu.Unlock()
 	s.misses.Add(1)
-	idx, err := st.Get(ctx, prefix+"/"+ref.ID+".idx")
-	if err != nil {
-		return nil, mapNotFound(err)
-	}
-	s.idxBytes.Add(int64(len(idx)))
-	br := &blockReader{svc: s, st: st, key: prefix + "/" + ref.ID + ".pack", size: ref.Bytes, blocks: map[int64][]byte{}}
-	e := &openPack{b: br}
+	br := &blockReader{svc: s, st: s.st, key: prefix + "/" + ref.ID + ".pack", size: ref.Bytes, blocks: map[int64][]byte{}}
+	e := &openPack{b: br, p: gitpack.NewAt(reqReader{b: br, ctx: context.Background()})}
 	br.changed = func() { s.recharge(e) }
-	p, err := gitpack.NewPack(idx, reqReader{b: br, ctx: context.Background()})
-	if err != nil {
-		return nil, err
-	}
-	e.p = p
-	p.OnCacheChange(func() { s.recharge(e) })
+	e.p.OnCacheChange(func() { s.recharge(e) })
 	s.mu.Lock()
 	if dup, ok := s.open[key]; ok {
 		s.mu.Unlock()
-		return dup, nil
+		return dup
 	}
 	s.open[key] = e
 	s.order = append(s.order, key)
 	e.cached = true
 	s.mu.Unlock()
 	s.recharge(e)
-	return e, nil
+	return e
 }
 
-// Warm opens the pack indexes of repos, newest pack first, with at most parallel reads at a time. It stops opening
-// when the cache first evicts a pack, because an index that it opens then only evicts another. It returns the first
-// error.
+// Warm loads the layers of repos, newest layer first, with at most parallel reads at a time. It stops loading when the
+// layer cache first evicts, because a layer that it loads then only evicts another. It returns the first error.
 func (s *Service) Warm(ctx context.Context, repos []Repo, parallel int) error {
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(parallel)
-	start := s.evictions()
+	start := s.icache.evictions()
 	for _, repo := range repos {
-		if ctx.Err() != nil || s.evictions() != start {
+		if ctx.Err() != nil || s.icache.evictions() != start {
 			break
 		}
 		v, err := s.view(ctx, repo)
@@ -471,26 +522,29 @@ func (s *Service) Warm(ctx context.Context, repos []Repo, parallel int) error {
 			_ = g.Wait()
 			return err
 		}
-		for i := len(v.refs) - 1; i >= 0 && ctx.Err() == nil && s.evictions() == start; i-- {
-			ref := v.refs[i]
-			g.Go(func() error { _, err := s.openPack(ctx, v.st, v.prefix, ref); return err })
+		for i := len(v.layers) - 1; i >= 0 && ctx.Err() == nil && s.icache.evictions() == start; i-- {
+			e := v.layers[i]
+			g.Go(func() error { _, err := s.layer(ctx, v.prefix, e); return err })
 		}
 	}
 	return g.Wait()
 }
 
-func (s *Service) evictions() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.evicted
-}
-
-// view is the packs of one repo as of one request.
+// view is the layers of one repo as of one request.
 type view struct {
 	s      *Service
-	st     bucket.Store
 	prefix string
-	refs   []meta.Pack
+	layers []midx.Entry
+	// lerr is the last failed read of a delta base, which the pack reports as a missing name.
+	lerr atomic.Pointer[error]
+}
+
+// missing is the error for a name that a pack lacks: the failed read of a delta base when there was one.
+func (v *view) missing() error {
+	if e := v.lerr.Load(); e != nil {
+		return *e
+	}
+	return ErrNotFound
 }
 
 func (s *Service) view(ctx context.Context, repo Repo) (*view, error) {
@@ -498,28 +552,37 @@ func (s *Service) view(ctx context.Context, repo Repo) (*view, error) {
 	if err != nil {
 		return nil, err
 	}
-	refs, err := s.index.Packs(ctx, repo.String())
+	m, _, err := s.loadManifest(ctx, repo)
 	if err != nil {
 		return nil, err
 	}
-	return &view{s: s, st: s.st, prefix: prefix, refs: refs}, nil
+	return &view{s: s, prefix: prefix, layers: m.Layers}, nil
 }
 
-// find returns the pack that holds sha, newest pack first.
+// find returns the pack that holds sha, probing the newest layer first. A layer costs at most one block read.
 func (v *view) find(ctx context.Context, sha gitpack.SHA) (*gitpack.Pack, error) {
 	st := statsFrom(ctx)
-	for i := len(v.refs) - 1; i >= 0; i-- {
-		st.packs()
-		e, err := v.s.openPack(ctx, v.st, v.prefix, v.refs[i])
-		if errors.Is(err, gitpack.ErrCorrupt) {
-			return nil, ErrInvalid
-		}
+	for i := len(v.layers) - 1; i >= 0; i-- {
+		st.layer()
+		h, err := v.s.layer(ctx, v.prefix, v.layers[i])
 		if err != nil {
 			return nil, err
 		}
-		if e.p.Has(sha) {
-			return e.p.Bind(reqReader{b: e.b, ctx: ctx}), nil
+		ord, _, ok, err := v.s.lookup(ctx, h, sha, -1)
+		if err != nil {
+			return nil, err
 		}
+		if !ok {
+			continue
+		}
+		e := v.s.openPack(v.prefix, h.packs[ord])
+		return e.p.Bind(reqReader{b: e.b, ctx: ctx}).WithLookup(func(name gitpack.SHA) (int64, bool) {
+			_, off, ok, err := v.s.lookup(ctx, h, name, ord)
+			if err != nil {
+				v.lerr.Store(&err)
+			}
+			return off, ok && err == nil
+		}), nil
 	}
 	return nil, ErrNotFound
 }
@@ -532,7 +595,7 @@ func (v *view) size(ctx context.Context, sha gitpack.SHA) (int64, error) {
 	}
 	n, _, err := p.Size(sha)
 	if errors.Is(err, gitpack.ErrNotFound) {
-		return 0, ErrNotFound
+		return 0, v.missing()
 	}
 	return n, err
 }
@@ -551,7 +614,7 @@ func (v *view) getSized(ctx context.Context, sha gitpack.SHA, before func(size i
 	if before != nil {
 		n, _, err := p.Size(sha)
 		if errors.Is(err, gitpack.ErrNotFound) {
-			return 0, nil, ErrNotFound
+			return 0, nil, v.missing()
 		}
 		if err != nil {
 			return 0, nil, err
@@ -564,7 +627,7 @@ func (v *view) getSized(ctx context.Context, sha gitpack.SHA, before func(size i
 	statsFrom(ctx).object(len(d), depth)
 	switch {
 	case errors.Is(err, gitpack.ErrNotFound):
-		return 0, nil, ErrNotFound
+		return 0, nil, v.missing()
 	case errors.Is(err, gitpack.ErrTooLarge):
 		return 0, nil, ErrTooLarge
 	case errors.Is(err, gitpack.ErrCorrupt):

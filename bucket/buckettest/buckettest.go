@@ -25,6 +25,7 @@ func Run(t *testing.T, newBackend func(t *testing.T) bucket.Store) {
 		"a missing key is not found": missingKey,
 		"one racer of many creates":  oneCreatorWins,
 		"a large object round trips": largeObject,
+		"delete removes an object":   deleteRemoves,
 	} {
 		t.Run(name, func(t *testing.T) {
 			var raw [8]byte
@@ -131,5 +132,25 @@ func largeObject(t *testing.T, b bucket.Store, key func(string) string) {
 	}
 	if got, err := b.GetRange(ctx, key("big"), 1<<20, 4096); err != nil || !bytes.Equal(got, data[1<<20:1<<20+4096]) {
 		t.Errorf("range differs: %d bytes, %v", len(got), err)
+	}
+}
+
+func deleteRemoves(t *testing.T, b bucket.Store, key func(string) string) {
+	ctx := context.Background()
+	k := key("gone")
+	if err := b.Delete(ctx, k); err != nil {
+		t.Fatalf("delete of a missing key = %v, want nil", err)
+	}
+	if _, err := b.Create(ctx, k, []byte("data")); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Delete(ctx, k); err != nil {
+		t.Fatalf("delete = %v", err)
+	}
+	if _, err := b.Get(ctx, k); !errors.Is(err, bucket.ErrNotFound) {
+		t.Errorf("get after delete = %v, want bucket.ErrNotFound", err)
+	}
+	if ok, err := b.Create(ctx, k, []byte("again")); err != nil || !ok {
+		t.Errorf("create after delete = %v, %v; want true", ok, err)
 	}
 }

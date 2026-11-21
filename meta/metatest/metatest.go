@@ -52,6 +52,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"one racer of many updates a ref", oneRefUpdateWins},
 		{"refs list by name within a repo", refsList},
 		{"packs list oldest first and add once", packs},
+		{"pack removal, retired files and the manifest swap", packMaintenance},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
@@ -632,5 +633,121 @@ func packs(t *testing.T, s meta.Store) {
 	}
 	if repos, err := s.PackRepos(ctx); err != nil || len(repos) != 2 || repos[0] != "gh:acme/other" || repos[1] != repoText {
 		t.Errorf("pack repos = %v, %v, want each repo of a pack once", repos, err)
+	}
+}
+
+func packMaintenance(t *testing.T, s meta.Store) {
+	removePack(t, s, "gh:acme/remove")
+	retiredFiles(t, s, "gh:acme/retired")
+	manifestSwap(t, s, "gh:acme/swap")
+	oneManifestSwapWins(t, s, "gh:acme/race")
+}
+
+func removePack(t *testing.T, s meta.Store, repo string) {
+	ok(t, s.AddPack(ctx, repo, "p1", 1))
+	ok(t, s.AddPack(ctx, repo, "p2", 2))
+	ok(t, s.RemovePack(ctx, repo, "p1"))
+	ok(t, s.RemovePack(ctx, repo, "p1"))
+	ok(t, s.RemovePack(ctx, repo, "nope"))
+	got, err := s.Packs(ctx, repo)
+	if err != nil || len(got) != 1 || got[0].ID != "p2" {
+		t.Errorf("packs = %+v, %v; want only p2", got, err)
+	}
+}
+
+func manifestSwap(t *testing.T, s meta.Store, repo string) {
+	_, err := s.Manifest(ctx, repo)
+	is(t, err, meta.ErrNotFound)
+	_, err = s.SwapManifest(ctx, repo, 3, []byte("x"))
+	is(t, err, meta.ErrManifestStale)
+	gen, err := s.SwapManifest(ctx, repo, 0, []byte("one"))
+	if err != nil || gen != 1 {
+		t.Fatalf("create = %d, %v; want generation 1", gen, err)
+	}
+	_, err = s.SwapManifest(ctx, repo, 0, []byte("again"))
+	is(t, err, meta.ErrManifestStale)
+	_, err = s.SwapManifest(ctx, repo, 2, []byte("skip"))
+	is(t, err, meta.ErrManifestStale)
+	gen, err = s.SwapManifest(ctx, repo, 1, []byte("two"))
+	if err != nil || gen != 2 {
+		t.Fatalf("swap = %d, %v; want generation 2", gen, err)
+	}
+	m, err := s.Manifest(ctx, repo)
+	if err != nil || m.Generation != 2 || string(m.Body) != "two" {
+		t.Errorf("manifest = %+v, %v; want generation 2 and the second body", m, err)
+	}
+	if _, err := s.Manifest(ctx, "gh:acme/other"); !errors.Is(err, meta.ErrNotFound) {
+		t.Errorf("manifest of another repo = %v, want ErrNotFound", err)
+	}
+}
+
+func oneManifestSwapWins(t *testing.T, s meta.Store, repo string) {
+	_, err := s.SwapManifest(ctx, repo, 0, []byte("base"))
+	ok(t, err)
+	const racers = 8
+	wins := make(chan int64, racers)
+	var wg sync.WaitGroup
+	for i := range racers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if gen, err := s.SwapManifest(ctx, repo, 1, []byte{byte(i)}); err == nil {
+				wins <- gen
+			} else if !errors.Is(err, meta.ErrManifestStale) {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	close(wins)
+	if len(wins) != 1 {
+		t.Errorf("%d racers swapped generation 1, want exactly one", len(wins))
+	}
+}
+
+func retiredFiles(t *testing.T, s meta.Store, repo string) {
+	t0 := time.Unix(1000, 0).UTC()
+	ok(t, s.RetireFiles(ctx, repo, []string{"b.pack", "a.idx"}, t0))
+	ok(t, s.RetireFiles(ctx, repo, []string{"c.pack"}, t0.Add(time.Second)))
+	ok(t, s.RetireFiles(ctx, repo, []string{"b.pack"}, t0.Add(2*time.Second)))
+	ok(t, s.RetireFiles(ctx, "gh:acme/other", []string{"z"}, t0))
+	got, err := s.RetiredFiles(ctx, repo)
+	want := []meta.Retired{{Key: "a.idx", At: t0}, {Key: "c.pack", At: t0.Add(time.Second)}, {Key: "b.pack", At: t0.Add(2 * time.Second)}}
+	if err != nil || len(got) != len(want) {
+		t.Fatalf("retired = %+v, %v; want %+v", got, err, want)
+	}
+	for i := range want {
+		if got[i].Key != want[i].Key || !got[i].At.Equal(want[i].At) {
+			t.Errorf("retired[%d] = %+v, want %+v: oldest first, a repeat takes the new time", i, got[i], want[i])
+		}
+	}
+	took, err := s.BeginDelete(ctx, repo, []string{"c.pack", "nope"}, t0.Add(10*time.Second), t0)
+	if err != nil || len(took) != 1 || took[0] != "c.pack" {
+		t.Fatalf("begin delete = %v, %v; want only c.pack", took, err)
+	}
+	if again, err := s.BeginDelete(ctx, repo, []string{"c.pack"}, t0.Add(11*time.Second), t0.Add(5*time.Second)); err != nil || len(again) != 0 {
+		t.Errorf("a begin delete over a fresh mark took %v, %v; want none", again, err)
+	}
+	if again, err := s.BeginDelete(ctx, repo, []string{"c.pack"}, t0.Add(20*time.Second), t0.Add(15*time.Second)); err != nil || len(again) != 1 {
+		t.Errorf("a begin delete over a stale mark took %v, %v; want the key", again, err)
+	}
+	ok(t, s.RetireFiles(ctx, repo, []string{"c.pack"}, t0.Add(9*time.Second)))
+	busy, err := s.ClaimRetired(ctx, repo, []string{"c.pack", "a.idx"})
+	if err != nil || !busy {
+		t.Errorf("claim of a deleting file = %v, %v; want true", busy, err)
+	}
+	got, _ = s.RetiredFiles(ctx, repo)
+	for _, r := range got {
+		if r.Key == "a.idx" || (r.Key == "c.pack" && (!r.Deleting || !r.At.Equal(t0.Add(time.Second)))) {
+			t.Errorf("after the claim %+v remains: a claim removes only files that are not deleting, and a retire keeps a deleting file as it is", r)
+		}
+	}
+	ok(t, s.RetireFiles(ctx, repo, []string{"a.idx"}, t0))
+	ok(t, s.ForgetRetired(ctx, repo, []string{"a.idx", "nope"}))
+	if got, err := s.RetiredFiles(ctx, repo); err != nil || len(got) != 2 {
+		t.Errorf("retired after forget = %+v, %v; want 2", got, err)
+	}
+	if got, err := s.RetiredFiles(ctx, "gh:acme/other"); err != nil || len(got) != 1 {
+		t.Errorf("retired of another repo = %+v, %v; want 1", got, err)
 	}
 }

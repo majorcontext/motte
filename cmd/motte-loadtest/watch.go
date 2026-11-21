@@ -21,7 +21,7 @@ func scrape(base string) map[string]float64 {
 	sc := bufio.NewScanner(resp.Body)
 	for sc.Scan() {
 		l := sc.Text()
-		if !strings.HasPrefix(l, "motte_pack_cache") && !strings.HasPrefix(l, "motte_bucket") {
+		if !strings.HasPrefix(l, "motte_pack_cache") && !strings.HasPrefix(l, "motte_bucket") && !strings.HasPrefix(l, "motte_index_cache") {
 			continue
 		}
 		k, v, ok := strings.Cut(l, " ")

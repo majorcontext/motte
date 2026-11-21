@@ -15,7 +15,7 @@ var tracer = otel.Tracer("github.com/majorcontext/motte/internal/store")
 // Stats counts what one request read from the store. A handler puts one in the context with WithStats and reads it when
 // the request ends. A nil *Stats counts nothing.
 type Stats struct {
-	Objects, Bytes, Packs, RangeReads, RangeBytes, MaxDepth, SlotWaitNanos atomic.Int64
+	Objects, Bytes, Layers, RangeReads, RangeBytes, MaxDepth, SlotWaitNanos atomic.Int64
 }
 
 type statsKey struct{}
@@ -41,9 +41,9 @@ func statsFrom(ctx context.Context) *Stats {
 	return st
 }
 
-func (s *Stats) packs() {
+func (s *Stats) layer() {
 	if s != nil {
-		s.Packs.Add(1)
+		s.Layers.Add(1)
 	}
 }
 

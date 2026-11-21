@@ -133,6 +133,17 @@ func (b dirBucket) syncDirs(path string) error {
 	}
 }
 
+func (b dirBucket) Delete(_ context.Context, key string) error {
+	p, err := b.path(key)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(p); err != nil && !errors.Is(err, iofs.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 func (b dirBucket) Get(ctx context.Context, key string) ([]byte, error) {
 	return b.GetRange(ctx, key, 0, -1)
 }

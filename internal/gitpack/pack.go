@@ -84,6 +84,7 @@ type Pack struct {
 	c        *objCache
 	cacheAll bool
 	ctx      context.Context
+	lookup   func(SHA) (int64, bool)
 }
 
 // objCache holds resolved objects. Packs made by Bind share it.
@@ -183,6 +184,19 @@ func NewPack(idx []byte, pack ReaderAt) (*Pack, error) {
 	return p, nil
 }
 
+// NewAt returns a Pack that holds no index. It finds a name through the function that WithLookup sets, so a caller
+// that indexes many packs in one structure reads each pack with no index of its own.
+func NewAt(pack ReaderAt) *Pack {
+	return &Pack{pack: pack, c: &objCache{m: map[int64]*resolved{}, max: maxCacheBytes}}
+}
+
+// WithLookup returns a view of the pack that finds a name with f. The view shares the object cache.
+func (p *Pack) WithLookup(f func(SHA) (int64, bool)) *Pack {
+	q := *p
+	q.lookup = f
+	return &q
+}
+
 // Bytes is the size of the index that the pack keeps in memory.
 func (p *Pack) Bytes() int { return p.idxLen }
 
@@ -249,6 +263,9 @@ func (p *Pack) Verify(ctx context.Context, idx, pack []byte) error {
 func (p *Pack) Count() int { return p.n }
 
 func (p *Pack) find(s SHA) (int64, bool) {
+	if p.lookup != nil {
+		return p.lookup(s)
+	}
 	lo, hi := 0, int(p.fanout[s[0]])
 	if s[0] > 0 {
 		lo = int(p.fanout[s[0]-1])
@@ -265,6 +282,9 @@ func (p *Pack) find(s SHA) (int64, bool) {
 	}
 	return int64(off), true
 }
+
+// Lookup returns the offset of the object s in the pack.
+func (p *Pack) Lookup(s SHA) (int64, bool) { return p.find(s) }
 
 func (p *Pack) Has(s SHA) bool { _, ok := p.find(s); return ok }
 

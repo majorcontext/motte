@@ -18,7 +18,7 @@ Non-goals:
 
 - No git dumb HTTP, web UI, review or pull-request model, access lists, or users.
 - No policy about review or merging. The store keeps protected ref patterns and ref events, and the caller decides what they mean.
-- No compaction or deletion of packs, and no purge of deleted workspaces.
+- No purge of deleted workspaces, and no deletion of a pack that holds a live object.
 
 ## Components
 
@@ -28,9 +28,10 @@ Non-goals:
 | `api` | Wire types and error codes. Public package. | M1 |
 | `bucket` | Object store seam with Cloud Storage (`bucket/gcs`), S3-compatible (`bucket/s3`) and filesystem (`bucket/fs`) buckets, and its conformance suite `bucket/buckettest`. Public package. | M1 |
 | `internal/gitpack` | Reader and writer of git pack files and v2 indexes, and the reader of a pushed pack. | M1 |
+| `internal/midx` | Layered multi-pack index: the layer file, the manifest of a repository, and the geometric rules that merge layers and compact packs. | M9 |
 | `internal/pktline`, `internal/gitproto` | The pkt-line framing, and the git smart HTTP protocol over an object reader: advertisement, v2 fetch and ls-refs, receive-pack. | M6 |
 | `internal/land` | Pure rebase of a linear range of commits onto a tip: tree diff, tree apply and the file-level conflict check. | M7 |
-| `meta` | Metadata seam: repositories, workspaces and the epoch fence, op heads, refs, protected ref patterns, ref events, event subscriptions, the land queue, lease and log, pack listing. Backends `meta/postgres` and `meta/sqlite`, and the suite `meta/metatest`. Public package. | M2 |
+| `meta` | Metadata seam: repositories, workspaces and the epoch fence, op heads, refs, protected ref patterns, ref events, event subscriptions, the land queue, lease and log, pack listing, pack manifest. Backends `meta/postgres` and `meta/sqlite`, and the suite `meta/metatest`. Public package. | M2 |
 | Store service | HTTP service over a `meta` store and a `bucket` store, and the epoch fence. | M2 |
 | `client` | Typed Go client for callers. Public package. | M3 |
 | `testserver` | Starts a real server in a caller's test, on PostgreSQL (`Start`) or on SQLite and a temporary directory (`StartLocal`). Public package. | M3 |
@@ -68,9 +69,12 @@ The store plane serves the node daemon and the jj backend. The control plane ser
 | `MOTTE_OIDC_ALGS` | Optional. Comma-separated algorithms from `RS256`, `RS384`, `RS512`, `ES256`, `ES384`. Default `RS256`. |
 | `MOTTE_TLS_CERT`, `MOTTE_TLS_KEY` | Optional. PEM files. When both are set the service serves TLS itself. When neither is set it serves plain HTTP for a reverse proxy, a tunnel or a local run. One without the other is an error. |
 | `MOTTE_EVENT_RETENTION` | Optional. How long a ref event is kept, as a Go duration. Default `336h`. |
+| `MOTTE_COMPACTION` | Optional. `true` runs maintenance of packs and layers on this replica (see Layered index and compaction). Default `false`. |
+| `MOTTE_COMPACTION_INTERVAL` | Optional. The wait between maintenance passes, as a Go duration. Default `30s`. |
+| `MOTTE_COMPACTION_GRACE` | Optional. How long a retired file stays before maintenance deletes it, as a Go duration. Default `1h`. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Optional. Enables OTLP trace export. |
 
-The `s3` backend takes its credentials from the AWS SDK default chain: the environment (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`), the shared files, or a role. The service refuses to start on a `MOTTE_META` or `MOTTE_BUCKET_KIND` value that it does not know, on a `MOTTE_S3_*` variable with another kind, and on a `MOTTE_S3_PATH_STYLE` value that is not `true` or `false`. The service applies the embedded migrations of its metadata backend at start. The PostgreSQL backend applies them under an advisory lock, so replicas can start together. `GET /health` answers 200. `GET /ready` answers 200 once the service has opened the index of every pack, and while the metadata backend answers a ping. The service opens the indexes, newest pack first, 16 at a time, and stops when they fill the open-pack cache of 256 MiB. When a read of an index fails, it logs the error, answers 503 and retries every 5 seconds. `GET /metrics` serves Prometheus metrics. These three routes need no grant. A request for a path or method that no route serves answers 404 `vcs_not_found` or 405 `method_not_allowed` in the error envelope.
+The `s3` backend takes its credentials from the AWS SDK default chain: the environment (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`), the shared files, or a role. The service refuses to start on a `MOTTE_META` or `MOTTE_BUCKET_KIND` value that it does not know, on a `MOTTE_S3_*` variable with another kind, and on a `MOTTE_S3_PATH_STYLE` value that is not `true` or `false`. The service applies the embedded migrations of its metadata backend at start. The PostgreSQL backend applies them under an advisory lock, so replicas can start together. `GET /health` answers 200. `GET /ready` answers 200 once the service has loaded the layers of every repository, and while the metadata backend answers a ping. The service loads the layers, newest layer first, 16 at a time, and stops when they fill the layer cache of 128 MiB. When a read of an index fails, it logs the error, answers 503 and retries every 5 seconds. `GET /metrics` serves Prometheus metrics. These three routes need no grant. A request for a path or method that no route serves answers 404 `vcs_not_found` or 405 `method_not_allowed` in the error envelope.
 
 ### Run locally
 
@@ -104,8 +108,8 @@ A Go test starts the same composition with `testserver.StartLocal`, which needs 
 | `POST /v1/vcs/objects/has` | 1 MiB | 1 MiB |
 | `POST /v1/repos/{repo}/lands` | Nothing: the handler holds a body of at most 1 MiB. The leader that ends the land reserves for each batch (see Land). | 16 MiB plus 4 times the bytes that the batch holds |
 
-  `POST /v1/vcs/objects` reads its JSON through a decoder that refuses 24 MiB of unparsed text, so one element cannot grow the buffer: it answers 413 `vcs_object_too_large`. The memory of the process is at most 4 times 96 MiB for bodies in the reader slots, plus the 512 MiB budget, plus the 256 MiB pack cache: 1152 MiB. The chart default request is 1536Mi.
-- A lookup of a SHA reads the pack indexes of the repository, newest pack first, and a SHA that no pack holds reads every index. The cost grows linearly with the number of packs of a repository. The service accepts this cost: it never compacts packs.
+  `POST /v1/vcs/objects` reads its JSON through a decoder that refuses 24 MiB of unparsed text, so one element cannot grow the buffer: it answers 413 `vcs_object_too_large`. The memory of the process is at most 4 times 96 MiB for bodies in the reader slots, plus the 512 MiB budget, plus the 256 MiB pack cache and the 128 MiB layer cache: 1280 MiB. Maintenance reserves its working memory from the same 512 MiB budget. The chart default request is 1536Mi.
+- A lookup of a SHA probes the layers of the repository, newest layer first (see Layered index and compaction). A layer answers from memory when its filter says that it lacks the SHA, and otherwise with one read of 7 KiB. A SHA that no layer holds costs at most one such read for each layer, and the number of layers grows with the logarithm of the number of objects.
 
 ### Store plane
 
@@ -234,9 +238,34 @@ Queue and leader. Any replica accepts a land. It writes the land to the queue ta
 
 Conflict index. A conflict check needs the paths that changed between `base` and the tip. The land log (`land_log`) has one row for each landed change of a ref: the tip before it, the tip after it, and its changed paths, written in the unit that moves the ref. The paths come from the log when its rows form one unbroken chain from `base` to the tip at the start of the batch. `base` may be the old or the new tip of a row, and the latest such row counts. A chain that is broken by a write of another writer, a `base` that no row names, more than 1000 rows, or a row that kept no paths makes the check diff the tree of `base` against the tree of the tip instead. A diff is made once for each `base` in a batch. A land that changes more than 1000 paths is logged with no paths. A ref keeps its last 10000 log rows, and a unit that adds rows removes the older ones. A path set from the log can hold a path that changed and changed back, so a log check can name a conflict that a diff of the trees would not. A land never finds a conflict in a path that did not change.
 
-Memory. The leader reserves 16 MiB plus 4 bytes for each byte that the batch holds, at its start, and swaps the reservation for a larger one before it reads an object that would pass it. The bytes that a batch holds are the new objects, and the objects that the current land has read. It never holds the old reservation while it waits for the new one, and a reservation above the budget waits for the whole budget. A batch stores one pack, so a repository that lands at a high rate has many small packs, and a lookup reads their indexes (see Limits and memory). The store never compacts them.
+Memory. The leader reserves 16 MiB plus 4 bytes for each byte that the batch holds, at its start, and swaps the reservation for a larger one before it reads an object that would pass it. The bytes that a batch holds are the new objects, and the objects that the current land has read. It never holds the old reservation while it waits for the new one, and a reservation above the budget waits for the whole budget. A batch stores one pack, so a repository that lands at a high rate has many small packs, and a lookup probes their layers (see Layered index and compaction). Maintenance merges the layers and compacts the packs.
 
 Events. A batch that moves a ref appends one event, as any ref write does: `old` is the tip before the batch and `new` is the tip after it, with the generation of the move. Its kind is `merge` when a `merge` grant made any land of the batch, and else `write`. The leader wakes the delivery worker of its replica after the unit. The landed commits are the commits between `old` and `new`.
+
+## Layered index and compaction
+
+A repository keeps one index over its packs. The index is a list of layers, oldest first. A lookup of an object probes the layers from the newest, and the first layer that holds the name answers with the pack and the offset. Packs and layers are files of the object store. They are immutable and named by content. The list is the manifest.
+
+Layer. A layer is one of two files, named by its key under the prefix of the repository:
+
+- The v2 index of one pack, key `<pack id>.idx`. A push or an import stores it, and it is the layer of that one pack. The service keeps the whole index in the layer cache.
+- A layer file of `internal/midx`, key `midx/<SHA-256 of the file>.midx`. It holds one record for each copy of each object of its packs: the object name (20 bytes), the number of the pack in the pack list of the layer (4 bytes) and the offset in the pack (4 bytes), sorted by name and then by pack number. Equal records are stored once. The file ends with a directory, which a reader holds in memory: the pack list (id and size), the first record of each block of 256 records, a Bloom filter of 10 bits and 7 hashes for each record, a header with the counts, and the SHA-256 of the file. A lookup tests the filter, finds the block by the first records, and reads that block with one ranged read. The layer cache keeps blocks, so its memory follows the objects that requests use, and not the size of the layers. A layer has at most 8388608 records, and an offset of a record is at most 4 GiB less one byte.
+
+Manifest. The manifest is a JSON document in the table `pack_manifests`, one row for each repository, with a generation that starts at 1. It lists the layers, oldest first. Each layer has its key, its number of records, the total size and the number of its packs, and, for a layer file, its size and the length of its directory. An index layer lists its pack. Every change of the manifest is a compare and swap on the generation (`meta.Store.SwapManifest`), and a lost swap reads the manifest again and applies the change again. A request reads the manifest once, so it sees one consistent set of layers for its whole life. The manifest of a repository that has packs and no manifest row is made from its pack list, one index layer for each pack, when a request first needs it.
+
+Visibility. A pack is visible when a manifest lists it. A push or an import stores the pack and its index, adds the pack row (`AddPack`), and then adds an index layer to the manifest. A pack whose row exists and whose layer does not, which an older release or a crash leaves, is added to the manifest by the next maintenance pass of the repository.
+
+Tail merge. After a write adds a layer, the writer merges the newest layers into one layer file while the next older layer has at most twice the records of the layers already taken, and the merged layer has at most 131072 records. The merge reads the records of the layers in order, writes one layer file, and swaps the manifest. It needs no object data. A failed or lost tail merge changes nothing, and a write does not fail for it. One process runs one tail merge for a repository at a time.
+
+Maintenance. `Maintain` runs a bounded pass over one repository: it adds the packs that the manifest lacks, compacts packs, merges layers and deletes retired files. The service runs a pass over every repository that has packs, every `MOTTE_COMPACTION_INTERVAL`, when `MOTTE_COMPACTION` is `true`. It is off by default, and the deployment turns it on after the release has run in production. Run it on the writer only. With maintenance off, writes still add layers and merge the tail, and no file is deleted. Replicas that run it repeat work and never corrupt it, because every step ends in one compare and swap.
+
+- Layer merge. The geometric rule picks the newest run of layers: it starts with the newest layer and takes the next older layer while that layer has at most twice the records of the run, up to 64 layers and 8388608 records. A run of two layers or more becomes one layer file. Each layer that stays is more than twice the size of all the newer ones, so a repository of N objects has about log2 N layers.
+- Pack compaction. The same rule runs over the total pack bytes of the layers. A run that holds at least two packs, at most 64 MiB of packs and at most 8388608 objects becomes one pack: the service reads each pack, checks its size and its trailer, and copies its entries in order, unchanged, into one new pack. Delta entries stay valid, because a delta names its base by a distance or by a name. The new pack keeps every entry, so an object that two packs hold is stored twice and a lookup reads one copy. The new layer file holds one pack and a record for each name, with the offset of its first copy. When no run holds two packs, the service compacts the newest single layer that holds several packs. The service also writes the v2 index `<pack id>.idx` of the new pack, so every pack has its own index. That index names each object once, at the offset of its first copy, and its CRC fields are zero. The pack is named by the SHA-256 of its bytes, like any pack. The service adds its pack row after the swap.
+- Reserve. A merge or a compaction reserves its working memory from the memory budget before it reads: 28 bytes for each record, and for a compaction also the bytes of the new pack, the largest source pack and 4 MiB.
+
+Retire. A merge or a compaction records the files that it frees in the table `pack_retired` (`RetireFiles`), each with the time, and then swaps the manifest in one step: the new layer replaces the run. A compaction frees the layer files, and the `.pack` and `.idx` of each source pack that no other layer holds. A merge frees the layer files of the layers that are layer files, and never an `.idx` file. The records come first, so a crash never drops a file that is not recorded. The swap fails, and the new files stay unlisted, when the layers of the run changed since the plan. A maintenance pass deletes a retired file only when the grace has passed (`MOTTE_COMPACTION_GRACE`, default one hour) and the current manifest, which every replica reads, lists no layer or pack that holds it. The pass first marks each due file as deleting with the time (`BeginDelete`), which skips a file that another pass marked within the last 10 minutes, then reads the manifest, then deletes the object (`bucket.Store.Delete`), removes the pack row of a `.pack` file, and forgets the record (`ForgetRetired`). It forgets the record of a file that the manifest lists, and keeps the file. A writer that stores a pack file or a layer file under a name that may be retired calls `ClaimRetired` first, which removes the record when no collector marked it, so no collector takes the file. When a collector marked it already, the writer waits until the record is gone and then stores the file anew. The collector and the writer meet in the metadata store, so a file that a new layer holds is never deleted, with no lock between replicas. A pass that stops after the mark finishes the deletion once the mark is 10 minutes old. A pass that stalls for longer than that between its mark and its delete can delete a file that a writer stored again, so the mark lease must exceed any such pause. A file whose pack a layer holds is kept for both its `.pack` and its `.idx`. A request that began within the grace reads every object it started with, because the old packs and layers are still there. Every crash leaves the manifest valid: the files of an unfinished merge or compaction are unlisted, named by content, and the next run of the same work writes the same files.
+
+Rollback and contract. The layered index is additive. This release writes the per-pack `.idx` and the pack row of every pack that it creates, compacted packs included, and a release before the layered index reads the repository from the pack rows and those indexes. A merge never deletes an `.idx`. Compaction deletes the `.pack`, the `.idx` and the pack row of a source pack together, after the grace, and the compacted pack that replaces it has all three. Dropping the legacy `.idx` write, and the pack rows as the source of the pack list, is a later release that follows a release that has run in production with the layered index.
 
 ## Data model
 
@@ -245,6 +274,8 @@ The tables below are the PostgreSQL schema. Every backend of `meta.Store` keeps 
 ```
 repos(path pk, name, owner, created_at)
 packs(repo, pack_id, bytes, created_at, pk(repo, pack_id))
+pack_manifests(repo pk, generation bigint, body, updated_at)   body is the manifest of the layered index
+pack_retired(repo, key, retired_at, deleting_at, pk(repo, key))   files that wait for deletion
 refs(repo, name, commit_sha, generation, updated_at, pk(repo, name)); sequence ref_generation
 workspaces(id pk, repo, owner, epoch bigint, op, snapshot, report_generation, created_at, deleted_at)
 op_heads(workspace_id pk -> workspaces, epoch, generation, heads text[], updated_at)
@@ -296,7 +327,7 @@ A caller of the service chooses where the service keeps its state. Two seams hol
 | Interface | Holds | Backends |
 |---|---|---|
 | `meta.Store` | Repositories, workspaces and their epoch fence, op heads, refs, protected ref patterns, ref events, event subscriptions, the land queue, lease and log, the pack listing. | `meta/postgres`, `meta/sqlite` |
-| `bucket.Store` | Pack files, pack indexes and op objects. | `bucket/gcs`, `bucket/s3`, `bucket/fs` |
+| `bucket.Store` | Pack files, pack indexes, layer files and op objects. | `bucket/gcs`, `bucket/s3`, `bucket/fs` |
 
 The suites `meta/metatest` and `bucket/buckettest` export `Run(t, newBackend)`. A backend passes its suite before a server uses it. The suite is the executable form of this section, and a difference between them is a defect.
 
@@ -355,6 +386,14 @@ Every method that writes is one atomic unit. The unit is one conditional stateme
 | `AdvanceCursor(id, partition, owner, cursor)` | The lease owner of that partition is `owner`. | Sets the cursor of the partition to the higher of the stored one and `cursor`. | `ErrNotFound`, else `ErrLeaseHeld`. |
 | `AddPack(repo, id, bytes)` | No pack row has the repo and id. | Inserts the row with the creation time. | None. A repeat changes nothing and keeps the first `bytes`. |
 | `Packs(repo)` | None. | Lists the packs of the repo, oldest first, then by id. | None. |
+| `RemovePack(repo, id)` | None. | Deletes the pack row. | None. A missing row is not an error. |
+| `RetireFiles(repo, keys, at)` | None. | Records each key with the time `at`. A key that is recorded and not deleting takes the new time. | None. |
+| `BeginDelete(repo, keys, now, staleBefore)` | None. | Marks each key that is recorded as deleting at `now`, unless it is deleting since after `staleBefore`, and returns the keys that it marked. Of concurrent callers, one marks a key. | None. |
+| `ClaimRetired(repo, keys)` | None. | Removes each key that is recorded and not deleting, and returns whether any key is deleting. It waits for a mark that is not committed. | None. |
+| `RetiredFiles(repo)` | None. | Lists the retired files of the repo, oldest first, then by key, with their deleting mark. | None. |
+| `ForgetRetired(repo, keys)` | None. | Deletes the records of the keys. | None. A missing key is not an error. |
+| `Manifest(repo)` | The repo has a manifest. | Returns the generation and the body. | `ErrNotFound`. |
+| `SwapManifest(repo, expect, body)` | The stored generation is `expect`, or no row exists and `expect` is 0. | Stores `body` with the generation `expect + 1`, and returns it. The body is opaque to the store. | `ErrManifestStale`. |
 | `EnqueueLand(r, now)` | None. | Inserts a pending item with the next `seq`, or returns the item that has the repo and id of `r`. | None. |
 | `LandItem(repo, id)` | None. | Returns the item, with its result and generation once it is done. | `ErrNotFound`. |
 | `LandPending()` | None. | Lists the `(repo, ref)` pairs that have an item that is not done. | None. |
@@ -370,7 +409,8 @@ A `repo` argument of a fenced write is the repo of the grant. It must equal the 
 
 ### Contract of bucket.Store
 
-- `Create(key, data)` writes `data` when no object has `key`, and returns true. It returns false and changes nothing when an object has `key`. Of N concurrent creators of one key, exactly one gets true. A stored object is never replaced and never deleted.
+- `Create(key, data)` writes `data` when no object has `key`, and returns true. It returns false and changes nothing when an object has `key`. Of N concurrent creators of one key, exactly one gets true. A stored object is never replaced.
+- `Delete(key)` removes the object and is not an error for a missing key. Only the deletion of a retired file calls it. A `Create` of a deleted key writes again.
 - `Get(key)` returns the whole object. `GetRange(key, off, n)` returns up to `n` bytes from `off`, fewer at the end, none when `off` is at or past the end, and the rest of the object when `n` is negative. A missing key is `bucket.ErrNotFound` for both.
 - A read that starts after a `Create` that returned sees the whole object. The `fs` backend keeps its on-disk format: a 4096-byte header block, then the data.
 
@@ -551,7 +591,7 @@ Package `testserver` runs the real server in the process of a test, on a fresh s
 ## Observability
 
 - Traces: OTLP, with the endpoint from the environment and no vendor in the code. Span names start with `vcs.serve.` and end with the route, such as `vcs.serve.put.refs`. Requests accept W3C trace headers.
-- Metrics: Prometheus at `/metrics`, with names that start with `motte_`: `motte_http_requests_total` and `motte_http_request_duration_seconds`, by route, and the open-pack cache: `motte_pack_cache_hits_total`, `motte_pack_cache_misses_total`, `motte_pack_cache_evictions_total`, `motte_pack_cache_open_packs`, `motte_pack_cache_open_bytes`, `motte_bucket_index_read_bytes_total`, `motte_bucket_range_reads_total` and `motte_bucket_range_read_bytes_total`.
+- Metrics: Prometheus at `/metrics`, with names that start with `motte_`: `motte_http_requests_total` and `motte_http_request_duration_seconds`, by route, and the open-pack cache: `motte_pack_cache_hits_total`, `motte_pack_cache_misses_total`, `motte_pack_cache_evictions_total`, `motte_pack_cache_open_packs`, `motte_pack_cache_open_bytes`, `motte_bucket_index_read_bytes_total`, `motte_bucket_range_reads_total` and `motte_bucket_range_read_bytes_total`. The layer cache: `motte_index_cache_hits_total`, `motte_index_cache_misses_total`, `motte_index_cache_evictions_total` and `motte_index_cache_bytes`. Maintenance: `motte_compaction_runs_total`, `motte_compaction_bytes_total`, `motte_compaction_objects_total`, `motte_layer_merge_runs_total`, `motte_layer_merge_objects_total`, `motte_retired_files_deleted_total`, `motte_maintenance_failures_total`, and the layers of the repositories that maintenance has seen: `motte_manifest_layers_max`, `motte_manifest_layers_sum` and `motte_manifest_repos`. The span of a store request has the attribute `layers_probed`.
 - Logs: JSON. A log line of the service never holds a grant, a path or an object body. A log line of the node daemon never holds a grant, and it carries the error text of its own process, which can name a node path.
 - Instrumentation is additive. It never changes behavior or errors.
 

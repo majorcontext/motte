@@ -1,0 +1,320 @@
+package store
+
+import (
+	"container/list"
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+
+	"golang.org/x/sync/errgroup"
+
+	"github.com/majorcontext/motte/internal/gitpack"
+	"github.com/majorcontext/motte/internal/midx"
+	"github.com/majorcontext/motte/meta"
+)
+
+// lru is a byte-bounded cache of immutable values: layers and blocks of records are named by content.
+type lru struct {
+	mu      sync.Mutex
+	max     int
+	used    int
+	evicted int
+	ll      *list.List
+	m       map[any]*list.Element
+}
+
+type lruEntry struct {
+	key, val any
+	size     int
+}
+
+func newLRU(max int) *lru { return &lru{max: max, ll: list.New(), m: map[any]*list.Element{}} }
+
+func (c *lru) get(k any) (any, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.m[k]
+	if !ok {
+		return nil, false
+	}
+	c.ll.MoveToFront(e)
+	return e.Value.(*lruEntry).val, true
+}
+
+func (c *lru) put(k, v any, size int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e, ok := c.m[k]; ok {
+		c.ll.MoveToFront(e)
+		return
+	}
+	c.m[k] = c.ll.PushFront(&lruEntry{k, v, size})
+	c.used += size
+	for c.used > c.max && c.ll.Len() > 1 {
+		old := c.ll.Back()
+		en := old.Value.(*lruEntry)
+		c.ll.Remove(old)
+		delete(c.m, en.key)
+		c.used -= en.size
+		c.evicted++
+	}
+}
+
+func (c *lru) stats() (used, evicted int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.used, c.evicted
+}
+
+func (c *lru) evictions() int {
+	_, e := c.stats()
+	return e
+}
+
+// layerH is a loaded layer: the index of one pack kept whole, or the directory of a layer file whose blocks of records
+// are read when a lookup needs them.
+type layerH struct {
+	key   string
+	entry midx.Entry
+	packs []midx.Pack
+	idx   *gitpack.Pack
+	dir   *midx.Dir
+}
+
+type blockKey struct {
+	layer string
+	blk   int
+}
+
+func (s *Service) layer(ctx context.Context, prefix string, e midx.Entry) (*layerH, error) {
+	key := prefix + "/" + e.Key
+	if h, ok := s.icache.get(key); ok {
+		s.ihits.Add(1)
+		return h.(*layerH), nil
+	}
+	v, err, _ := s.loads.Do(key, func() (any, error) {
+		s.imisses.Add(1)
+		h, size, err := s.loadLayer(context.WithoutCancel(ctx), key, e)
+		if err != nil {
+			return nil, err
+		}
+		s.icache.put(key, h, size)
+		return h, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v.(*layerH), nil
+}
+
+func (s *Service) loadLayer(ctx context.Context, key string, e midx.Entry) (*layerH, int, error) {
+	h := &layerH{key: key, entry: e}
+	if e.IsIndex() {
+		if len(e.Packs) != 1 {
+			return nil, 0, midx.ErrCorrupt
+		}
+		data, err := s.st.Get(ctx, key)
+		if err != nil {
+			return nil, 0, mapNotFound(err)
+		}
+		s.idxBytes.Add(int64(len(data)))
+		p, err := gitpack.NewPack(data, nil)
+		if err != nil {
+			return nil, 0, err
+		}
+		h.idx, h.packs = p, e.Packs
+		return h, len(data), nil
+	}
+	if e.Dir <= 0 || int64(e.Dir) > e.Size {
+		return nil, 0, midx.ErrCorrupt
+	}
+	tail, err := s.st.GetRange(ctx, key, e.Size-int64(e.Dir), int64(e.Dir))
+	if err != nil {
+		return nil, 0, mapNotFound(err)
+	}
+	s.idxBytes.Add(int64(len(tail)))
+	d, err := midx.Parse(tail, e.Size)
+	if err != nil {
+		return nil, 0, err
+	}
+	if d.N != e.Objects || len(d.Packs) != e.NPacks {
+		return nil, 0, midx.ErrCorrupt
+	}
+	h.dir, h.packs = d, d.Packs
+	return h, len(tail), nil
+}
+
+// lookup finds sha in a layer, in the pack ord of the layer, or in any pack when ord is negative.
+func (s *Service) lookup(ctx context.Context, h *layerH, sha gitpack.SHA, ord int) (int, int64, bool, error) {
+	if h.idx != nil {
+		if ord > 0 {
+			return 0, 0, false, nil
+		}
+		off, ok := h.idx.Lookup(sha)
+		return 0, off, ok, nil
+	}
+	r, ok, err := h.dir.Lookup(ctx, sha, ord, func(ctx context.Context, i int) ([]byte, error) { return s.block(ctx, h, i) })
+	return int(r.Ord), int64(r.Off), ok, err
+}
+
+func (s *Service) block(ctx context.Context, h *layerH, i int) ([]byte, error) {
+	k := blockKey{h.key, i}
+	if b, ok := s.icache.get(k); ok {
+		s.ihits.Add(1)
+		return b.([]byte), nil
+	}
+	s.imisses.Add(1)
+	off, n := h.dir.BlockRange(i)
+	ctx, cancel := context.WithTimeout(ctx, blockTimeout)
+	defer cancel()
+	b, err := s.st.GetRange(ctx, h.key, off, n)
+	if err != nil {
+		return nil, mapNotFound(err)
+	}
+	if int64(len(b)) != n {
+		return nil, midx.ErrCorrupt
+	}
+	s.idxBytes.Add(n)
+	s.icache.put(k, b, len(b))
+	return b, nil
+}
+
+func (s *Service) readLayer(h *layerH) midx.ReadFunc {
+	return func(ctx context.Context, off, n int64) ([]byte, error) {
+		b, err := s.st.GetRange(ctx, h.key, off, n)
+		s.idxBytes.Add(int64(len(b)))
+		return b, mapNotFound(err)
+	}
+}
+
+// loadManifest returns the manifest of repo and its generation. A repo that has packs and no manifest gets one from
+// its pack list, with one index layer for each pack. A repo with neither has an empty manifest of generation 0.
+func (s *Service) loadManifest(ctx context.Context, repo Repo) (midx.Manifest, int64, error) {
+	row, err := s.index.Manifest(ctx, repo.String())
+	if errors.Is(err, meta.ErrNotFound) {
+		return s.bootstrap(ctx, repo)
+	}
+	if err != nil {
+		return midx.Manifest{}, 0, err
+	}
+	m, err := midx.DecodeManifest(row.Body)
+	return m, row.Generation, err
+}
+
+func (s *Service) bootstrap(ctx context.Context, repo Repo) (midx.Manifest, int64, error) {
+	type result struct {
+		m   midx.Manifest
+		gen int64
+	}
+	v, err, _ := s.loads.Do("bootstrap|"+repo.String(), func() (any, error) {
+		ctx := context.WithoutCancel(ctx)
+		packs, err := s.index.Packs(ctx, repo.String())
+		if err != nil || len(packs) == 0 {
+			return result{}, err
+		}
+		layers, err := s.indexLayers(ctx, repo, packs)
+		if err != nil {
+			return nil, err
+		}
+		m := midx.Manifest{Layers: layers}
+		body, err := m.Encode()
+		if err != nil {
+			return nil, err
+		}
+		gen, err := s.index.SwapManifest(ctx, repo.String(), 0, body)
+		if errors.Is(err, meta.ErrManifestStale) {
+			row, err := s.index.Manifest(ctx, repo.String())
+			if err != nil {
+				return nil, err
+			}
+			m, err := midx.DecodeManifest(row.Body)
+			return result{m, row.Generation}, err
+		}
+		return result{m, gen}, err
+	})
+	if err != nil {
+		return midx.Manifest{}, 0, err
+	}
+	r := v.(result)
+	return r.m, r.gen, nil
+}
+
+// indexLayers makes an index layer for each pack, reading only the header of its index.
+func (s *Service) indexLayers(ctx context.Context, repo Repo, packs []meta.Pack) ([]midx.Entry, error) {
+	prefix, err := repoPrefix(repo)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]midx.Entry, len(packs))
+	var g errgroup.Group
+	g.SetLimit(16)
+	for i, p := range packs {
+		g.Go(func() error {
+			head, err := s.st.GetRange(ctx, prefix+"/"+p.ID+".idx", 0, gitpack.IdxHeadBytes)
+			if err != nil {
+				return fmt.Errorf("store: index of pack %s: %w", p.ID, mapNotFound(err))
+			}
+			s.idxBytes.Add(int64(len(head)))
+			n, err := gitpack.IdxCount(head)
+			if err != nil {
+				return err
+			}
+			out[i] = indexEntry(p.ID, p.Bytes, n)
+			return nil
+		})
+	}
+	return out, g.Wait()
+}
+
+func indexEntry(id string, bytes int64, objects int) midx.Entry {
+	return midx.Entry{Key: id + ".idx", Objects: objects, Bytes: bytes, NPacks: 1, Packs: []midx.Pack{{ID: id, Bytes: bytes}}}
+}
+
+const manifestRetries = 64
+
+// updateManifest applies f to the current manifest and stores the result with a compare and swap, again on a lost
+// swap. f returns false to leave the manifest as it is. f may run more than once.
+func (s *Service) updateManifest(ctx context.Context, repo Repo, f func(*midx.Manifest) (bool, error)) error {
+	for range manifestRetries {
+		m, gen, err := s.loadManifest(ctx, repo)
+		if err != nil {
+			return err
+		}
+		changed, err := f(&m)
+		if err != nil || !changed {
+			return err
+		}
+		body, err := m.Encode()
+		if err != nil {
+			return err
+		}
+		if _, err := s.index.SwapManifest(ctx, repo.String(), gen, body); !errors.Is(err, meta.ErrManifestStale) {
+			return err
+		}
+	}
+	return fmt.Errorf("store: manifest of %s changes too fast", repo)
+}
+
+// appendPack adds the pack that putPack stored as the newest layer, and merges the small layers at the tail.
+func (s *Service) appendPack(ctx context.Context, repo Repo, id string, bytes int64, idx []byte) error {
+	n, err := gitpack.IdxCount(idx[:min(len(idx), gitpack.IdxHeadBytes)])
+	if err != nil {
+		return err
+	}
+	e := indexEntry(id, bytes, n)
+	err = s.updateManifest(ctx, repo, func(m *midx.Manifest) (bool, error) {
+		for _, l := range m.Layers {
+			if l.IsIndex() && l.Packs[0].ID == id {
+				return false, nil
+			}
+		}
+		m.Layers = append(m.Layers, e)
+		return true, nil
+	})
+	if err != nil {
+		return err
+	}
+	s.mergeTail(ctx, repo)
+	return nil
+}

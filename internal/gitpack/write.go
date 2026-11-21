@@ -94,3 +94,38 @@ func Build(objs []Object) (pack, idx []byte, names []SHA) {
 	x.Write(isum[:])
 	return p.Bytes(), x.Bytes(), names
 }
+
+// IdxEntry is one object of a pack index: its name, the CRC-32 of its entry and its offset.
+type IdxEntry struct {
+	Name SHA
+	CRC  uint32
+	Off  uint32
+}
+
+// BuildIdx writes the v2 index of a pack from entries sorted by name. packSum is the trailer of the pack.
+func BuildIdx(entries []IdxEntry, packSum [20]byte) []byte {
+	var x bytes.Buffer
+	x.Grow(1032 + 28*len(entries) + 40)
+	x.Write([]byte{0xff, 't', 'O', 'c'})
+	_ = binary.Write(&x, binary.BigEndian, uint32(2))
+	var fan [256]uint32
+	for _, e := range entries {
+		for b := int(e.Name[0]); b < 256; b++ {
+			fan[b]++
+		}
+	}
+	_ = binary.Write(&x, binary.BigEndian, fan)
+	for _, e := range entries {
+		x.Write(e.Name[:])
+	}
+	for _, e := range entries {
+		_ = binary.Write(&x, binary.BigEndian, e.CRC)
+	}
+	for _, e := range entries {
+		_ = binary.Write(&x, binary.BigEndian, e.Off)
+	}
+	x.Write(packSum[:])
+	isum := sha1.Sum(x.Bytes())
+	x.Write(isum[:])
+	return x.Bytes()
+}
