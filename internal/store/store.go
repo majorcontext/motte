@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -99,6 +100,27 @@ type Service struct {
 	order     []string
 	openBytes int
 	evicted   int
+
+	hits, misses, idxBytes, rangeReads, rangeBytes atomic.Int64
+}
+
+// CacheStats counts the open-pack cache and the bucket reads that fill it.
+type CacheStats struct {
+	Hits, Misses, Evictions int64
+	OpenPacks, OpenBytes    int64
+	IndexBytes              int64
+	RangeReads, RangeBytes  int64
+}
+
+// CacheStats returns the counters of the open-pack cache.
+func (s *Service) CacheStats() CacheStats {
+	s.mu.Lock()
+	open, bytes, ev := len(s.open), s.openBytes, s.evicted
+	s.mu.Unlock()
+	return CacheStats{
+		Hits: s.hits.Load(), Misses: s.misses.Load(), Evictions: int64(ev), OpenPacks: int64(open), OpenBytes: int64(bytes),
+		IndexBytes: s.idxBytes.Load(), RangeReads: s.rangeReads.Load(), RangeBytes: s.rangeBytes.Load(),
+	}
 }
 
 // Reserve takes bytes of MemoryBudget, at most the whole budget, and waits while the budget is spent. The caller
@@ -268,6 +290,7 @@ func (b bytesReader) Size() int64 { return int64(len(b)) }
 // blockReader reads a pack from the object store in blocks and keeps the
 // last few, so one object costs about one range read.
 type blockReader struct {
+	svc  *Service
 	st   bucket.Store
 	key  string
 	size int64
@@ -334,6 +357,8 @@ func (b *blockReader) block(ctx context.Context, i int64) ([]byte, error) {
 	ctx, sp := tracer.Start(ctx, "vcs.pack.read", trace.WithAttributes(attribute.Int64("offset", i*blockSize), attribute.Int("range_bytes", blockSize)))
 	d, err := b.st.GetRange(ctx, b.key, i*blockSize, blockSize)
 	statsFrom(ctx).rangeRead(len(d))
+	b.svc.rangeReads.Add(1)
+	b.svc.rangeBytes.Add(int64(len(d)))
 	sp.SetAttributes(attribute.Int("bytes", len(d)))
 	finishSpan(sp, err)
 	if err != nil {
@@ -398,14 +423,17 @@ func (s *Service) openPack(ctx context.Context, st bucket.Store, prefix string, 
 	s.mu.Lock()
 	if e, ok := s.open[key]; ok {
 		s.mu.Unlock()
+		s.hits.Add(1)
 		return e, nil
 	}
 	s.mu.Unlock()
+	s.misses.Add(1)
 	idx, err := st.Get(ctx, prefix+"/"+ref.ID+".idx")
 	if err != nil {
 		return nil, mapNotFound(err)
 	}
-	br := &blockReader{st: st, key: prefix + "/" + ref.ID + ".pack", size: ref.Bytes, blocks: map[int64][]byte{}}
+	s.idxBytes.Add(int64(len(idx)))
+	br := &blockReader{svc: s, st: st, key: prefix + "/" + ref.ID + ".pack", size: ref.Bytes, blocks: map[int64][]byte{}}
 	e := &openPack{b: br}
 	br.changed = func() { s.recharge(e) }
 	p, err := gitpack.NewPack(idx, reqReader{b: br, ctx: context.Background()})

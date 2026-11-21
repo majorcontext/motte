@@ -93,6 +93,7 @@ func New(cfg Config) *Server {
 	s.requests = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "motte_http_requests_total", Help: "Requests by route and status."}, []string{"route", "status"})
 	s.latency = prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "motte_http_request_duration_seconds", Help: "Request time by route.", Buckets: prometheus.DefBuckets}, []string{"route"})
 	s.registry.MustRegister(s.requests, s.latency)
+	s.registerCacheMetrics()
 
 	s.mux = http.NewServeMux()
 	s.registerStorePlane(s.mux)
@@ -160,4 +161,21 @@ func (s *Server) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func (s *Server) registerCacheMetrics() {
+	counter := func(name, help string, f func(store.CacheStats) int64) {
+		s.registry.MustRegister(prometheus.NewCounterFunc(prometheus.CounterOpts{Name: name, Help: help}, func() float64 { return float64(f(s.objects.CacheStats())) }))
+	}
+	gauge := func(name, help string, f func(store.CacheStats) int64) {
+		s.registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: name, Help: help}, func() float64 { return float64(f(s.objects.CacheStats())) }))
+	}
+	counter("motte_pack_cache_hits_total", "Pack lookups served by an open pack.", func(c store.CacheStats) int64 { return c.Hits })
+	counter("motte_pack_cache_misses_total", "Pack lookups that read an index from the bucket.", func(c store.CacheStats) int64 { return c.Misses })
+	counter("motte_pack_cache_evictions_total", "Open packs evicted for the byte budget.", func(c store.CacheStats) int64 { return c.Evictions })
+	counter("motte_bucket_index_read_bytes_total", "Bytes of pack indexes read from the bucket.", func(c store.CacheStats) int64 { return c.IndexBytes })
+	counter("motte_bucket_range_reads_total", "Range reads of packs from the bucket.", func(c store.CacheStats) int64 { return c.RangeReads })
+	counter("motte_bucket_range_read_bytes_total", "Bytes of range reads of packs from the bucket.", func(c store.CacheStats) int64 { return c.RangeBytes })
+	gauge("motte_pack_cache_open_packs", "Packs in the open-pack cache.", func(c store.CacheStats) int64 { return c.OpenPacks })
+	gauge("motte_pack_cache_open_bytes", "Bytes charged to the open-pack cache.", func(c store.CacheStats) int64 { return c.OpenBytes })
 }

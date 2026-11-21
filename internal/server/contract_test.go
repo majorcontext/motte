@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptrace"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -189,6 +190,17 @@ func TestImportedPackServesObjects(t *testing.T) {
 	}
 	_, err := e.Client(e.readGrant("gh:acme/other")).Object(ctx, sha)
 	refuses(t, err, client.ErrNotFound, 404)
+	resp, err := http.Get(e.URL + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	text, _ := io.ReadAll(resp.Body)
+	for _, name := range []string{"motte_pack_cache_misses_total", "motte_bucket_index_read_bytes_total"} {
+		if !regexp.MustCompile(name + ` [1-9]`).Match(text) {
+			t.Errorf("metrics show no %s", name)
+		}
+	}
 }
 
 func TestDeletedWorkspaceRefusesReadsAndWrites(t *testing.T) {

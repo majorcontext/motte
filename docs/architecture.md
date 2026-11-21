@@ -36,6 +36,7 @@ Non-goals:
 | `testserver` | Starts a real server in a caller's test, on PostgreSQL (`Start`) or on SQLite and a temporary directory (`StartLocal`). Public package. | M3 |
 | `internal/testcount` | Counts the servers, PostgreSQL schemas and processes that the test helpers start, and prints the counts of a package at the end of its test run for `internal/testtime`. | M3 |
 | `internal/vfs/...`, `cmd/motte-vfsd`, `volume` | Node daemon that serves a virtual workspace, and its public volume attributes. | M4 |
+| `cmd/motte-loadtest` | Load test. `gen` builds a synthetic repository of any object count in a running service by `PUT /v1/vcs/packs/{pack_id}`, and `run` drives a weighted mix of concurrent reads, fetches, pushes, ref swaps and lands, and reports latency percentiles, errors, the cache counters of `/metrics` and the CPU and memory of named processes. Not part of the service. | M8 |
 | jj backend | `jj/`: the jj binary whose stores and working copy use the workspace daemon. Released for linux amd64 and arm64. | M5 |
 
 ## Planes
@@ -550,7 +551,7 @@ Package `testserver` runs the real server in the process of a test, on a fresh s
 ## Observability
 
 - Traces: OTLP, with the endpoint from the environment and no vendor in the code. Span names start with `vcs.serve.` and end with the route, such as `vcs.serve.put.refs`. Requests accept W3C trace headers.
-- Metrics: Prometheus at `/metrics`, with names that start with `motte_`: `motte_http_requests_total` and `motte_http_request_duration_seconds`, by route.
+- Metrics: Prometheus at `/metrics`, with names that start with `motte_`: `motte_http_requests_total` and `motte_http_request_duration_seconds`, by route, and the open-pack cache: `motte_pack_cache_hits_total`, `motte_pack_cache_misses_total`, `motte_pack_cache_evictions_total`, `motte_pack_cache_open_packs`, `motte_pack_cache_open_bytes`, `motte_bucket_index_read_bytes_total`, `motte_bucket_range_reads_total` and `motte_bucket_range_read_bytes_total`.
 - Logs: JSON. A log line of the service never holds a grant, a path or an object body. A log line of the node daemon never holds a grant, and it carries the error text of its own process, which can name a node path.
 - Instrumentation is additive. It never changes behavior or errors.
 
