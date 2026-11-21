@@ -357,7 +357,7 @@ func (s *Service) compactRun(ctx context.Context, repo Repo, layers []midx.Entry
 	for _, p := range r.packs {
 		biggest = max(biggest, p.Bytes)
 	}
-	release, err := s.Reserve(ctx, total+biggest+2*int64(midx.RecordSize)*int64(r.objects())+4<<20)
+	release, err := s.Reserve(ctx, total+biggest+3*int64(midx.RecordSize)*int64(r.objects())+4<<20)
 	if err != nil {
 		return err
 	}
@@ -574,7 +574,7 @@ func (s *Service) collect(ctx context.Context, repo Repo) error {
 		}
 		versions[key] = v
 	}
-	taken, err := s.index.BeginDelete(ctx, repo.String(), due, now, now.Add(-deleteLease))
+	taken, err := s.index.BeginDelete(ctx, repo.String(), due, now, now.Add(-deleteLease), cut)
 	if err != nil {
 		return err
 	}

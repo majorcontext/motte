@@ -81,7 +81,7 @@ type PackIndex interface {
 	RetireFiles(ctx context.Context, repo string, keys []string, at time.Time) error
 	RetiredFiles(ctx context.Context, repo string) ([]meta.Retired, error)
 	ForgetRetired(ctx context.Context, repo string, keys []string) error
-	BeginDelete(ctx context.Context, repo string, keys []string, now, staleBefore time.Time) ([]string, error)
+	BeginDelete(ctx context.Context, repo string, keys []string, now, staleBefore, retiredBefore time.Time) ([]string, error)
 	ClaimRetired(ctx context.Context, repo string, keys []string) (bool, error)
 	Manifest(ctx context.Context, repo string) (meta.Manifest, error)
 	SwapManifest(ctx context.Context, repo string, expect int64, body []byte) (int64, error)

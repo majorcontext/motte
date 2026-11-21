@@ -406,10 +406,10 @@ func (s *Store) RetiredFiles(ctx context.Context, repo string) ([]meta.Retired, 
 	return out, nil
 }
 
-func (s *Store) BeginDelete(ctx context.Context, repo string, keys []string, now, staleBefore time.Time) ([]string, error) {
+func (s *Store) BeginDelete(ctx context.Context, repo string, keys []string, now, staleBefore, retiredBefore time.Time) ([]string, error) {
 	var out []string
 	for _, k := range keys {
-		res, err := s.db.ExecContext(ctx, `UPDATE pack_retired SET deleting_at = ? WHERE repo = ? AND key = ? AND (deleting_at IS NULL OR deleting_at <= ?)`, now.UnixMicro(), repo, k, staleBefore.UnixMicro())
+		res, err := s.db.ExecContext(ctx, `UPDATE pack_retired SET deleting_at = ? WHERE repo = ? AND key = ? AND retired_at <= ? AND (deleting_at IS NULL OR deleting_at <= ?)`, now.UnixMicro(), repo, k, retiredBefore.UnixMicro(), staleBefore.UnixMicro())
 		if err != nil {
 			return nil, fmt.Errorf("sqlite: begin delete: %w", err)
 		}

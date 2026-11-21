@@ -329,8 +329,8 @@ func (s *Store) RetiredFiles(ctx context.Context, repo string) ([]meta.Retired, 
 	return out, nil
 }
 
-func (s *Store) BeginDelete(ctx context.Context, repo string, keys []string, now, staleBefore time.Time) ([]string, error) {
-	rows, err := s.Pool.Query(ctx, `UPDATE pack_retired SET deleting_at = $3 WHERE repo = $1 AND key = ANY($2) AND (deleting_at IS NULL OR deleting_at <= $4) RETURNING key`, repo, keys, now, staleBefore)
+func (s *Store) BeginDelete(ctx context.Context, repo string, keys []string, now, staleBefore, retiredBefore time.Time) ([]string, error) {
+	rows, err := s.Pool.Query(ctx, `UPDATE pack_retired SET deleting_at = $3 WHERE repo = $1 AND key = ANY($2) AND retired_at <= $5 AND (deleting_at IS NULL OR deleting_at <= $4) RETURNING key`, repo, keys, now, staleBefore, retiredBefore)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: begin delete: %w", err)
 	}

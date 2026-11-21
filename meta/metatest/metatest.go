@@ -721,14 +721,17 @@ func retiredFiles(t *testing.T, s meta.Store, repo string) {
 			t.Errorf("retired[%d] = %+v, want %+v: oldest first, a repeat takes the new time", i, got[i], want[i])
 		}
 	}
-	took, err := s.BeginDelete(ctx, repo, []string{"c.pack", "nope"}, t0.Add(10*time.Second), t0)
+	took, err := s.BeginDelete(ctx, repo, []string{"c.pack", "nope"}, t0.Add(10*time.Second), t0, t0.Add(time.Hour))
 	if err != nil || len(took) != 1 || took[0] != "c.pack" {
 		t.Fatalf("begin delete = %v, %v; want only c.pack", took, err)
 	}
-	if again, err := s.BeginDelete(ctx, repo, []string{"c.pack"}, t0.Add(11*time.Second), t0.Add(5*time.Second)); err != nil || len(again) != 0 {
+	if early, err := s.BeginDelete(ctx, repo, []string{"a.idx"}, t0.Add(10*time.Second), t0, t0.Add(-time.Second)); err != nil || len(early) != 0 {
+		t.Errorf("a begin delete of a file retired after the cut took %v, %v; want none", early, err)
+	}
+	if again, err := s.BeginDelete(ctx, repo, []string{"c.pack"}, t0.Add(11*time.Second), t0.Add(5*time.Second), t0.Add(time.Hour)); err != nil || len(again) != 0 {
 		t.Errorf("a begin delete over a fresh mark took %v, %v; want none", again, err)
 	}
-	if again, err := s.BeginDelete(ctx, repo, []string{"c.pack"}, t0.Add(20*time.Second), t0.Add(15*time.Second)); err != nil || len(again) != 1 {
+	if again, err := s.BeginDelete(ctx, repo, []string{"c.pack"}, t0.Add(20*time.Second), t0.Add(15*time.Second), t0.Add(time.Hour)); err != nil || len(again) != 1 {
 		t.Errorf("a begin delete over a stale mark took %v, %v; want the key", again, err)
 	}
 	ok(t, s.RetireFiles(ctx, repo, []string{"c.pack"}, t0.Add(9*time.Second)))

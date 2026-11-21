@@ -265,8 +265,8 @@ type Store interface {
 	// RetiredFiles lists the retired files of a repo, oldest first, then by key.
 	RetiredFiles(ctx context.Context, repo string) ([]Retired, error)
 	// BeginDelete marks each of keys as deleting at now, and returns the keys that it marked. It skips a key that is
-	// deleting since after staleBefore, which another collector owns. Of concurrent callers, exactly one marks a key.
-	BeginDelete(ctx context.Context, repo string, keys []string, now, staleBefore time.Time) ([]string, error)
+	// deleting since after staleBefore, which another collector owns, and a key retired after retiredBefore, which a writer used and retired again. Of concurrent callers, exactly one marks a key.
+	BeginDelete(ctx context.Context, repo string, keys []string, now, staleBefore, retiredBefore time.Time) ([]string, error)
 	// ClaimRetired removes each of keys that is retired and not deleting, so no collector takes it, and reports whether
 	// any of keys is deleting. A writer that stores a file again calls it first, and waits while it reports true.
 	ClaimRetired(ctx context.Context, repo string, keys []string) (deleting bool, err error)

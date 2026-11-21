@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -72,6 +73,9 @@ func (c *lru) evictions() int {
 	return e
 }
 
+// layerLoadTimeout bounds a layer load that callers share, which no single caller cancels.
+const layerLoadTimeout = 2 * time.Minute
+
 // layerH is a loaded layer: the index of one pack kept whole, or the directory of a layer file whose blocks of records
 // are read when a lookup needs them.
 type layerH struct {
@@ -93,19 +97,26 @@ func (s *Service) layer(ctx context.Context, prefix string, e midx.Entry) (*laye
 		s.ihits.Add(1)
 		return h.(*layerH), nil
 	}
-	v, err, _ := s.loads.Do(key, func() (any, error) {
+	ch := s.loads.DoChan(key, func() (any, error) {
 		s.imisses.Add(1)
-		h, size, err := s.loadLayer(context.WithoutCancel(ctx), key, e)
+		load, cancel := context.WithTimeout(context.WithoutCancel(ctx), layerLoadTimeout)
+		defer cancel()
+		h, size, err := s.loadLayer(load, key, e)
 		if err != nil {
 			return nil, err
 		}
 		s.icache.put(key, h, size)
 		return h, nil
 	})
-	if err != nil {
-		return nil, err
+	select {
+	case r := <-ch:
+		if r.Err != nil {
+			return nil, r.Err
+		}
+		return r.Val.(*layerH), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	return v.(*layerH), nil
 }
 
 func (s *Service) loadLayer(ctx context.Context, key string, e midx.Entry) (*layerH, int, error) {
