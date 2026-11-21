@@ -39,13 +39,15 @@ jobs:
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
+      # No released fake-gcs-server answers 412 to a delete with a stale ifGenerationMatch: the commit
+      # below is the first that does, so the emulator is built from it.
+      - run: go install github.com/fsouza/fake-gcs-server@8426c55a045b0c410768237143eb3bfd1ba123c4
       # A service container cannot pass command arguments, so docker run starts the object stores.
       # MinIO is the community fork pgsty/minio: the minio/minio image is no longer published.
       - run: |
           docker run -d --name minio -p 9000:9000 -e MINIO_ROOT_USER="$AWS_ACCESS_KEY_ID" -e MINIO_ROOT_PASSWORD="$AWS_SECRET_ACCESS_KEY" \
             pgsty/minio@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372 server /data
-          docker run -d --name fake-gcs -p 4443:4443 \
-            fsouza/fake-gcs-server@sha256:797ce226d62f947c009dc40246b30cfb456b8473d8241407f9d6f2c04e4d69ef -scheme http -port 4443 -public-host localhost:4443
+          nohup "$(go env GOPATH)/bin/fake-gcs-server" -backend memory -scheme http -port 4443 -public-host localhost:4443 >fake-gcs.log 2>&1 &
           curl --retry 30 --retry-delay 1 --retry-connrefused -fsS http://localhost:9000/minio/health/ready
           curl --retry 30 --retry-delay 1 --retry-connrefused -fsS http://localhost:4443/storage/v1/b
       - run: go build ./...
