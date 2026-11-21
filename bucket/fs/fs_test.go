@@ -17,7 +17,7 @@ func TestConformance(t *testing.T) {
 			t.Fatal(err)
 		}
 		return r.Bucket("test-bucket")
-	})
+	}, buckettest.Caps{ConditionalDelete: true})
 }
 
 func TestFileLayoutIsAHeaderBlockThenTheData(t *testing.T) {

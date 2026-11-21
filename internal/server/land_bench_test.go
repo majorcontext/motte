@@ -41,7 +41,14 @@ func (b *memBucket) Get(_ context.Context, key string) ([]byte, error) {
 	return nil, bucket.ErrNotFound
 }
 
-func (b *memBucket) Delete(_ context.Context, key string) error {
+func (b *memBucket) Version(ctx context.Context, key string) (string, error) {
+	if _, err := b.Get(ctx, key); err != nil {
+		return "", err
+	}
+	return "1", nil
+}
+
+func (b *memBucket) Delete(_ context.Context, key, _ string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	delete(b.m, key)

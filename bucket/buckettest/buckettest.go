@@ -15,10 +15,19 @@ import (
 	"github.com/majorcontext/motte/bucket"
 )
 
+// Caps names the guarantees that a backend gives beyond the base contract.
+type Caps struct {
+	// ConditionalDelete: Delete of a stale version leaves an object that was
+	// deleted and stored again, and returns bucket.ErrChanged. bucket/fs and
+	// bucket/gcs have it. bucket/s3 does not: an ETag is the same for the
+	// same bytes, so its collector relies on the mark lease alone.
+	ConditionalDelete bool
+}
+
 // Run runs the suite. newBackend returns an empty bucket for one test. A
 // backend that cannot be emptied may return the same bucket: every test
 // names its objects with a random prefix.
-func Run(t *testing.T, newBackend func(t *testing.T) bucket.Store) {
+func Run(t *testing.T, newBackend func(t *testing.T) bucket.Store, caps Caps) {
 	for name, fn := range map[string]func(*testing.T, bucket.Store, func(string) string){
 		"create stores an object and never replaces it": createNeverReplaces,
 		"reads of a range":           rangeReads,
@@ -26,6 +35,9 @@ func Run(t *testing.T, newBackend func(t *testing.T) bucket.Store) {
 		"one racer of many creates":  oneCreatorWins,
 		"a large object round trips": largeObject,
 		"delete removes an object":   deleteRemoves,
+		"a stale version of a stored again object": func(t *testing.T, b bucket.Store, key func(string) string) {
+			staleVersion(t, b, key, caps)
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var raw [8]byte
@@ -138,13 +150,23 @@ func largeObject(t *testing.T, b bucket.Store, key func(string) string) {
 func deleteRemoves(t *testing.T, b bucket.Store, key func(string) string) {
 	ctx := context.Background()
 	k := key("gone")
-	if err := b.Delete(ctx, k); err != nil {
+	if err := b.Delete(ctx, k, "1"); err != nil {
 		t.Fatalf("delete of a missing key = %v, want nil", err)
+	}
+	if _, err := b.Version(ctx, k); !errors.Is(err, bucket.ErrNotFound) {
+		t.Fatalf("version of a missing key = %v, want bucket.ErrNotFound", err)
 	}
 	if _, err := b.Create(ctx, k, []byte("data")); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Delete(ctx, k); err != nil {
+	v, err := b.Version(ctx, k)
+	if err != nil || v == "" {
+		t.Fatalf("version = %q, %v; want a name", v, err)
+	}
+	if again, err := b.Version(ctx, k); err != nil || again != v {
+		t.Fatalf("version again = %q, %v; want %q", again, err, v)
+	}
+	if err := b.Delete(ctx, k, v); err != nil {
 		t.Fatalf("delete = %v", err)
 	}
 	if _, err := b.Get(ctx, k); !errors.Is(err, bucket.ErrNotFound) {
@@ -152,5 +174,42 @@ func deleteRemoves(t *testing.T, b bucket.Store, key func(string) string) {
 	}
 	if ok, err := b.Create(ctx, k, []byte("again")); err != nil || !ok {
 		t.Errorf("create after delete = %v, %v; want true", ok, err)
+	}
+}
+
+func staleVersion(t *testing.T, b bucket.Store, key func(string) string, caps Caps) {
+	if !caps.ConditionalDelete {
+		return
+	}
+	ctx := context.Background()
+	k := key("stale")
+	if _, err := b.Create(ctx, k, []byte("same bytes")); err != nil {
+		t.Fatal(err)
+	}
+	old, err := b.Version(ctx, k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Delete(ctx, k, old); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := b.Create(ctx, k, []byte("same bytes")); err != nil || !ok {
+		t.Fatalf("create after delete = %v, %v; want true", ok, err)
+	}
+	if err := b.Delete(ctx, k, old); !errors.Is(err, bucket.ErrChanged) {
+		t.Fatalf("delete of a stale version = %v, want bucket.ErrChanged", err)
+	}
+	if got, err := b.Get(ctx, k); err != nil || string(got) != "same bytes" {
+		t.Fatalf("get after a refused delete = %q, %v; want the object", got, err)
+	}
+	cur, err := b.Version(ctx, k)
+	if err != nil || cur == old {
+		t.Fatalf("version of the stored again object = %q, %v; want a name other than %q", cur, err, old)
+	}
+	if err := b.Delete(ctx, k, cur); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Get(ctx, k); !errors.Is(err, bucket.ErrNotFound) {
+		t.Errorf("get after delete = %v, want bucket.ErrNotFound", err)
 	}
 }

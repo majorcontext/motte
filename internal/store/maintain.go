@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/majorcontext/motte/bucket"
 	"github.com/majorcontext/motte/internal/clock"
 	"github.com/majorcontext/motte/internal/gitpack"
 	"github.com/majorcontext/motte/internal/midx"
@@ -31,8 +32,8 @@ const (
 	maxFanIn         = 64
 	maintainRuns     = 8
 	claimPoll        = 100 * time.Millisecond
-	// deleteLease is how long a collector owns the files it marked. A collector that stops for longer between its mark and
-	// its delete can delete a file that a writer stored again.
+	// deleteLease is how long a collector owns the files it marked. On a bucket without a conditional Delete, a
+	// collector that stops for longer between its mark and its delete can delete a file that a writer stored again.
 	deleteLease = 10 * time.Minute
 )
 
@@ -537,8 +538,9 @@ func (s *Service) claim(ctx context.Context, repo Repo, keys ...string) error {
 	}
 }
 
-// collect deletes the retired files whose grace has passed, and forgets them. It first marks each file as deleting in
-// the metadata store, and then checks the manifest. A writer that stores the file again claims it first, so a file
+// collect deletes the retired files whose grace has passed, and forgets them. It reads the version of each due file,
+// then marks it as deleting in the metadata store, and then checks the manifest. It deletes only the version that it
+// read, so a file that a writer stored again after a stall is kept, and its record stays for a later pass. A writer that stores the file again claims it first, so a file
 // that the manifest will hold is never deleted. A file that a layer holds already, such as a file of a swap that was
 // lost, is forgotten and kept.
 func (s *Service) collect(ctx context.Context, repo Repo) error {
@@ -561,6 +563,17 @@ func (s *Service) collect(ctx context.Context, repo Repo) error {
 	if len(due) == 0 {
 		return nil
 	}
+	versions := make(map[string]string, len(due))
+	for _, key := range due {
+		v, err := s.st.Version(ctx, prefix+"/"+key)
+		if errors.Is(err, bucket.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		versions[key] = v
+	}
 	taken, err := s.index.BeginDelete(ctx, repo.String(), due, now, now.Add(-deleteLease))
 	if err != nil {
 		return err
@@ -580,17 +593,24 @@ func (s *Service) collect(ctx context.Context, repo Repo) error {
 	for _, e := range m.Layers {
 		keys[e.Key] = true
 	}
+	done := make([]string, 0, len(taken))
 	for _, key := range taken {
 		id, isPack := strings.CutSuffix(key, ".pack")
 		if !isPack {
 			id, _ = strings.CutSuffix(key, ".idx")
 		}
 		if _, live := held[id]; keys[key] || live {
+			done = append(done, key)
 			continue
 		}
-		if err := s.st.Delete(ctx, prefix+"/"+key); err != nil {
-			return err
+		if v, ok := versions[key]; ok {
+			if err := s.st.Delete(ctx, prefix+"/"+key, v); errors.Is(err, bucket.ErrChanged) {
+				continue
+			} else if err != nil {
+				return err
+			}
 		}
+		done = append(done, key)
 		if isPack {
 			if err := s.index.RemovePack(ctx, repo.String(), id); err != nil {
 				return err
@@ -598,7 +618,7 @@ func (s *Service) collect(ctx context.Context, repo Repo) error {
 		}
 		s.stats.deleted.Add(1)
 	}
-	return s.index.ForgetRetired(ctx, repo.String(), taken)
+	return s.index.ForgetRetired(ctx, repo.String(), done)
 }
 
 // reconcile adds an index layer for each pack that the pack list has and the manifest lacks. A writer of an older

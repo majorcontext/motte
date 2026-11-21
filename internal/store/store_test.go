@@ -9,6 +9,7 @@ import (
 	"io"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -57,11 +58,11 @@ func (b *spy) Create(ctx context.Context, key string, data []byte) (created bool
 	return created, err
 }
 
-func (b *spy) Delete(ctx context.Context, key string) error {
+func (b *spy) Delete(ctx context.Context, key, version string) error {
 	if b.onDelete != nil {
 		b.onDelete(key)
 	}
-	return b.write(func() error { b.mu.Lock(); b.deletions++; b.mu.Unlock(); return b.Store.Delete(ctx, key) })
+	return b.write(func() error { b.mu.Lock(); b.deletions++; b.mu.Unlock(); return b.Store.Delete(ctx, key, version) })
 }
 
 func (b *spy) Get(ctx context.Context, key string) ([]byte, error) {
@@ -339,6 +340,66 @@ func TestAMissingObjectCostsAtMostOneProbePerLayer(t *testing.T) {
 	}
 }
 
+// retiredPack returns the objects of a pack that a push stored and a compaction retired, and its file name.
+func (w *world) retiredPack() ([]gitpack.Object, string) {
+	w.t.Helper()
+	retired, err := w.meta.RetiredFiles(w.t.Context(), repo.String())
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	for _, r := range retired {
+		for _, sent := range w.sent {
+			pack, _, _ := gitpack.Build(sent)
+			if id := fmt.Sprintf("%x", sha256sum(pack)); r.Key == id+".pack" {
+				return sent, r.Key
+			}
+		}
+	}
+	w.t.Fatal("compaction retired no pack that a push stored")
+	return nil, ""
+}
+
+func TestACollectorThatStallsPastTheLeaseKeepsAFileStoredAgain(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	for range 10 {
+		w.push(2)
+	}
+	if err := w.svc.Maintain(t.Context(), repo); err != nil {
+		t.Fatal(err)
+	}
+	objs, victim := w.retiredPack()
+	path := "repos/native/" + b64("repo_x") + "/" + victim
+	stalled, resume := make(chan struct{}), make(chan struct{})
+	var calls atomic.Int32
+	w.spy.onDelete = func(key string) {
+		if key == path && calls.Add(1) == 1 {
+			close(stalled)
+			<-resume
+		}
+	}
+	w.pastGrace()
+	slow := make(chan error, 1)
+	go func() { slow <- w.svc.Maintain(t.Context(), repo) }()
+	<-stalled
+	w.clock.Advance(11 * time.Minute).MustWait(t.Context())
+	other := w.cold()
+	if err := other.Maintain(t.Context(), repo); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.PutObjects(t.Context(), repo, objs); err != nil {
+		t.Fatal(err)
+	}
+	close(resume)
+	if err := <-slow; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.mem.Get(t.Context(), path); err != nil {
+		t.Errorf("the collector that resumed deleted the file stored again: %v", err)
+	}
+	w.reachable(w.cold())
+}
+
 func TestAPackStoredAgainWhileItIsBeingDeletedStaysReadable(t *testing.T) {
 	t.Parallel()
 	w := newWorld(t)
@@ -348,23 +409,7 @@ func TestAPackStoredAgainWhileItIsBeingDeletedStaysReadable(t *testing.T) {
 	if err := w.svc.Maintain(t.Context(), repo); err != nil {
 		t.Fatal(err)
 	}
-	retired, err := w.meta.RetiredFiles(t.Context(), repo.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	var objs []gitpack.Object
-	var victim string
-	for _, r := range retired {
-		for _, sent := range w.sent {
-			pack, _, _ := gitpack.Build(sent)
-			if id := fmt.Sprintf("%x", sha256sum(pack)); r.Key == id+".pack" {
-				objs, victim = sent, r.Key
-			}
-		}
-	}
-	if victim == "" {
-		t.Fatal("compaction retired no pack that a push stored")
-	}
+	objs, victim := w.retiredPack()
 	done := make(chan struct{})
 	var once sync.Once
 	var parked *quartz.Call
@@ -476,8 +521,10 @@ func sha256sum(b []byte) [32]byte { return sha256.Sum256(b) }
 func b64(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
 
 type memBucket struct {
-	mu sync.Mutex
-	m  map[string][]byte
+	mu   sync.Mutex
+	m    map[string][]byte
+	vers map[string]int
+	n    int
 }
 
 func (b *memBucket) Create(_ context.Context, key string, data []byte) (bool, error) {
@@ -487,12 +534,29 @@ func (b *memBucket) Create(_ context.Context, key string, data []byte) (bool, er
 		return false, nil
 	}
 	b.m[key] = append([]byte(nil), data...)
+	if b.vers == nil {
+		b.vers = map[string]int{}
+	}
+	b.n++
+	b.vers[key] = b.n
 	return true, nil
 }
 
-func (b *memBucket) Delete(_ context.Context, key string) error {
+func (b *memBucket) Version(_ context.Context, key string) (string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if _, ok := b.m[key]; !ok {
+		return "", bucket.ErrNotFound
+	}
+	return strconv.Itoa(b.vers[key]), nil
+}
+
+func (b *memBucket) Delete(_ context.Context, key, version string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, ok := b.m[key]; ok && strconv.Itoa(b.vers[key]) != version {
+		return bucket.ErrChanged
+	}
 	delete(b.m, key)
 	return nil
 }

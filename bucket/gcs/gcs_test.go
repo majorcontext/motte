@@ -36,5 +36,5 @@ func TestConformance(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	buckettest.Run(t, func(*testing.T) bucket.Store { return gcs.New(client, name) })
+	buckettest.Run(t, func(*testing.T) bucket.Store { return gcs.New(client, name) }, buckettest.Caps{ConditionalDelete: true})
 }

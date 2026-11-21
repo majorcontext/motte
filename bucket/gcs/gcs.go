@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 
 	"cloud.google.com/go/storage"
 	"google.golang.org/api/googleapi"
@@ -36,11 +37,36 @@ func (g gcsBucket) Create(ctx context.Context, key string, data []byte) (bool, e
 	return true, nil
 }
 
-func (g gcsBucket) Delete(ctx context.Context, key string) error {
-	if err := g.b.Object(key).Delete(ctx); err != nil && !errors.Is(err, storage.ErrObjectNotExist) {
-		return fmt.Errorf("bucket: delete: %w", err)
+func (g gcsBucket) Version(ctx context.Context, key string) (string, error) {
+	a, err := g.b.Object(key).Attrs(ctx)
+	if errors.Is(err, storage.ErrObjectNotExist) {
+		return "", bucket.ErrNotFound
 	}
-	return nil
+	if err != nil {
+		return "", fmt.Errorf("bucket: version: %w", err)
+	}
+	return strconv.FormatInt(a.Generation, 10), nil
+}
+
+// Delete sends the generation as ifGenerationMatch, and reads the object again on a 412 to tell a changed object from
+// a missing one.
+func (g gcsBucket) Delete(ctx context.Context, key, version string) error {
+	gen, err := strconv.ParseInt(version, 10, 64)
+	if err != nil || gen <= 0 {
+		return fmt.Errorf("bucket: delete: invalid version %q", version)
+	}
+	err = g.b.Object(key).If(storage.Conditions{GenerationMatch: gen}).Delete(ctx)
+	var gerr *googleapi.Error
+	switch {
+	case err == nil, errors.Is(err, storage.ErrObjectNotExist):
+		return nil
+	case errors.As(err, &gerr) && gerr.Code == http.StatusPreconditionFailed:
+		if _, verr := g.Version(ctx, key); errors.Is(verr, bucket.ErrNotFound) {
+			return nil
+		}
+		return bucket.ErrChanged
+	}
+	return fmt.Errorf("bucket: delete: %w", err)
 }
 
 func (g gcsBucket) Get(ctx context.Context, key string) ([]byte, error) {

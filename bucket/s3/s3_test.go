@@ -39,5 +39,5 @@ func TestConformance(t *testing.T) {
 	if err != nil && !errors.As(err, &owned) {
 		t.Fatal(err)
 	}
-	buckettest.Run(t, func(*testing.T) bucket.Store { return s3.New(client, name) })
+	buckettest.Run(t, func(*testing.T) bucket.Store { return s3.New(client, name) }, buckettest.Caps{})
 }

@@ -110,7 +110,23 @@ func (b s3Bucket) Create(ctx context.Context, key string, data []byte) (bool, er
 	}
 }
 
-func (b s3Bucket) Delete(ctx context.Context, key string) error {
+// Version is the ETag, which names the bytes: the same bytes stored again have the same ETag.
+func (b s3Bucket) Version(ctx context.Context, key string) (string, error) {
+	out, err := b.c.HeadObject(ctx, &s3.HeadObjectInput{Bucket: &b.name, Key: &key})
+	var nf *types.NotFound
+	switch {
+	case errors.As(err, &nf) || status(err) == http.StatusNotFound:
+		return "", bucket.ErrNotFound
+	case err != nil:
+		return "", fmt.Errorf("bucket: version: %w", err)
+	}
+	return aws.ToString(out.ETag), nil
+}
+
+// Delete ignores the version. DeleteObject takes If-Match with an ETag, but a file that a writer stores again has the
+// bytes, and so the ETag, of the file that was deleted, so the precondition cannot tell them apart. The mark lease of
+// the collector is the only guard of this backend.
+func (b s3Bucket) Delete(ctx context.Context, key, _ string) error {
 	_, err := b.c.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &b.name, Key: &key})
 	if err != nil && status(err) != http.StatusNotFound {
 		return fmt.Errorf("bucket: delete: %w", err)

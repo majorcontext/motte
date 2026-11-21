@@ -15,7 +15,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/majorcontext/motte/bucket"
@@ -36,7 +39,11 @@ type attrs struct {
 }
 
 // Root keeps objects under one directory. Use one process per root.
-type Root struct{ root string }
+type Root struct {
+	root string
+	mu   sync.Mutex
+	gen  atomic.Int64
+}
 
 func New(root string) (*Root, error) {
 	root, err := filepath.Abs(root)
@@ -50,6 +57,15 @@ func New(root string) (*Root, error) {
 }
 
 // Bucket opens one bucket of the directory.
+func (r *Root) nextGeneration() int64 {
+	for {
+		last := r.gen.Load()
+		if n := max(time.Now().UnixNano(), last+1); r.gen.CompareAndSwap(last, n) {
+			return n
+		}
+	}
+}
+
 func (r *Root) Bucket(name string) bucket.Store { return dirBucket{r, name} }
 
 type dirBucket struct {
@@ -86,7 +102,7 @@ func (b dirBucket) Create(_ context.Context, key string, data []byte) (bool, err
 	defer func() { _ = os.Remove(tmp.Name()) }()
 	defer func() { _ = tmp.Close() }()
 	sum := md5.Sum(data)
-	raw, err := json.Marshal(attrs{Name: key, Size: int64(len(data)), ContentType: "application/octet-stream", MD5: hex.EncodeToString(sum[:]), Generation: time.Now().UnixNano()})
+	raw, err := json.Marshal(attrs{Name: key, Size: int64(len(data)), ContentType: "application/octet-stream", MD5: hex.EncodeToString(sum[:]), Generation: b.r.nextGeneration()})
 	if err != nil || len(raw) > headerSize-4 {
 		return false, errors.New("fs: object attributes are too large")
 	}
@@ -105,7 +121,10 @@ func (b dirBucket) Create(_ context.Context, key string, data []byte) (bool, err
 	if err := os.MkdirAll(filepath.Dir(final), 0o700); err != nil {
 		return false, err
 	}
-	if err := os.Link(tmp.Name(), final); err != nil {
+	b.r.mu.Lock()
+	err = os.Link(tmp.Name(), final)
+	b.r.mu.Unlock()
+	if err != nil {
 		if errors.Is(err, iofs.ErrExist) {
 			return false, nil
 		}
@@ -133,10 +152,61 @@ func (b dirBucket) syncDirs(path string) error {
 	}
 }
 
-func (b dirBucket) Delete(_ context.Context, key string) error {
+// readAttrs opens the object file and reads its header block.
+func readAttrs(p string) (*os.File, attrs, error) {
+	f, err := os.Open(p)
+	if errors.Is(err, iofs.ErrNotExist) {
+		return nil, attrs{}, bucket.ErrNotFound
+	}
+	if err != nil {
+		return nil, attrs{}, err
+	}
+	var block [headerSize]byte
+	if _, err := io.ReadFull(f, block[:]); err != nil {
+		_ = f.Close()
+		return nil, attrs{}, fmt.Errorf("fs: read header: %w", err)
+	}
+	hl := binary.BigEndian.Uint32(block[:4])
+	var a attrs
+	if hl == 0 || hl > headerSize-4 || json.Unmarshal(block[4:4+hl], &a) != nil {
+		_ = f.Close()
+		return nil, attrs{}, errors.New("fs: corrupt header")
+	}
+	return f, a, nil
+}
+
+func (b dirBucket) Version(_ context.Context, key string) (string, error) {
+	p, err := b.path(key)
+	if err != nil {
+		return "", err
+	}
+	f, a, err := readAttrs(p)
+	if err != nil {
+		return "", err
+	}
+	_ = f.Close()
+	return strconv.FormatInt(a.Generation, 10), nil
+}
+
+// Delete holds the lock of the root across its check and its removal, and Create holds it across its link, so a
+// version that matched cannot be replaced before the removal.
+func (b dirBucket) Delete(_ context.Context, key, version string) error {
 	p, err := b.path(key)
 	if err != nil {
 		return err
+	}
+	b.r.mu.Lock()
+	defer b.r.mu.Unlock()
+	f, a, err := readAttrs(p)
+	if errors.Is(err, bucket.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	_ = f.Close()
+	if strconv.FormatInt(a.Generation, 10) != version {
+		return bucket.ErrChanged
 	}
 	if err := os.Remove(p); err != nil && !errors.Is(err, iofs.ErrNotExist) {
 		return err
@@ -153,23 +223,11 @@ func (b dirBucket) GetRange(_ context.Context, key string, off, n int64) ([]byte
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.Open(p)
-	if errors.Is(err, iofs.ErrNotExist) {
-		return nil, bucket.ErrNotFound
-	}
+	f, a, err := readAttrs(p)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
-	var block [headerSize]byte
-	if _, err := io.ReadFull(f, block[:]); err != nil {
-		return nil, fmt.Errorf("fs: read header: %w", err)
-	}
-	hl := binary.BigEndian.Uint32(block[:4])
-	var a attrs
-	if hl == 0 || hl > headerSize-4 || json.Unmarshal(block[4:4+hl], &a) != nil {
-		return nil, errors.New("fs: corrupt header")
-	}
 	if off >= a.Size {
 		return nil, nil
 	}
