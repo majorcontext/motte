@@ -48,8 +48,8 @@ jobs:
           docker run -d --name minio -p 9000:9000 -e MINIO_ROOT_USER="$AWS_ACCESS_KEY_ID" -e MINIO_ROOT_PASSWORD="$AWS_SECRET_ACCESS_KEY" \
             pgsty/minio@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372 server /data
           nohup "$(go env GOPATH)/bin/fake-gcs-server" -backend memory -scheme http -port 4443 -public-host localhost:4443 >fake-gcs.log 2>&1 &
-          curl --retry 30 --retry-delay 1 --retry-connrefused -fsS http://localhost:9000/minio/health/ready
-          curl --retry 30 --retry-delay 1 --retry-connrefused -fsS http://localhost:4443/storage/v1/b
+          curl --retry 30 --retry-delay 1 --retry-connrefused --retry-all-errors -fsS http://localhost:9000/minio/health/ready
+          curl --retry 30 --retry-delay 1 --retry-connrefused --retry-all-errors -fsS http://localhost:4443/storage/v1/b
       - run: go build ./...
       - run: go vet ./...
       - run: go run ./internal/lint/cmd/lint ./...
