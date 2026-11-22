@@ -30,8 +30,9 @@ const (
 	// inlineMaxObjects bounds the layer merge that a write does before it returns.
 	inlineMaxObjects = 1 << 17
 	maxFanIn         = 64
-	maintainRuns     = 8
-	claimPoll        = 100 * time.Millisecond
+	// maintainBudget bounds the time that one pass spends on the compactions and merges of a repository.
+	maintainBudget = 20 * time.Second
+	claimPoll      = 100 * time.Millisecond
 	// deleteLease is how long a collector owns the files it marked. On a bucket without a conditional Delete, a
 	// collector that stops for longer between its mark and its delete can delete a file that a writer stored again.
 	deleteLease = 10 * time.Minute
@@ -96,41 +97,44 @@ func (s *Service) mergeTail(ctx context.Context, repo Repo) {
 }
 
 // Maintain does one bounded pass over repo: it adds the packs that the manifest lacks, compacts packs, merges layers
-// and deletes the retired files whose grace has passed. Every step ends in one compare and swap of the manifest, so a
-// crash between steps loses nothing, and a repeat finishes the work. It is safe to run on many replicas, which only
-// repeat work.
+// and deletes the retired files whose grace has passed. It repeats the compactions and the merges until no run is left
+// or maintainBudget has passed, so a burst of writes does not outrun it. Every step ends in one compare and swap of the
+// manifest, so a crash between steps loses nothing, and a repeat finishes the work. Each step holds the repository lock
+// alone, so a tail merge of a write can run between steps. It is safe to run on many replicas, which only repeat work.
 func (s *Service) Maintain(ctx context.Context, repo Repo) error {
-	l := s.repoLock(repo)
-	l.Lock()
-	defer l.Unlock()
-	if err := s.reconcile(ctx, repo); err != nil {
+	end := s.clk.Now().Add(maintainBudget)
+	if err := s.locked(repo, func() error { return s.reconcile(ctx, repo) }); err != nil {
 		return s.failed(err)
 	}
-	for range maintainRuns {
-		did, err := s.compactOnce(ctx, repo)
-		if err != nil {
-			return s.failed(err)
-		}
-		if !did {
-			break
-		}
-	}
-	for range maintainRuns {
-		did, err := s.mergeOnce(ctx, repo, MaxLayerObjects, false)
-		if err != nil {
-			return s.failed(err)
-		}
-		if !did {
-			break
+	for _, f := range []func() (bool, error){
+		func() (bool, error) { return s.compactOnce(ctx, repo) },
+		func() (bool, error) { return s.mergeOnce(ctx, repo, MaxLayerObjects, false) },
+	} {
+		for s.clk.Now().Before(end) {
+			var did bool
+			err := s.locked(repo, func() (err error) { did, err = f(); return err })
+			if err != nil {
+				return s.failed(err)
+			}
+			if !did {
+				break
+			}
 		}
 	}
-	if err := s.collect(ctx, repo); err != nil {
+	if err := s.locked(repo, func() error { return s.collect(ctx, repo) }); err != nil {
 		return s.failed(err)
 	}
 	if m, _, err := s.loadManifest(ctx, repo); err == nil {
 		s.seeLayers(repo, len(m.Layers))
 	}
 	return nil
+}
+
+func (s *Service) locked(repo Repo, f func() error) error {
+	l := s.repoLock(repo)
+	l.Lock()
+	defer l.Unlock()
+	return f()
 }
 
 func (s *Service) failed(err error) error {
@@ -199,8 +203,8 @@ func (x idxRecords) Next() (midx.Record, bool, error) {
 	return midx.Record{SHA: sha, Off: uint32(off)}, true, nil
 }
 
-// mergeOnce merges the newest run that the rule picks. A write calls it with try set, and it then does nothing when the
-// memory budget lacks the bytes, because the write holds a reservation itself.
+// mergeOnce merges the newest run that the rule picks. A write calls it with try set, and it then reserves from
+// inlineBudget and does nothing when that lacks the bytes.
 func (s *Service) mergeOnce(ctx context.Context, repo Repo, maxObjects int, try bool) (bool, error) {
 	m, _, err := s.loadManifest(ctx, repo)
 	if err != nil {
@@ -275,7 +279,7 @@ func (s *Service) mergeRun(ctx context.Context, repo Repo, layers []midx.Entry, 
 	need := 2*int64(midx.RecordSize)*int64(r.objects()) + 4<<20
 	var release func()
 	if try {
-		if release = s.tryReserve(need); release == nil {
+		if release = s.tryReserveInline(need); release == nil {
 			return nil
 		}
 	} else if release, err = s.Reserve(ctx, need); err != nil {

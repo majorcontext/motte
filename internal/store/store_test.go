@@ -509,6 +509,9 @@ func TestAWriteThatHoldsTheWholeMemoryBudgetStillFinishes(t *testing.T) {
 			t.Fatalf("push %d while the budget is held: %v", i, err)
 		}
 	}
+	if n := w.layers(); n > 3 {
+		t.Fatalf("%d layers after 6 pushes while the budget is held; want the tail merged", n)
+	}
 }
 
 func TestAPackRowLostAfterCompactionIsRestoredFromTheManifest(t *testing.T) {
@@ -539,26 +542,45 @@ func TestAPackRowLostAfterCompactionIsRestoredFromTheManifest(t *testing.T) {
 	w.reachable(w.cold())
 }
 
+func (w *world) listOlderPack(text string) {
+	w.t.Helper()
+	pack, idx, names := gitpack.Build([]gitpack.Object{{Type: gitpack.Blob, Data: []byte(text)}})
+	id := fmt.Sprintf("%x", sha256sum(pack))
+	prefix := "repos/native/" + b64("repo_x")
+	for k, v := range map[string][]byte{prefix + "/" + id + ".idx": idx, prefix + "/" + id + ".pack": pack} {
+		if _, err := w.mem.Create(w.t.Context(), k, v); err != nil {
+			w.t.Fatal(err)
+		}
+	}
+	if err := w.meta.AddPack(w.t.Context(), repo.String(), id, int64(len(pack))); err != nil {
+		w.t.Fatal(err)
+	}
+	w.have = append(w.have, names...)
+}
+
 func TestAPackThatAnOlderReleaseListedIsAddedToTheManifest(t *testing.T) {
 	t.Parallel()
 	w := newWorld(t)
 	w.push(3)
-	pack, idx, names := gitpack.Build([]gitpack.Object{{Type: gitpack.Blob, Data: []byte("from an older release")}})
-	id := fmt.Sprintf("%x", sha256sum(pack))
-	prefix := "repos/native/" + b64("repo_x")
-	b := w.mem
-	for k, v := range map[string][]byte{prefix + "/" + id + ".idx": idx, prefix + "/" + id + ".pack": pack} {
-		if _, err := b.Create(t.Context(), k, v); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := w.meta.AddPack(t.Context(), repo.String(), id, int64(len(pack))); err != nil {
+	w.listOlderPack("from an older release")
+	if err := w.svc.Maintain(t.Context(), repo); err != nil {
 		t.Fatal(err)
+	}
+	w.reachable(w.cold())
+}
+
+func TestOnePassOfMaintenanceClearsABacklogOfLayers(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	for i := range 1100 {
+		w.listOlderPack(fmt.Sprintf("a pack of the burst %d", i))
 	}
 	if err := w.svc.Maintain(t.Context(), repo); err != nil {
 		t.Fatal(err)
 	}
-	w.have = append(w.have, names...)
+	if n := w.layers(); n > 12 {
+		t.Fatalf("%d layers after one pass over a backlog of 1100; want at most 12", n)
+	}
 	w.reachable(w.cold())
 }
 

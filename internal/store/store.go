@@ -50,6 +50,9 @@ const (
 	maxIndexBytes = 128 << 20
 	// MemoryBudget is the bytes that requests may hold while they work, apart from the bodies that are still being read.
 	MemoryBudget = 512 << 20
+	// inlineBudget is the bytes that the tail merges of writes may hold, apart from MemoryBudget. A write that runs
+	// while requests hold the whole of MemoryBudget still merges its tail.
+	inlineBudget = 64 << 20
 	blockTimeout = 30 * time.Second
 )
 
@@ -104,6 +107,7 @@ type Service struct {
 	grace time.Duration
 
 	budget *semaphore.Weighted
+	inline *semaphore.Weighted
 
 	icache *lru
 	loads  singleflight.Group
@@ -170,18 +174,17 @@ func WithGrace(d time.Duration) Option {
 	}
 }
 
-// tryReserve is Reserve that returns nil at once when the budget lacks the bytes. A caller that already holds a
-// reservation uses it, because waiting for a second reservation while holding the first can deadlock.
-func (s *Service) tryReserve(bytes int64) (release func()) {
-	n := min(bytes, MemoryBudget)
-	if !s.budget.TryAcquire(n) {
+// tryReserveInline takes bytes of inlineBudget and returns nil at once when it lacks them.
+func (s *Service) tryReserveInline(bytes int64) (release func()) {
+	n := min(bytes, inlineBudget)
+	if !s.inline.TryAcquire(n) {
 		return nil
 	}
-	return func() { s.budget.Release(n) }
+	return func() { s.inline.Release(n) }
 }
 
 func New(st bucket.Store, index PackIndex, opts ...Option) *Service {
-	s := &Service{st: st, index: index, clk: clock.Real(), grace: DefaultGrace, open: map[string]*openPack{}, budget: semaphore.NewWeighted(MemoryBudget), icache: newLRU(maxIndexBytes)}
+	s := &Service{st: st, index: index, clk: clock.Real(), grace: DefaultGrace, open: map[string]*openPack{}, budget: semaphore.NewWeighted(MemoryBudget), inline: semaphore.NewWeighted(inlineBudget), icache: newLRU(maxIndexBytes)}
 	for _, o := range opts {
 		o(s)
 	}
