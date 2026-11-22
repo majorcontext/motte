@@ -22,15 +22,36 @@ const (
 	fetchBodyMax = 8 << 20
 	// pushBodyMax bounds the commands and the pack of one push.
 	pushBodyMax = store.MaxPackBytes + 1<<20
-	// fetchBase is the memory that a fetch needs before its sets hold an object: one object with the buffers that
-	// stream it, and the ranges that the read-ahead of the walk has in flight. fetchPerObject is what each object of
-	// the sets adds.
-	fetchBase      = 3*gitpack.MaxObjectBytes + fetchAhead
-	fetchAhead     = 16 << 20
+	// A fetch holds the ranges that its read-ahead has in flight (fetchAhead), 3 times its largest object so far
+	// (fetchObject at first), and fetchPerObject for each object of its sets.
+	fetchAhead     = store.ReadAheadBytes
+	fetchObject    = 1 << 20
 	fetchPerObject = 128
 )
 
-func fetchCost(objects int) int64 { return fetchBase + fetchPerObject*int64(objects) }
+// fetchHold is the reservation of a fetch.
+type fetchHold struct {
+	*reservation
+	objects int
+	largest int64
+}
+
+func (f *fetchHold) cost() int64 {
+	return fetchAhead + 3*f.largest + fetchPerObject*int64(f.objects)
+}
+
+func (f *fetchHold) track(objects int) error {
+	f.objects = objects
+	return f.grow(f.cost())
+}
+
+func (f *fetchHold) object(size int64) error {
+	if size <= f.largest {
+		return nil
+	}
+	f.largest = size
+	return f.grow(f.cost())
+}
 
 // pushCost is the reservation of a push whose body has n bytes and whose unpack holds inflated bytes: the body, the
 // entries, the objects, the rebuilt pack, and the delta, its base and its result while one object resolves.
@@ -233,12 +254,13 @@ func (s *Server) uploadPack(w http.ResponseWriter, r *http.Request, c call) erro
 	if protocolVersion(r) != "2" {
 		return errProtocolV2
 	}
-	body, release, err := s.gitBody(w, r, fetchBodyMax, func(int64) int64 { return fetchCost(0) })
+	fh := &fetchHold{largest: fetchObject}
+	body, release, err := s.gitBody(w, r, fetchBodyMax, func(int64) int64 { return fh.cost() })
 	if err != nil {
 		return err
 	}
-	hold := s.holding(r, fetchCost(0), release)
-	defer hold.drop()
+	fh.reservation = s.holding(r, fh.cost(), release)
+	defer fh.drop()
 	refs, head, err := s.gitRefs(r.Context(), c.repo)
 	if err != nil {
 		return err
@@ -248,15 +270,18 @@ func (s *Server) uploadPack(w http.ResponseWriter, r *http.Request, c call) erro
 		return err
 	}
 	gitHeaders(w, "application/x-git-upload-pack-result")
-	up := &gitproto.Upload{Objects: reader{rd}, Refs: refs, Head: head, Track: func(n int) error { return hold.grow(fetchCost(n)) }}
+	up := &gitproto.Upload{Objects: reader{rd, fh.object}, Refs: refs, Head: head, Track: fh.track}
 	return s.abortAfterHeaders(w, r, up.Serve(r.Context(), w, bytes.NewReader(body)))
 }
 
 // reader adapts the object reader of the store to gitproto.
-type reader struct{ r *store.Reader }
+type reader struct {
+	r      *store.Reader
+	before func(size int64) error
+}
 
 func (o reader) Get(ctx context.Context, sha gitpack.SHA) (gitpack.Type, []byte, error) {
-	t, data, err := o.r.Get(ctx, sha)
+	t, data, err := o.r.GetSized(ctx, sha, o.before)
 	if errors.Is(err, store.ErrNotFound) {
 		err = gitproto.ErrNotFound
 	}

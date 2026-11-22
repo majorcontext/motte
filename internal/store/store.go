@@ -55,6 +55,8 @@ const (
 	// while requests hold the whole of MemoryBudget still merges its tail.
 	inlineBudget = 64 << 20
 	blockTimeout = 30 * time.Second
+	// ReadAheadBytes bounds the bytes that the prefetches of one request have in flight.
+	ReadAheadBytes = 4 << 20
 	// readWorkers bounds the concurrent bucket reads of one prefetch or one batched lookup.
 	readWorkers = 16
 	// treeAhead is the trees of a bulk tree read that one prefetch reads in advance.
@@ -579,14 +581,21 @@ func (s *Service) Get(ctx context.Context, repo Repo, sha gitpack.SHA) (gitpack.
 
 // Reader reads the objects of one repo against the pack list of the moment that Reader was called, so a request
 // that reads many objects lists the packs once.
-type Reader struct{ v *view }
+type Reader struct {
+	v     *view
+	ahead *semaphore.Weighted
+}
+
+func newReader(v *view) *Reader {
+	return &Reader{v: v, ahead: semaphore.NewWeighted(ReadAheadBytes)}
+}
 
 func (s *Service) Reader(ctx context.Context, repo Repo) (*Reader, error) {
 	v, err := s.view(ctx, repo)
 	if err != nil {
 		return nil, err
 	}
-	return &Reader{v}, nil
+	return newReader(v), nil
 }
 
 func (r *Reader) Get(ctx context.Context, sha gitpack.SHA) (gitpack.Type, []byte, error) {
@@ -610,10 +619,12 @@ func (r *Reader) Prefetch(ctx context.Context, shas []gitpack.SHA) {
 	g.SetLimit(readWorkers)
 	for e, offs := range byPack {
 		for _, run := range e.b.plan(offs) {
+			if r.ahead.Acquire(ctx, run.end-run.start) != nil {
+				break
+			}
 			g.Go(func() error {
-				if ctx.Err() == nil {
-					_ = e.b.fetchRun(ctx, run)
-				}
+				defer r.ahead.Release(run.end - run.start)
+				_ = e.b.fetchRun(ctx, run)
 				return nil
 			})
 		}
@@ -728,7 +739,7 @@ func (s *Service) TreeBulk(ctx context.Context, repo Repo, sha gitpack.SHA, maxE
 	var out []Tree
 	queue := []gitpack.SHA{sha}
 	total, held := 0, int64(0)
-	rd := &Reader{v}
+	rd := newReader(v)
 	ahead := 0
 	for k := 0; k < len(queue) && (len(out) == 0 || total < maxEntries); k++ {
 		if k == ahead {
@@ -793,7 +804,7 @@ func (v *view) parseTree(ctx context.Context, sha gitpack.SHA, data []byte) (Tre
 		tree.Entries = append(tree.Entries, e)
 		data = data[nul+21:]
 	}
-	rd := &Reader{v}
+	rd := newReader(v)
 	next := 0
 	for i := range tree.Entries {
 		e := &tree.Entries[i]

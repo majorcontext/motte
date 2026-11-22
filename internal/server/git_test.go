@@ -142,7 +142,10 @@ func TestSmallRequestsNeedLittleMemory(t *testing.T) {
 	patient := []string{"-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=3"}
 	g.git(w, true, append(patient, "push", "-q", "origin", "HEAD:main")...)
 	g.git(r, true, append(patient, "fetch", "-q", "origin")...)
+	g.commit(w, "b.txt", "b")
+	g.git(w, true, append(patient, "push", "-q", "origin", "HEAD:main")...)
 	server.HoldBudget(t, srv, 90<<20)
+	g.git(r, true, append(patient, "fetch", "-q", "origin")...)
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	c := client.New(web.URL, client.StaticGrant(g.readGrant(g.text)))

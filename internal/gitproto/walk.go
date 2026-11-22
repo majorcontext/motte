@@ -56,8 +56,9 @@ type collector struct {
 	err      error
 }
 
-// trackStep is how many more objects the sets hold before track is called again.
-const trackStep = 1 << 16
+// trackFirst is how many objects the sets hold before track is first called with more. After that, track is called
+// when the count passes the last report, and reports twice the count.
+const trackFirst = 1 << 10
 
 func (c *collector) tracked() bool {
 	n := len(c.skip) + len(c.sent) + len(c.commits) + c.parentRefs
@@ -65,7 +66,7 @@ func (c *collector) tracked() bool {
 		return true
 	}
 	if c.track != nil && n > c.reported && c.err == nil {
-		c.reported = n + trackStep
+		c.reported = max(2*n, trackFirst)
 		c.err = c.track(min(c.reported, MaxTracked))
 	}
 	return c.err != nil
