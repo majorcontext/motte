@@ -37,7 +37,7 @@ Non-goals:
 | `testserver` | Starts a real server in a caller's test, on PostgreSQL (`Start`) or on SQLite and a temporary directory (`StartLocal`). Public package. | M3 |
 | `internal/testcount` | Counts the servers, PostgreSQL schemas and processes that the test helpers start, and prints the counts of a package at the end of its test run for `internal/testtime`. | M3 |
 | `internal/vfs/...`, `cmd/motte-vfsd`, `volume` | Node daemon that serves a virtual workspace, and its public volume attributes. | M4 |
-| `cmd/motte-loadtest` | Load test. `gen` builds a synthetic repository of any object count in a running service by `PUT /v1/vcs/packs/{pack_id}`, and `run` drives a weighted mix of concurrent reads, fetches, pushes, ref swaps and lands, and reports latency percentiles, errors, the cache counters of `/metrics` and the CPU and memory of named processes. Not part of the service. | M8 |
+| `cmd/motte-loadtest` | Load test. `gen` builds a synthetic repository of any object count in a running service by `PUT /v1/vcs/packs/{pack_id}`, and `run` drives a weighted mix of concurrent reads, fetches, pushes, ref swaps and lands, or with `-scenario agents` one coding-agent session for each client, and reports latency percentiles, errors, the cache counters of `/metrics` and the CPU and memory of named processes. Not part of the service. | M8 |
 | jj backend | `jj/`: the jj binary whose stores and working copy use the workspace daemon. Released for linux amd64 and arm64. | M5 |
 
 ## Planes
@@ -87,6 +87,26 @@ openssl genpkey -algorithm ed25519 -out motte.key && MOTTE_META=sqlite MOTTE_SQL
 The local loop of a person needs no identity provider, no tunnel and no workspace box. `motte operator-grant --key motte.key --kid local` prints an operator grant for `MOTTE_TOKEN`. With it, issue a token, and use plain `git` with it as the password; `ward check` runs the checks of the repository and `ward land` lands a branch (see README "Developing"). The service serves TLS itself when `MOTTE_TLS_CERT` and `MOTTE_TLS_KEY` are set.
 
 A Go test starts the same composition with `testserver.StartLocal`, which needs no service and never skips. `testserver.Start` runs on PostgreSQL and skips without `MOTTE_TEST_DATABASE_URL`. One process uses one SQLite file and one `fs` directory.
+
+### Load test
+
+`motte-loadtest` has three commands. `gen` builds a repository in a running service. `run` drives clients against it and prints a report. `serve` runs a local service on SQLite and a filesystem bucket, and adds `-latency` to each read of the bucket, to stand in for an object store with a network between it and the service. `gen -skew S` makes history change files with a Zipf popularity of exponent S, so that history has hot files as a real repository has; the default 0 is uniform.
+
+`run` has two scenarios. `-scenario mix` (the default) picks each operation at random by the weights of `-mix`. `-scenario agents` makes each of the `-c` clients one agent that loops through a task:
+
+1. Start. The agent reads the ref `-main-ref` and, with the chance `-cold-rate` (never at its first start), does a cold partial clone (`blob:none`). Else it fetches from the commit that it last saw, and an agent that has seen none starts between half and twice `-fetch-back` commits behind the tip.
+2. Explore. `-explore-reads` times, the agent reads the trees on the path to a leaf directory and then 1 to 4 of its files. It takes the directory from its task cluster 7 times in 10, and else from the popularity of all agents.
+3. Work. The agent makes about `-commits` commits on its own branch. A commit changes 1 to `-edit-files` files, 8 in 10 from the task cluster and the rest by popularity. It pushes the branch every `-push-every` commits and after the last commit.
+4. Land. The agent lands the commits on `-main-ref`. On a conflict it reads the ref and fetches, reads the conflicting files, makes the commits again on the new tip, pushes the branch again over its old head, and lands again, at most `-land-retries` times. A land that times out is repeated with the same ID, at most 4 times. A land that still conflicts after the retries abandons the task.
+
+Popularity is Zipf with exponent `-skew` over the leaf directories and over the files of a directory, and it is the same for every agent. The task cluster is `-cluster` leaf directories: one by popularity, and each other one is a sibling of it or another by popularity. `-think` is the mean pause between steps. The report adds the steps `clone`, `fetch`, `refetch`, `ref`, `commit`, `tree`, `blob`, `edit`, `push`, `land` and `task`, the counts of tasks, lands, conflicts and retries, the mean bytes of a clone and of a fetch, and the range reads of the bucket for each task. The `conf` column counts conflicts, not errors.
+
+```
+openssl genpkey -algorithm ed25519 -out motte.key
+motte-loadtest serve -key motte.key -listen 127.0.0.1:8080 -latency 20ms &
+motte-loadtest gen -key motte.key -out lt -objects 400000 -fanout 8 -depth 3 -leaf 32 -skew 1
+motte-loadtest run -key motte.key -out lt -scenario agents -c 64 -d 3m
+```
 
 ### Limits and memory
 

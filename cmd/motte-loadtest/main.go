@@ -19,9 +19,10 @@ import (
 	"github.com/majorcontext/motte/grant"
 )
 
-const usage = `usage: motte-loadtest gen|run [flags]
-  gen  build a repository of -objects objects and write its manifest and samples to -out
-  run  drive the clients of -mix against the repository of -out and print a report`
+const usage = `usage: motte-loadtest gen|run|serve [flags]
+  gen    build a repository of -objects objects and write its manifest and samples to -out
+  run    drive the clients of -mix, or the agents of -scenario agents, against the repository of -out and print a report
+  serve  run a local service on a filesystem bucket and SQLite, with -latency added to each bucket read`
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -36,6 +37,8 @@ func main() {
 		err = runGen(ctx, os.Args[2:])
 	case "run":
 		err = runLoad(ctx, os.Args[2:])
+	case "serve":
+		err = runServe(ctx, os.Args[2:])
 	default:
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)

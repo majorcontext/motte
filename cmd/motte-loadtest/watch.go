@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,7 +22,7 @@ func scrape(base string) map[string]float64 {
 	sc := bufio.NewScanner(resp.Body)
 	for sc.Scan() {
 		l := sc.Text()
-		if !strings.HasPrefix(l, "motte_pack_cache") && !strings.HasPrefix(l, "motte_bucket") && !strings.HasPrefix(l, "motte_index_cache") {
+		if !strings.HasPrefix(l, "motte_pack_cache") && !strings.HasPrefix(l, "motte_bucket") && !strings.HasPrefix(l, "motte_index_cache") && !strings.HasPrefix(l, "motte_manifest") && !strings.HasPrefix(l, "motte_compaction") && !strings.HasPrefix(l, "motte_layer_merge") {
 			continue
 		}
 		k, v, ok := strings.Cut(l, " ")
@@ -65,10 +66,36 @@ func (w *watcher) stop() map[string]watchReport {
 	return w.out
 }
 
+func procTotalsPS(sub string) (ticks uint64, rssKiB int64, n int) {
+	out, err := exec.Command("ps", "-axo", "pid=,cputime=,rss=,command=").Output()
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 4 || f[0] == strconv.Itoa(os.Getpid()) || !strings.Contains(strings.Join(f[3:], " "), sub) {
+			continue
+		}
+		var secs float64
+		for _, part := range strings.Split(f[1], ":") {
+			v, _ := strconv.ParseFloat(part, 64)
+			secs = secs*60 + v
+		}
+		kb, _ := strconv.ParseInt(f[2], 10, 64)
+		ticks += uint64(secs * 100)
+		rssKiB += kb
+		n++
+	}
+	return
+}
+
 func procTotals(sub string) (ticks uint64, rssKiB int64, n int) {
-	ents, _ := os.ReadDir("/proc")
+	ents, err := os.ReadDir("/proc")
+	if err != nil {
+		return procTotalsPS(sub)
+	}
 	for _, de := range ents {
-		if _, err := strconv.Atoi(de.Name()); err != nil {
+		if pid, err := strconv.Atoi(de.Name()); err != nil || pid == os.Getpid() {
 			continue
 		}
 		cmd, err := os.ReadFile("/proc/" + de.Name() + "/cmdline")

@@ -168,6 +168,7 @@ type genFlags struct {
 	fanout, depth, leaf   int
 	seed                  uint64
 	sampleN, builders, up int
+	skew                  float64
 }
 
 func runGen(ctx context.Context, args []string) error {
@@ -185,6 +186,7 @@ func runGen(ctx context.Context, args []string) error {
 	fs.IntVar(&f.leaf, "leaf", 64, "files per leaf directory")
 	fs.Uint64Var(&f.seed, "seed", 1, "random seed")
 	fs.IntVar(&f.sampleN, "sample", 200, "keep 1 in N blobs and trees as samples")
+	fs.Float64Var(&f.skew, "skew", 0, "Zipf exponent of the popularity of the files that history changes; 0 is uniform")
 	fs.IntVar(&f.builders, "builders", 4, "pack builders")
 	fs.IntVar(&f.up, "uploaders", 2, "pack uploaders")
 	if err := fs.Parse(args); err != nil {
@@ -289,6 +291,7 @@ func generate(ctx context.Context, f genFlags) error {
 
 	l := layout{f.fanout, f.depth, f.leaf}
 	blobID := 0
+	hot := newHotSet(l, f.skew)
 	root := e.build(l, 0, 0, &blobID)
 	commits := 0
 	tip := e.commit(root, "", &commits)
@@ -296,6 +299,9 @@ func generate(ctx context.Context, f genFlags) error {
 		touched := map[*node]int{}
 		for range f.k {
 			i := rng.IntN(l.files())
+			if f.skew > 0 {
+				i = hot.file(rng)
+			}
 			p := l.path(root, i)
 			leafBlob := e.blob(blobID)
 			blobID++

@@ -147,6 +147,11 @@ func newHTTPGit(url, path, read, write string) *httpGit {
 }
 
 func (h *httpGit) fetch(ctx context.Context, want, have string, partial bool) error {
+	_, err := h.fetchN(ctx, want, have, partial)
+	return err
+}
+
+func (h *httpGit) fetchN(ctx context.Context, want, have string, partial bool) (int64, error) {
 	var b bytes.Buffer
 	pw := pktline.NewWriter(&b)
 	pw.Linef("command=fetch\n")
@@ -167,18 +172,18 @@ func (h *httpGit) fetch(ctx context.Context, want, have string, partial bool) er
 	req.Header.Set("Content-Type", "application/x-git-upload-pack-request")
 	resp, err := h.hc.Do(req)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer resp.Body.Close()
 	n, err := io.Copy(io.Discard, resp.Body)
 	h.fetchBytes.Add(n)
 	if err != nil {
-		return err
+		return n, err
 	}
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("fetch status %d", resp.StatusCode)
+		return n, fmt.Errorf("fetch status %d", resp.StatusCode)
 	}
-	return nil
+	return n, nil
 }
 
 func (h *httpGit) push(ctx context.Context, ref, old, newSHA string, pack []byte) error {
@@ -209,6 +214,7 @@ type editor struct {
 	c     *client.Client
 	local map[string][]byte
 	objs  []gitpack.Object
+	keep  bool
 }
 
 func (ed *editor) tree(ctx context.Context, sha string) ([]byte, error) {
@@ -218,6 +224,9 @@ func (ed *editor) tree(ctx context.Context, sha string) ([]byte, error) {
 	o, err := ed.c.Object(ctx, sha)
 	if err != nil {
 		return nil, fmt.Errorf("tree %s: %w", sha, err)
+	}
+	if ed.keep {
+		ed.local[sha] = o.Data
 	}
 	return o.Data, nil
 }

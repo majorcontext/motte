@@ -28,6 +28,12 @@ type runFlags struct {
 	duration                       time.Duration
 	seed                           uint64
 	jsonOut                        bool
+	scenario, mainRef              string
+	skew, coldRate                 float64
+	cluster, commits, editFiles    int
+	pushEvery, exploreReads        int
+	landRetries                    int
+	think                          time.Duration
 }
 
 type env struct {
@@ -42,6 +48,7 @@ type env struct {
 	http    *httpGit
 	casRefs []string
 	landRef []string
+	agents  agentStats
 }
 
 type outcome struct {
@@ -75,10 +82,21 @@ func runLoad(ctx context.Context, args []string) error {
 	fs.StringVar(&f.watch, "watch", "", "name=substring list of processes whose CPU and memory to sample (Linux)")
 	fs.IntVar(&f.conc, "c", 16, "concurrent clients")
 	fs.IntVar(&f.casRefs, "cas-refs", 1, "refs that the cas operation contends on")
-	fs.IntVar(&f.fetchBack, "fetch-back", 100, "commits behind the tip that a delta fetch starts from")
+	fs.IntVar(&f.fetchBack, "fetch-back", 100, "commits behind the tip that a delta fetch starts from; agents start between half and twice this far behind")
 	fs.DurationVar(&f.duration, "d", 30*time.Second, "run time")
 	fs.Uint64Var(&f.seed, "seed", 2, "random seed")
 	fs.BoolVar(&f.jsonOut, "json", false, "print the report as JSON")
+	fs.StringVar(&f.scenario, "scenario", "mix", "mix (the weighted micro-operations) or agents (one coding-agent session per client)")
+	fs.StringVar(&f.mainRef, "main-ref", "lt/main", "agents: the ref that agents start from and land on")
+	fs.Float64Var(&f.skew, "skew", 0.8, "agents: Zipf exponent of file and directory popularity; 0 is uniform")
+	fs.IntVar(&f.cluster, "cluster", 3, "agents: leaf directories in the task cluster of an agent")
+	fs.IntVar(&f.commits, "commits", 4, "agents: mean commits of a task")
+	fs.IntVar(&f.editFiles, "edit-files", 4, "agents: most files that one commit changes")
+	fs.IntVar(&f.pushEvery, "push-every", 2, "agents: commits between two pushes of the task branch")
+	fs.IntVar(&f.exploreReads, "explore-reads", 8, "agents: directory reads before the first edit")
+	fs.IntVar(&f.landRetries, "land-retries", 5, "agents: retries of a land after a conflict")
+	fs.Float64Var(&f.coldRate, "cold-rate", 0.05, "agents: chance that a task starts from a cold partial clone")
+	fs.DurationVar(&f.think, "think", 50*time.Millisecond, "agents: mean pause between steps")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -86,10 +104,15 @@ func runLoad(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	ops, err := e.pickOps(f.mix)
-	if err != nil {
-		return err
+	var ops opSet
+	if f.scenario == "mix" {
+		if ops, err = e.pickOps(f.mix); err != nil {
+			return err
+		}
+	} else if f.scenario != "agents" {
+		return fmt.Errorf("unknown scenario %q", f.scenario)
 	}
+	hot := newHotSet(e.layout(), f.skew)
 	before := scrape(f.url)
 	ws := startWatch(f.watch)
 	start := time.Now()
@@ -102,6 +125,19 @@ func runLoad(ctx context.Context, args []string) error {
 		go func() {
 			defer wg.Done()
 			w := &worker{id: i, rng: rand.New(rand.NewPCG(f.seed, uint64(i)+100))}
+			if f.scenario == "agents" {
+				e.agentLoop(rctx, ctx, w, hot, func(op string, d time.Duration, err error, conflict bool) {
+					if conflict {
+						err = nil
+					}
+					oc := outcome{op: op, d: d, conflict: conflict}
+					if err != nil {
+						oc.err = errClass(err)
+					}
+					outs[i] = append(outs[i], oc)
+				})
+				return
+			}
 			for rctx.Err() == nil {
 				o := ops.pick(w.rng)
 				octx, ocancel := context.WithTimeout(ctx, 90*time.Second)
@@ -127,6 +163,9 @@ func runLoad(ctx context.Context, args []string) error {
 	wg.Wait()
 	elapsed := time.Since(start)
 	rep := buildReport(f, e.m, elapsed, outs, before, scrape(f.url), ws.stop())
+	if f.scenario == "agents" {
+		rep.Agents = e.agents.report(elapsed, rep.Server)
+	}
 	if f.jsonOut {
 		b, _ := json.MarshalIndent(rep, "", "  ")
 		fmt.Println(string(b))
@@ -185,6 +224,9 @@ func setup(ctx context.Context, f runFlags) (*env, error) {
 		e.casRefs = append(e.casRefs, name)
 	}
 	if err := e.ensureRef(ctx, "lt/hot"); err != nil {
+		return nil, err
+	}
+	if err := e.ensureRef(ctx, f.mainRef); err != nil {
 		return nil, err
 	}
 	for i := range f.conc {
@@ -248,6 +290,7 @@ type report struct {
 	Ops      []opReport             `json:"ops"`
 	Server   map[string]float64     `json:"server_counters"`
 	Watch    map[string]watchReport `json:"watch"`
+	Agents   *agentReport           `json:"agents,omitempty"`
 }
 
 type opReport struct {
@@ -315,7 +358,11 @@ func buildReport(f runFlags, m Manifest, el time.Duration, outs [][]outcome, bef
 }
 
 func (r report) print() {
-	fmt.Printf("repo %s objects=%d packs=%d c=%d mix=%s %.0fs\n", r.Manifest.Repo, r.Manifest.Objects, r.Manifest.Packs, r.Flags.conc, r.Flags.mix, r.Seconds)
+	what := "mix=" + r.Flags.mix
+	if r.Flags.scenario == "agents" {
+		what = fmt.Sprintf("scenario=agents skew=%.2f cluster=%d commits=%d push-every=%d think=%s cold=%.2f", r.Flags.skew, r.Flags.cluster, r.Flags.commits, r.Flags.pushEvery, r.Flags.think, r.Flags.coldRate)
+	}
+	fmt.Printf("repo %s objects=%d commits=%d packs=%d c=%d %s %.0fs\n", r.Manifest.Repo, r.Manifest.Objects, r.Manifest.Commits, r.Manifest.Packs, r.Flags.conc, what, r.Seconds)
 	fmt.Printf("%-14s %8s %8s %9s %9s %9s %9s %6s %6s\n", "op", "count", "per_s", "p50_ms", "p95_ms", "p99_ms", "max_ms", "conf", "err")
 	for _, o := range r.Ops {
 		fmt.Printf("%-14s %8d %8.1f %9.1f %9.1f %9.1f %9.1f %6d %6d", o.Op, o.Count, o.PerSec, o.P50ms, o.P95ms, o.P99ms, o.MaxMs, o.Conflicts, o.Errors)
@@ -332,6 +379,11 @@ func (r report) print() {
 	sort.Strings(keys)
 	for _, k := range keys {
 		fmt.Printf("%s %.0f\n", k, r.Server[k])
+	}
+	if a := r.Agents; a != nil {
+		fmt.Printf("agents: tasks=%d landed=%d (%.1f/min) abandoned=%d first-try=%.1f%%\n", a.Tasks, a.Landed, a.LandedPerMin, a.Abandoned, 100*a.FirstTryRate)
+		fmt.Printf("agents: lands=%d conflicts=%d (%.1f%%) retries=%d\n", a.LandAttempts, a.LandConflicts, 100*a.ConflictRate, a.LandRetries)
+		fmt.Printf("agents: clones=%d avg %.1f KiB, fetches=%d avg %.1f KiB, bucket range reads per task %.1f (%.1f KiB)\n", a.Clones, a.CloneKiBAvg, a.Fetches, a.FetchKiBAvg, a.RangeReads, a.RangeKiB)
 	}
 	for n, w := range r.Watch {
 		fmt.Printf("watch %s: cpu avg %.2f cores, peak %.2f cores, rss peak %d MiB, procs peak %d\n", n, w.AvgCores, w.PeakCores, w.PeakRSSMiB, w.Procs)
