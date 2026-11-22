@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 
 	"github.com/majorcontext/motte/internal/gitpack"
@@ -58,6 +59,10 @@ func entryClasses(spans []gitpack.Span, names map[gitpack.SHA]int64) []int8 {
 	}
 	return cls
 }
+
+// errInflated reports that the metadata of a run holds more bytes than its packs, so a split cannot keep to the
+// memory that the run reserved.
+var errInflated = errors.New("store: metadata of the run is too large to split")
 
 // filterIter passes the records that keep accepts, with the record that it returns, and counts the others.
 type filterIter struct {
@@ -118,6 +123,7 @@ func (s *Service) splitPacks(ctx context.Context, prefix string, r *run) ([]pack
 	meta := map[gitpack.SHA]bool{}
 	var metaObjs []gitpack.Object
 	blobCount := 0
+	var inflated int64
 	for u, p := range r.packs {
 		data, err := s.st.Get(ctx, prefix+"/"+p.ID+".pack")
 		if err != nil {
@@ -138,6 +144,13 @@ func (s *Service) splitPacks(ctx context.Context, prefix string, r *run) ([]pack
 				sha, named := byOff[u][sp.Off]
 				if !named || meta[sha] {
 					continue
+				}
+				size, _, err := pk.Size(sha)
+				if err != nil {
+					return nil, fmt.Errorf("store: pack %s: %w", p.ID, err)
+				}
+				if inflated += size; inflated > r.bytes() {
+					return nil, errInflated
 				}
 				t, obj, err := pk.Get(sha)
 				if err != nil {

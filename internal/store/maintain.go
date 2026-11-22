@@ -405,11 +405,17 @@ func (s *Service) compactRun(ctx context.Context, repo Repo, layers []midx.Entry
 	var outs []packOut
 	if class == midx.ClassBlob {
 		var o packOut
-		if o, err = s.copyPacks(ctx, prefix, r); err == nil {
+		if o, err = s.copyPacks(ctx, prefix, r, midx.ClassBlob); err == nil {
 			outs = []packOut{o}
 		}
 	} else {
 		outs, err = s.splitPacks(ctx, prefix, r)
+		if errors.Is(err, errInflated) {
+			var o packOut
+			if o, err = s.copyPacks(ctx, prefix, r, class); err == nil {
+				outs = []packOut{o}
+			}
+		}
 	}
 	if err != nil {
 		return err
@@ -469,8 +475,8 @@ func (s *Service) finishPack(ctx context.Context, body []byte, count int, class 
 	return packOut{id: id, pack: body, idx: idx, layer: l, class: class, objects: count}, seen, nil
 }
 
-// copyPacks copies the entries of the packs of r, in order and unchanged, into one pack.
-func (s *Service) copyPacks(ctx context.Context, prefix string, r *run) (packOut, error) {
+// copyPacks copies the entries of the packs of r, in order and unchanged, into one pack of the class.
+func (s *Service) copyPacks(ctx context.Context, prefix string, r *run, class string) (packOut, error) {
 	out := make([]byte, 12, r.bytes()+16)
 	shift := make([]int64, len(r.packs))
 	count := 0
@@ -491,7 +497,7 @@ func (s *Service) copyPacks(ctx context.Context, prefix string, r *run) (packOut
 	if err != nil {
 		return packOut{}, err
 	}
-	o, seen, err := s.finishPack(ctx, out, count, midx.ClassBlob, ins, r.objects(), func(in int, rec midx.Record) (midx.Record, error) {
+	o, seen, err := s.finishPack(ctx, out, count, class, ins, r.objects(), func(in int, rec midx.Record) (midx.Record, error) {
 		if int(rec.Ord) >= len(r.ords[in]) || rec.Off < 12 {
 			return rec, midx.ErrCorrupt
 		}

@@ -111,7 +111,7 @@ func (e *emitter) put(t gitpack.Type, data []byte, kind byte) gitpack.SHA {
 	if e.sampleN > 0 && (kind == 'c' && e.commitSeq%25 == 0 || kind != 'c' && e.rng.IntN(e.sampleN) == 0) {
 		fmt.Fprintf(e.samples, "%c %s %d\n", kind, sha, e.commitSeq)
 	}
-	if !e.atCommit && len(e.batch) >= e.maxBatch || e.batchBytes >= 40<<20 {
+	if !e.atCommit && (len(e.batch) >= e.maxBatch || e.batchBytes >= 40<<20) {
 		e.flushBatch()
 	}
 	return sha
