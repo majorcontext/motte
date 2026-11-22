@@ -59,9 +59,9 @@ func encodeTree(entries []Entry) []byte {
 	return b.Bytes()
 }
 
-// Change is a leaf that differs between two trees. Old is nil for an addition and New is nil for a removal. A rename
-// is a removal and an addition. A directory that becomes a file is the removal of each leaf under it and the addition
-// of the file.
+// Change is a leaf that differs between two trees. Old is nil for an addition and New is nil for a removal, and a
+// change of the content or the mode of a leaf has both. A rename is a removal and an addition. A directory that
+// becomes a file is the removal of each leaf under it and the addition of the file.
 type Change struct {
 	Path     string
 	Old, New *Entry
@@ -143,6 +143,12 @@ func (b *Batch) diff(ctx context.Context, a, c gitpack.SHA, prefix string, emit 
 		}
 		if hasX && hasY && x.isDir() && y.isDir() {
 			if err := b.diff(ctx, x.SHA, y.SHA, prefix+name+"/", emit); err != nil {
+				return err
+			}
+			continue
+		}
+		if hasX && hasY && !x.isDir() && !y.isDir() {
+			if err := emit(Change{Path: prefix + name, Old: &x, New: &y}); err != nil {
 				return err
 			}
 			continue
@@ -235,6 +241,14 @@ func (b *Batch) applyNode(ctx context.Context, base gitpack.SHA, n *node) (gitpa
 	}
 	for name, child := range n.children {
 		old, had := byName[name]
+		if _, merge := b.merging[pathOf(child)]; merge {
+			e, err := b.mergeLeaf(ctx, old, had, child.leaf)
+			if err != nil {
+				return base, false, err
+			}
+			byName[name] = e
+			continue
+		}
 		if child.leaf != nil && child.leaf.New != nil {
 			byName[name] = Entry{Name: name, Mode: child.leaf.New.Mode, SHA: child.leaf.New.SHA}
 			continue

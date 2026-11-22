@@ -83,6 +83,7 @@ type Batch struct {
 	diffs    map[gitpack.SHA]diffResult
 	cached   int
 	tooBig   bool
+	merging  map[string]struct{}
 }
 
 // diffResult is the paths that differ between a base and the start tip, and false when they are too many to keep.
@@ -333,11 +334,12 @@ func (b *Batch) rebase(ctx context.Context, base gitpack.SHA, baseCommit Commit,
 		return Landed{}, err
 	}
 	paths := set.sorted()
-	if hits, err := b.conflicts(ctx, base, paths); err != nil || len(hits) > 0 {
-		if err == nil {
-			err = &ConflictError{Paths: hits}
-		}
+	hits, err := b.conflicts(ctx, base, paths)
+	if err != nil {
 		return Landed{}, err
+	}
+	if !b.canMerge(hits, set, changes) {
+		return Landed{}, &ConflictError{Paths: hits[:min(len(hits), MaxConflictPaths)]}
 	}
 	tipCommit, err := b.commit(ctx, b.tip)
 	if err != nil {
@@ -347,6 +349,9 @@ func (b *Batch) rebase(ctx context.Context, base gitpack.SHA, baseCommit Commit,
 	out := Landed{Old: b.tip}
 	for i, l := range chain {
 		if root, err = b.apply(ctx, root, changes[i]); err != nil {
+			if errors.Is(err, errNoMerge) {
+				err = &ConflictError{Paths: hits[:min(len(hits), MaxConflictPaths)]}
+			}
 			return Landed{}, err
 		}
 		data, err := l.c.Rebuild(prev, root, when)

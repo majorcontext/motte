@@ -1,6 +1,7 @@
 package land
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -266,5 +267,29 @@ func TestALandThatMakesAnObjectAboveTheLimitFailsAloneAndLeavesNoTrace(t *testin
 	MaxObjectBytes = 1 << 20
 	if _, err := b.Land(context.Background(), base, two, time.Unix(1, 0)); err != nil {
 		t.Fatalf("a land after the refused one: %v", err)
+	}
+}
+
+func TestEveryClashingPathIsCheckedBeyondTheCapOfTheConflictList(t *testing.T) {
+	t.Parallel()
+	m := mem{}
+	text := func(edits map[int]string) string {
+		var b strings.Builder
+		for i := 1; i <= 10; i++ {
+			b.WriteString(cmp.Or(edits[i], "line") + "\n")
+		}
+		return b.String()
+	}
+	base, tip, mine := map[string]string{}, map[string]string{}, map[string]string{}
+	for i := range MaxConflictPaths + 1 {
+		name := fmt.Sprintf("f%04d", i)
+		base[name], tip[name], mine[name] = text(nil), text(map[int]string{2: "tip"}), text(map[int]string{8: "mine"})
+	}
+	mine[fmt.Sprintf("f%04d", MaxConflictPaths)] = text(map[int]string{2: "mine"})
+	b0 := m.commit(gitpack.SHA{}, m.tree(base), "")
+	tipC, change := m.commit(b0, m.tree(tip), ""), m.commit(b0, m.tree(mine), "")
+	var ce *ConflictError
+	if _, err := m.batch(tipC).Land(context.Background(), b0, change, time.Unix(1, 0)); !errors.As(err, &ce) || len(ce.Paths) != MaxConflictPaths {
+		t.Fatalf("err = %v, want a conflict that lists %d paths: the last path clashes on its lines", err, MaxConflictPaths)
 	}
 }

@@ -52,5 +52,5 @@ func (c *clash) result() []string {
 		out = append(out, p)
 	}
 	slices.Sort(out)
-	return out[:min(len(out), MaxConflictPaths)]
+	return out
 }

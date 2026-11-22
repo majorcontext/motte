@@ -77,6 +77,7 @@ func TestLandFastForwardsThenRebasesAndMapsTheCommits(t *testing.T) {
 
 func TestLandConflictNamesTheClashingPathsAndMovesNothing(t *testing.T) {
 	eachBackend(t, func(t *testing.T, l *landEnv) {
+		landMergesLinesThatTwoLandsChangeApart(t, l)
 		var o objSet
 		start := o.commit(map[string]string{"a": "1", "b": "1", "d/x": "1"}, "", "start", l.root)
 		tip := o.commit(map[string]string{"a": "2", "b": "1", "d/x": "2"}, "", "tip", start)
