@@ -706,3 +706,46 @@ func (b *memBucket) GetRange(_ context.Context, key string, off, n int64) ([]byt
 	}
 	return d[off : off+n], nil
 }
+
+func TestAnotherRequestCannotPushOutWhatAPrefetchKept(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	rng := rand.New(rand.NewPCG(5, 6))
+	objs := make([]gitpack.Object, 500)
+	for i := range objs {
+		data := make([]byte, 20<<10)
+		for j := range data {
+			data[j] = byte(rng.Uint32())
+		}
+		objs[i] = gitpack.Object{Type: gitpack.Blob, Data: data}
+	}
+	names, err := w.svc.PutObjects(t.Context(), repo, objs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := w.cold()
+	mine, other := names[:20], names[100:]
+	a, err := svc.Reader(t.Context(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Prefetch(t.Context(), mine)
+	b, err := svc.Reader(t.Context(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sha := range other {
+		if _, _, err := b.Get(t.Context(), sha); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := svc.CacheStats().RangeReads
+	for _, sha := range mine {
+		if _, _, err := a.Get(t.Context(), sha); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := svc.CacheStats().RangeReads - before; got != 0 {
+		t.Errorf("reading %d prefetched objects after another request read 8 MiB made %d range reads; it must make none", len(mine), got)
+	}
+}

@@ -55,8 +55,10 @@ const (
 	// while requests hold the whole of MemoryBudget still merges its tail.
 	inlineBudget = 64 << 20
 	blockTimeout = 30 * time.Second
-	// ReadAheadBytes bounds the bytes that the prefetches of one request have in flight.
-	ReadAheadBytes = 4 << 20
+	// inFlightBytes bounds the bytes that the prefetches of one request have in flight. ReadAheadBytes adds what they
+	// keep, the most that the read-ahead of a request holds.
+	inFlightBytes  = 2 << 20
+	ReadAheadBytes = inFlightBytes + aheadKeep
 	// readWorkers bounds the concurrent bucket reads of one prefetch or one batched lookup.
 	readWorkers = 16
 	// treeAhead is the trees of a bulk tree read that one prefetch reads in advance.
@@ -465,6 +467,8 @@ type view struct {
 	layers []midx.Entry
 	// lerr is the last failed read of a delta base, which the pack reports as a missing name.
 	lerr atomic.Pointer[error]
+	// ahead holds what the prefetches of the request read.
+	ahead *aheadBuf
 }
 
 // missing is the error for a name that a pack lacks: the failed read of a delta base when there was one.
@@ -484,7 +488,7 @@ func (s *Service) view(ctx context.Context, repo Repo) (*view, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &view{s: s, prefix: prefix, layers: m.Layers}, nil
+	return &view{s: s, prefix: prefix, layers: m.Layers, ahead: &aheadBuf{}}, nil
 }
 
 // locate returns the pack that holds sha, probing the newest layer first, with the layer and the number of the pack in
@@ -513,7 +517,7 @@ func (v *view) find(ctx context.Context, sha gitpack.SHA) (*gitpack.Pack, error)
 	if err != nil {
 		return nil, err
 	}
-	return e.p.Bind(reqReader{b: e.b, ctx: ctx}).WithLookup(func(name gitpack.SHA) (int64, bool) {
+	return e.p.Bind(reqReader{b: e.b, ctx: ctx, ahead: v.ahead}).WithLookup(func(name gitpack.SHA) (int64, bool) {
 		_, off, ok, err := v.s.lookup(ctx, h, name, ord)
 		if err != nil {
 			v.lerr.Store(&err)
@@ -582,12 +586,12 @@ func (s *Service) Get(ctx context.Context, repo Repo, sha gitpack.SHA) (gitpack.
 // Reader reads the objects of one repo against the pack list of the moment that Reader was called, so a request
 // that reads many objects lists the packs once.
 type Reader struct {
-	v     *view
-	ahead *semaphore.Weighted
+	v      *view
+	flight *semaphore.Weighted
 }
 
 func newReader(v *view) *Reader {
-	return &Reader{v: v, ahead: semaphore.NewWeighted(ReadAheadBytes)}
+	return &Reader{v: v, flight: semaphore.NewWeighted(inFlightBytes)}
 }
 
 func (s *Service) Reader(ctx context.Context, repo Repo) (*Reader, error) {
@@ -618,14 +622,14 @@ func (r *Reader) Prefetch(ctx context.Context, shas []gitpack.SHA) {
 	var g errgroup.Group
 	g.SetLimit(readWorkers)
 	for e, offs := range byPack {
-		for _, run := range e.b.plan(offs) {
-			if r.ahead.Acquire(ctx, run.end-run.start) != nil {
+		for _, run := range e.b.plan(offs, r.v.ahead) {
+			if r.flight.Acquire(ctx, run.end-run.start) != nil {
 				break
 			}
-			release := sync.OnceFunc(func() { r.ahead.Release(run.end - run.start) })
+			release := sync.OnceFunc(func() { r.flight.Release(run.end - run.start) })
 			g.Go(func() error {
 				defer release()
-				_ = e.b.fetchRun(ctx, run, release, r.ahead)
+				_ = e.b.fetchRun(ctx, r.v.ahead, run, release, r.flight)
 				return nil
 			})
 		}

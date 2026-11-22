@@ -24,6 +24,8 @@ const (
 	maxRun = 1 << 20
 	// maxSpanBytes bounds the bytes that one pack keeps.
 	maxSpanBytes = 4 << 20
+	// aheadKeep bounds the bytes that the prefetches of one request keep.
+	aheadKeep = 4 << 20
 )
 
 type span struct {
@@ -54,23 +56,70 @@ func (b *packReader) cachedBytes() int {
 
 func (b *packReader) Size() int64 { return b.size }
 
-// reqReader reads through a packReader under the context of one request.
+// reqReader reads through a packReader under the context of one request, and first from what the prefetches of the
+// request kept in ahead, when it has one.
 type reqReader struct {
-	b   *packReader
-	ctx context.Context
+	b     *packReader
+	ctx   context.Context
+	ahead *aheadBuf
 }
 
 func (r reqReader) Size() int64 { return r.b.size }
 
-func (r reqReader) ReadAt(p []byte, off int64) (int, error) { return r.b.readAt(r.ctx, p, off) }
+func (r reqReader) ReadAt(p []byte, off int64) (int, error) {
+	return r.b.readAt(r.ctx, r.ahead, p, off)
+}
 
-func (b *packReader) readAt(ctx context.Context, p []byte, off int64) (int, error) {
+// aheadBuf holds the ranges that the prefetches of one request read, at most aheadKeep bytes, oldest out first. A
+// request keeps its own, so the prefetches of other requests cannot push out what it has read and not yet used.
+type aheadBuf struct {
+	mu    sync.Mutex
+	spans []aheadSpan
+	held  int
+}
+
+type aheadSpan struct {
+	b *packReader
+	span
+}
+
+func (a *aheadBuf) cover(b *packReader, start, end int64) []byte {
+	if a == nil {
+		return nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i := len(a.spans) - 1; i >= 0; i-- {
+		s := a.spans[i]
+		if s.b == b && s.off <= start && end <= s.off+int64(len(s.data)) {
+			return s.data[start-s.off:]
+		}
+	}
+	return nil
+}
+
+func (a *aheadBuf) keep(b *packReader, off int64, d []byte) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for a.held+len(d) > aheadKeep && len(a.spans) > 0 {
+		a.held -= len(a.spans[0].data)
+		a.spans[0] = aheadSpan{}
+		a.spans = a.spans[1:]
+	}
+	a.spans = append(a.spans, aheadSpan{b, span{off, d}})
+	a.held += len(d)
+}
+
+func (b *packReader) readAt(ctx context.Context, a *aheadBuf, p []byte, off int64) (int, error) {
 	if off < 0 {
 		return 0, io.EOF
 	}
 	n := 0
 	for n < len(p) && off < b.size {
-		d := b.cover(off, off+1)
+		d := a.cover(b, off, off+1)
+		if d == nil {
+			d = b.cover(off, off+1)
+		}
 		if d == nil {
 			end := min(max(off+int64(len(p)-n), off+minRead), b.size)
 			var err error
@@ -153,10 +202,10 @@ type prefetchRun struct {
 // maxEntry bounds the bytes that the read-ahead keeps for one object.
 const maxEntry = 256 << 10
 
-// fetchRun reads the run and keeps each object whole, from its header to the bound that the header gives, and not the
-// gaps that the read closed. release frees the bytes that the run holds in the read-ahead once its read ends, and the
-// tail of an object that runs past the end of the run is read after that, from ahead.
-func (b *packReader) fetchRun(ctx context.Context, r prefetchRun, release func(), ahead *semaphore.Weighted) error {
+// fetchRun reads the run and keeps each object whole in a, from its header to the bound that the header gives, and not
+// the gaps that the read closed. release frees the bytes that the run holds in flight once its read ends, and the tail
+// of an object that runs past the end of the run is read after that, from flight.
+func (b *packReader) fetchRun(ctx context.Context, a *aheadBuf, r prefetchRun, release func(), flight *semaphore.Weighted) error {
 	d, err := b.read(ctx, r.start, r.end)
 	if err == nil && int64(len(d)) != r.end-r.start {
 		err = io.ErrUnexpectedEOF
@@ -187,32 +236,35 @@ func (b *packReader) fetchRun(ctx context.Context, r prefetchRun, release func()
 		case to > r.end:
 			tails = append(tails, tail{from, to, bytes.Clone(d[from-r.start:])})
 		case from == r.start && to == r.end:
-			b.keep(from, d)
+			a.keep(b, from, d)
 		default:
-			b.keep(from, bytes.Clone(d[from-r.start:to-r.start]))
+			a.keep(b, from, bytes.Clone(d[from-r.start:to-r.start]))
 		}
 	}
 	release()
 	for _, t := range tails {
 		n := t.to - r.end
-		if err := ahead.Acquire(ctx, n); err != nil {
+		if err := flight.Acquire(ctx, n); err != nil {
 			return err
 		}
 		x, err := b.read(ctx, r.end, t.to)
-		ahead.Release(n)
+		flight.Release(n)
 		if err != nil {
 			return err
 		}
-		b.keep(t.from, append(t.head, x...))
+		a.keep(b, t.from, append(t.head, x...))
 	}
 	return nil
 }
 
 // plan joins the objects at offs into the ranges that Prefetch reads: it joins objects that lie within spanGap of each
 // other, skips what the reader keeps, and stops after half of what the reader keeps.
-func (b *packReader) plan(offs []int64) []prefetchRun {
+func (b *packReader) plan(offs []int64, a *aheadBuf) []prefetchRun {
 	slices.Sort(offs)
-	offs = slices.DeleteFunc(offs, func(o int64) bool { return b.cover(o, min(o+minRead, b.size)) != nil })
+	offs = slices.DeleteFunc(offs, func(o int64) bool {
+		end := min(o+minRead, b.size)
+		return a.cover(b, o, end) != nil || b.cover(o, end) != nil
+	})
 	var runs []prefetchRun
 	budget := int64(maxSpanBytes / 2)
 	for i := 0; i < len(offs) && budget > 0; {
