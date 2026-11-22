@@ -26,7 +26,7 @@ func TestGitPushHonorsProtectedRefsAndRecordsEvents(t *testing.T) {
 	g.git(w, true, "push", "-q", merge, "HEAD:refs/heads/main")
 	g.git(w, true, "push", "-q", merge, "HEAD:refs/heads/release/1")
 	g.git(w, true, "push", "-q", merge, ":release/1")
-	if got, head := g.git(w, true, "ls-remote", "origin", "refs/heads/main"), g.git(w, true, "rev-parse", "HEAD"); !strings.HasPrefix(got, head) {
+	if got, head := g.git(w, true, "ls-remote", "origin", "refs/heads/main"), g.head(w); !strings.HasPrefix(got, head) {
 		t.Errorf("main after the merge push = %q, want %s", got, head)
 	}
 

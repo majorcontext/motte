@@ -63,6 +63,33 @@ func (g *gitEnv) git(dir string, wantOK bool, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// head returns the commit that HEAD of the clone in dir names, read from the repository files without a process.
+func (g *gitEnv) head(dir string) string {
+	g.t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, ".git", "HEAD"))
+	if err != nil {
+		g.t.Fatal(err)
+	}
+	ref, ok := strings.CutPrefix(strings.TrimSpace(string(raw)), "ref: ")
+	if !ok {
+		return strings.TrimSpace(string(raw))
+	}
+	if raw, err := os.ReadFile(filepath.Join(dir, ".git", ref)); err == nil {
+		return strings.TrimSpace(string(raw))
+	}
+	packed, err := os.ReadFile(filepath.Join(dir, ".git", "packed-refs"))
+	if err != nil {
+		g.t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(packed), "\n") {
+		if sha, name, ok := strings.Cut(line, " "); ok && name == ref {
+			return sha
+		}
+	}
+	g.t.Fatalf("HEAD of %s names %s, which holds no commit", dir, ref)
+	return ""
+}
+
 func (g *gitEnv) clone(token string, extra ...string) string {
 	g.t.Helper()
 	dir := g.t.TempDir()
@@ -138,7 +165,7 @@ func TestGitAnnotatedTags(t *testing.T) {
 	g.git(writer, true, "tag", "-a", "-m", "release", "v1")
 	g.git(writer, true, "push", "-q", "origin", "v1")
 	g.git(reader, true, "fetch", "-q", "--tags", "origin")
-	if got := g.git(reader, true, "rev-parse", "v1^{commit}"); got != g.git(writer, true, "rev-parse", "HEAD") {
+	if got := g.git(reader, true, "rev-parse", "v1^{commit}"); got != g.head(writer) {
 		t.Errorf("tag v1 peels to %s", got)
 	}
 	g.git(reader, true, "fsck", "--strict")
@@ -153,7 +180,7 @@ func TestGitPushRules(t *testing.T) {
 	g.commit(b, "b.txt", "b")
 	g.git(b, false, "push", "-q", "origin", "HEAD:main")
 	g.git(b, true, "push", "-q", "--force", "origin", "HEAD:main")
-	head := g.git(b, true, "rev-parse", "HEAD")
+	head := g.head(b)
 	if got := g.git(a, true, "ls-remote", "origin", "refs/heads/main"); !strings.HasPrefix(got, head) {
 		t.Errorf("after the force push main = %q, want %s", got, head)
 	}
@@ -167,7 +194,7 @@ func TestGitPushRules(t *testing.T) {
 func TestGitRefusedPushesAreReported(t *testing.T) {
 	g := newGitEnv(t)
 	write := g.WriteGrant(t, g.text)
-	head := g.git(g.clone(write), true, "rev-parse", "HEAD")
+	head := g.head(g.clone(write))
 	line := fmt.Sprintf("%s %s refs/heads/main\x00report-status\n", strings.Repeat("1", 40), head)
 	if reply := g.rawPush(write, line, emptyPack()); !strings.Contains(reply, "ng refs/heads/main stale info") {
 		t.Errorf("stale old value reply = %q", reply)
@@ -234,7 +261,7 @@ func TestGitAuthorization(t *testing.T) {
 	g.git(reader, false, "push", "-q", "origin", "HEAD:main")
 	g.git(scratch, false, "clone", "-q", g.remote(g.path, g.readGrant("native:repo_other")), filepath.Join(scratch, "y"))
 	bearer := g.clone("", "-c", "http.extraHeader=Authorization: Bearer "+g.readGrant(g.text))
-	g.git(bearer, true, "log", "-1")
+	g.head(bearer)
 	g.git(scratch, false, "ls-remote", g.remote("repo_missing", g.WriteGrant(t, "native:repo_missing")))
 }
 
