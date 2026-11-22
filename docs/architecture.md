@@ -90,7 +90,7 @@ A Go test starts the same composition with `testserver.StartLocal`, which needs 
 
 ### Load test
 
-`motte-loadtest` has three commands. `gen` builds a repository in a running service. `run` drives clients against it and prints a report. `serve` runs a local service on SQLite and a filesystem bucket, and adds `-latency` to each read of the bucket, to stand in for an object store with a network between it and the service. `gen -skew S` makes history change files with a Zipf popularity of exponent S, so that history has hot files as a real repository has; the default 0 is uniform.
+`motte-loadtest` has three commands. `gen` builds a repository in a running service. `run` drives clients against it and prints a report. `serve` runs a local service on SQLite and a filesystem bucket, and adds `-latency` to each read of the bucket, to stand in for an object store with a network between it and the service. `gen` builds source-like files by default. A file has whole lines, and its line count is log-normal (`-lines-median` 135, `-lines-sigma` 1.47). `-shape tree` (the default) builds a random tree of `-files` files in directories of uneven size (`-dir-files-mean` 9.3, `-dir-files-sigma` 1.5, at most `-max-depth` 8 levels deep), and `-shape grid` builds the uniform tree of `-fanout`, `-depth` and `-leaf`. Each commit of history changes 1 or more files, a log-normal count with a mean of 3.3 (`-files-per-commit N` fixes it), and a changed file keeps its other lines, as a changed region of `-change-lines-median` 8 lines (`-change-lines-sigma` 1.85). `-skew S` gives the directories, and the files of a directory, a Zipf popularity of exponent S (default 0.7), so that history has hot files as a real repository has; 0 is uniform. `-content bytes -shape grid -skew 0 -files-per-commit 4` builds the earlier repository, whose blobs are byte ranges of one corpus and are replaced whole by each change. `gen` writes the directories of the first snapshot to `shape.txt` in `-out`, and `run` reads it; without the file, `run` uses the grid of the manifest. The defaults are the figures of the Go repository at commit 91a2e921dd (5011 `.go` files outside `testdata` in 539 directories; the last 30000 commits, 26207 of which change them): a median of 135 lines, a log-normal fit of 1.47, a median of 3 and a mean of 9.3 files for each directory, 47 percent of commits that change one file, 3.3 files for each commit and 8 lines changed for each file, and 19 percent of the changes in 1 percent of the files.
 
 `run` has two scenarios. `-scenario mix` (the default) picks each operation at random by the weights of `-mix`. `-scenario agents` makes each of the `-c` clients one agent that loops through a task:
 
@@ -104,7 +104,7 @@ Popularity is Zipf with exponent `-skew` over the leaf directories and over the 
 ```
 openssl genpkey -algorithm ed25519 -out motte.key
 motte-loadtest serve -key motte.key -listen 127.0.0.1:8080 -latency 20ms &
-motte-loadtest gen -key motte.key -out lt -objects 400000 -fanout 8 -depth 3 -leaf 32 -skew 1
+motte-loadtest gen -key motte.key -out lt -objects 400000 -files 20000
 motte-loadtest run -key motte.key -out lt -scenario agents -c 64 -d 3m
 ```
 

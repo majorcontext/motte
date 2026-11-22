@@ -26,14 +26,14 @@ func (z zipf) draw(r *rand.Rand) int {
 }
 
 type hotSet struct {
-	l     layout
+	s     *shape
 	dirs  zipf
-	files zipf
+	files map[int]zipf
 	mul   int
 }
 
-func newHotSet(l layout, skew float64) hotSet {
-	n := l.files() / l.leaf
+func newHotSet(s *shape, skew float64) hotSet {
+	n := len(s.paths)
 	mul := 2654435761 % max(n, 1)
 	for mul < 2 || gcd(mul, n) != 1 {
 		mul++
@@ -42,7 +42,13 @@ func newHotSet(l layout, skew float64) hotSet {
 			break
 		}
 	}
-	return hotSet{l: l, dirs: newZipf(n, skew), files: newZipf(l.leaf, skew), mul: mul}
+	files := map[int]zipf{}
+	for i := range n {
+		if size := s.start[i+1] - s.start[i]; files[size].cdf == nil {
+			files[size] = newZipf(size, skew)
+		}
+	}
+	return hotSet{s: s, dirs: newZipf(n, skew), files: files, mul: mul}
 }
 
 func gcd(a, b int) int {
@@ -53,11 +59,13 @@ func gcd(a, b int) int {
 }
 
 func (h hotSet) dir(r *rand.Rand) int {
-	n := h.l.files() / h.l.leaf
-	return (h.dirs.draw(r)*h.mul + 7) % n
+	return (h.dirs.draw(r)*h.mul + 7) % len(h.s.paths)
 }
 
-func (h hotSet) fileIn(r *rand.Rand, dir int) int { return dir*h.l.leaf + h.files.draw(r) }
+func (h hotSet) fileIn(r *rand.Rand, dir int) int {
+	size := h.s.start[dir+1] - h.s.start[dir]
+	return h.s.start[dir] + h.files[size].draw(r)
+}
 
 func (h hotSet) file(r *rand.Rand) int { return h.fileIn(r, h.dir(r)) }
 
@@ -66,7 +74,8 @@ func (h hotSet) cluster(r *rand.Rand, size int) []int {
 	out := []int{anchor}
 	for len(out) < size {
 		if r.IntN(2) == 0 {
-			out = append(out, (anchor-anchor%h.l.fanout+r.IntN(h.l.fanout))%(h.l.files()/h.l.leaf))
+			sib := h.s.sibs[h.s.group[anchor]]
+			out = append(out, sib[r.IntN(len(sib))])
 		} else {
 			out = append(out, h.dir(r))
 		}

@@ -6,11 +6,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"math"
 	"math/rand/v2"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -30,6 +32,7 @@ type node struct {
 	sha  gitpack.SHA
 	kids []*node
 	dir  bool
+	file int
 }
 
 func (n *node) encode() []byte {
@@ -48,16 +51,6 @@ func (n *node) encode() []byte {
 	return b
 }
 
-type layout struct{ fanout, depth, leaf int }
-
-func (l layout) files() int {
-	n := l.leaf
-	for range l.depth {
-		n *= l.fanout
-	}
-	return n
-}
-
 type emitter struct {
 	rng        *rand.Rand
 	corpus     []byte
@@ -71,6 +64,13 @@ type emitter struct {
 	total      atomic.Int64
 	samples    *bufio.Writer
 	commitSeq  int
+
+	text                    *textGen
+	seed                    uint64
+	linesMedian, linesSigma float64
+	changeMedian            float64
+	changeSigma             float64
+	cur                     map[int][]byte
 }
 
 func newCorpus(rng *rand.Rand) []byte {
@@ -127,47 +127,102 @@ func (e *emitter) flushBatch() {
 func dirName(d int) string  { return fmt.Sprintf("d%02x", d) }
 func fileName(i int) string { return fmt.Sprintf("f%07d.go", i) }
 
-func (e *emitter) build(l layout, level, idx int, blobID *int) *node {
-	n := &node{dir: true}
-	if level == l.depth {
-		for j := range l.leaf {
-			i := idx*l.leaf + j
-			b := e.blob(*blobID)
-			*blobID++
-			b.name = fileName(i)
-			n.kids = append(n.kids, b)
-		}
-	} else {
-		for d := range l.fanout {
-			k := e.build(l, level+1, idx*l.fanout+d, blobID)
-			k.name = dirName(d)
-			n.kids = append(n.kids, k)
-		}
-	}
-	n.sha = e.put(gitpack.Tree, n.encode(), 't')
-	return n
+func (e *emitter) baseFile(file int) []byte {
+	r := rand.New(rand.NewPCG(e.seed, uint64(file)+1000))
+	return e.text.file(r, min(max(int(lognormal(r, e.linesMedian, e.linesSigma)), 1), 50000))
 }
 
-func (l layout) path(root *node, file int) []*node {
-	dirIdx, j := file/l.leaf, file%l.leaf
-	digits := make([]int, l.depth)
-	for k := l.depth - 1; k >= 0; k-- {
-		digits[k] = dirIdx % l.fanout
-		dirIdx /= l.fanout
+func (e *emitter) fileBlob(file, id int) gitpack.SHA {
+	if e.text == nil {
+		return e.blob(id).sha
 	}
-	p := []*node{root}
-	cur := root
-	for _, d := range digits {
-		cur = cur.kids[d]
-		p = append(p, cur)
+	return e.put(gitpack.Blob, e.baseFile(file), 'b')
+}
+
+func (e *emitter) changeBlob(file, id int) gitpack.SHA {
+	if e.text == nil {
+		return e.blob(id).sha
 	}
-	return append(p, cur.kids[j])
+	data, ok := e.cur[file]
+	if !ok {
+		data = e.baseFile(file)
+	}
+	data = e.text.mutate(e.rng, data, max(1, int(lognormal(e.rng, e.changeMedian, e.changeSigma))))
+	e.cur[file] = data
+	return e.put(gitpack.Blob, data, 'b')
+}
+
+func gitOrder(a, b *node) int {
+	ka, kb := a.name, b.name
+	if a.dir {
+		ka += "/"
+	}
+	if b.dir {
+		kb += "/"
+	}
+	return strings.Compare(ka, kb)
+}
+
+func trieOf(s *shape) (root *node, leaf []*node, chain [][]*node) {
+	root = &node{dir: true}
+	dirs := map[string]*node{"": root}
+	leaf, chain = make([]*node, s.files()), make([][]*node, len(s.paths))
+	for i, p := range s.paths {
+		cur := root
+		chain[i] = []*node{root}
+		for j, name := range p {
+			key := strings.Join(p[:j+1], "/")
+			k, ok := dirs[key]
+			if !ok {
+				k = &node{name: name, dir: true}
+				dirs[key] = k
+				cur.kids = append(cur.kids, k)
+			}
+			cur = k
+			chain[i] = append(chain[i], cur)
+		}
+		for f := s.start[i]; f < s.start[i+1]; f++ {
+			leaf[f] = &node{name: fileName(f), file: f}
+			cur.kids = append(cur.kids, leaf[f])
+		}
+	}
+	for _, n := range dirs {
+		slices.SortFunc(n.kids, gitOrder)
+	}
+	return root, leaf, chain
+}
+
+func (e *emitter) emit(n *node, blobID *int) {
+	for _, k := range n.kids {
+		if k.dir {
+			e.emit(k, blobID)
+			continue
+		}
+		k.sha = e.fileBlob(k.file, *blobID)
+		*blobID++
+	}
+	n.sha = e.put(gitpack.Tree, n.encode(), 't')
+}
+
+func (e *emitter) commitSize(fixed, files int) int {
+	k := fixed
+	if k <= 0 {
+		k = 1 + int(math.Exp(0.1+1.37*e.rng.NormFloat64()))
+	}
+	return min(k, files)
 }
 
 type genFlags struct {
 	url, key, kid, out    string
 	objects, k, median    int
 	fanout, depth, leaf   int
+	shape, content        string
+	files, maxDepth       int
+	dirFiles, dirSigma    float64
+	linesMedian           float64
+	linesSigma            float64
+	changeMedian          float64
+	changeSigma           float64
 	seed                  uint64
 	sampleN, builders, up int
 	skew                  float64
@@ -183,20 +238,36 @@ func runGen(ctx context.Context, args []string) error {
 	fs.StringVar(&f.kid, "kid", "local", "key ID")
 	fs.StringVar(&f.out, "out", "lt", "output directory of the manifest and samples")
 	fs.IntVar(&f.objects, "objects", 1000000, "objects to generate")
-	fs.IntVar(&f.k, "files-per-commit", 4, "files that each commit changes")
-	fs.IntVar(&f.median, "blob-median", 1024, "median blob bytes (log-normal)")
-	fs.IntVar(&f.fanout, "fanout", 16, "directories per directory")
-	fs.IntVar(&f.depth, "depth", 3, "directory levels above the leaf directories")
-	fs.IntVar(&f.leaf, "leaf", 64, "files per leaf directory")
+	fs.IntVar(&f.k, "files-per-commit", 0, "files that each commit changes; 0 draws 1 or more by a log-normal law, with a mean of 3.3 and 47 percent of commits at 1")
+	fs.IntVar(&f.median, "blob-median", 1024, "-content bytes: median blob bytes (log-normal)")
+	fs.StringVar(&f.content, "content", "lines", "lines for source-like files of whole lines, changed by a few lines in each commit, or bytes for blobs that each change replaces by a new one")
+	fs.Float64Var(&f.linesMedian, "lines-median", 135, "-content lines: median lines of a file (log-normal)")
+	fs.Float64Var(&f.linesSigma, "lines-sigma", 1.47, "-content lines: sigma of the log of the lines of a file")
+	fs.Float64Var(&f.changeMedian, "change-lines-median", 8, "-content lines: median lines that a commit adds and deletes in one file (log-normal)")
+	fs.Float64Var(&f.changeSigma, "change-lines-sigma", 1.85, "-content lines: sigma of the log of the lines that a commit changes in one file")
+	fs.StringVar(&f.shape, "shape", "tree", "tree for a random tree of directories of uneven size, or grid for -fanout, -depth and -leaf")
+	fs.IntVar(&f.files, "files", 20000, "-shape tree: files in the first snapshot")
+	fs.Float64Var(&f.dirFiles, "dir-files-mean", 9.3, "-shape tree: mean files of a directory (log-normal)")
+	fs.Float64Var(&f.dirSigma, "dir-files-sigma", 1.5, "-shape tree: sigma of the log of the files of a directory")
+	fs.IntVar(&f.maxDepth, "max-depth", 8, "-shape tree: deepest directory level")
+	fs.IntVar(&f.fanout, "fanout", 16, "-shape grid: directories per directory")
+	fs.IntVar(&f.depth, "depth", 3, "-shape grid: directory levels above the leaf directories")
+	fs.IntVar(&f.leaf, "leaf", 64, "-shape grid: files per leaf directory")
 	fs.Uint64Var(&f.seed, "seed", 1, "random seed")
 	fs.IntVar(&f.sampleN, "sample", 200, "keep 1 in N blobs and trees as samples")
-	fs.Float64Var(&f.skew, "skew", 0, "Zipf exponent of the popularity of the files that history changes; 0 is uniform")
+	fs.Float64Var(&f.skew, "skew", 0.7, "Zipf exponent of the popularity of the directories, and of the files of a directory, that history changes; 0 is uniform")
 	fs.IntVar(&f.builders, "builders", 4, "pack builders")
 	fs.IntVar(&f.up, "uploaders", 2, "pack uploaders")
 	fs.IntVar(&f.packObjects, "pack-objects", maxPackObjects, "objects of one pack or one put")
 	fs.StringVar(&f.via, "via", "import", "import to send packs by PUT /v1/vcs/packs, or push to send each pack, cut at a commit, by git receive-pack to its own ref, which needs a first snapshot of under 100000 objects")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if f.shape != "tree" && f.shape != "grid" || f.content != "lines" && f.content != "bytes" {
+		return errors.New("-shape is tree or grid, and -content is lines or bytes")
+	}
+	if f.shape == "grid" && (f.depth < 0 || f.fanout < 1 || f.leaf < 1) || f.shape == "tree" && (f.files < 1 || f.maxDepth < 1) {
+		return errors.New("the shape needs positive sizes")
 	}
 	return generate(ctx, f)
 }
@@ -225,7 +296,22 @@ func generate(ctx context.Context, f genFlags) error {
 	}
 	defer sf.Close()
 	rng := rand.New(rand.NewPCG(f.seed, 7))
-	e := &emitter{rng: rng, corpus: newCorpus(rng), median: f.median, sampleN: f.sampleN, maxBatch: f.packObjects, atCommit: f.via == "push", samples: bufio.NewWriterSize(sf, 1<<20)}
+	var sh *shape
+	if f.shape == "grid" {
+		sh = gridShape(f.fanout, f.depth, f.leaf)
+	} else {
+		sh = treeShape(rng, treeSpec{files: f.files, maxDepth: f.maxDepth, filesMean: f.dirFiles, filesSigma: f.dirSigma})
+	}
+	if err := sh.save(f.out + "/shape.txt"); err != nil {
+		return err
+	}
+	e := &emitter{rng: rng, median: f.median, sampleN: f.sampleN, maxBatch: f.packObjects, atCommit: f.via == "push", samples: bufio.NewWriterSize(sf, 1<<20),
+		seed: f.seed, linesMedian: f.linesMedian, linesSigma: f.linesSigma, changeMedian: f.changeMedian, changeSigma: f.changeSigma, cur: map[int][]byte{}}
+	if f.content == "lines" {
+		e.text = newTextGen(rng)
+	} else {
+		e.corpus = newCorpus(rng)
+	}
 
 	built := make(chan builtPack, f.builders)
 	raw := make(chan []gitpack.Object, f.builders)
@@ -308,30 +394,28 @@ func generate(ctx context.Context, f genFlags) error {
 		}
 	}()
 
-	l := layout{f.fanout, f.depth, f.leaf}
 	blobID := 0
-	hot := newHotSet(l, f.skew)
-	root := e.build(l, 0, 0, &blobID)
+	hot := newHotSet(sh, f.skew)
+	root, leaf, chain := trieOf(sh)
+	e.emit(root, &blobID)
 	commits := 0
 	tip := e.commit(root, "", &commits)
 	for int(e.total.Load()) < f.objects && ctx.Err() == nil {
 		touched := map[*node]int{}
-		for range f.k {
-			i := rng.IntN(l.files())
+		picked := map[int]bool{}
+		want := e.commitSize(f.k, sh.files())
+		for tries := 0; len(picked) < want && tries < 50*want; tries++ {
+			i := rng.IntN(sh.files())
 			if f.skew > 0 {
 				i = hot.file(rng)
 			}
-			p := l.path(root, i)
-			leafBlob := e.blob(blobID)
-			blobID++
-			leafBlob.name = p[len(p)-1].name
-			parent := p[len(p)-2]
-			for j, kid := range parent.kids {
-				if kid == p[len(p)-1] {
-					parent.kids[j] = leafBlob
-				}
+			if picked[i] {
+				continue
 			}
-			for lvl, n := range p[:len(p)-1] {
+			picked[i] = true
+			leaf[i].sha = e.changeBlob(i, blobID)
+			blobID++
+			for lvl, n := range chain[sh.dirOf(i)] {
 				touched[n] = lvl
 			}
 		}
@@ -363,8 +447,8 @@ func generate(ctx context.Context, f genFlags) error {
 		return err
 	}
 	m := Manifest{
-		Repo: repo, Path: path, Tip: tip, Objects: int(e.total.Load()), Commits: commits, Files: l.files(), Fanout: l.fanout, Depth: l.depth,
-		Leaf: l.leaf, Packs: int(packs.Load()), PackBytes: packBytes.Load(), GenSeconds: genSec, ImportSec: float64(importNanos.Load()) / 1e9, BlobMedian: f.median,
+		Repo: repo, Path: path, Tip: tip, Objects: int(e.total.Load()), Commits: commits, Files: sh.files(), Dirs: len(sh.paths), Shape: f.shape, Content: f.content, Fanout: f.fanout, Depth: f.depth,
+		Leaf: f.leaf, Packs: int(packs.Load()), PackBytes: packBytes.Load(), GenSeconds: genSec, ImportSec: float64(importNanos.Load()) / 1e9, BlobMedian: f.median, LinesMedian: f.linesMedian,
 	}
 	raw2, _ := json.MarshalIndent(m, "", "  ")
 	fmt.Println(string(raw2))

@@ -250,19 +250,7 @@ func entry(tree []byte, name string) (sha string, shaOff int, err error) {
 	return fmt.Sprintf("%x", tree[off:off+20]), off, nil
 }
 
-func fileNames(l layout, file int) []string {
-	dirIdx := file / l.leaf
-	names := make([]string, l.depth+1)
-	for k := l.depth - 1; k >= 0; k-- {
-		names[k] = dirName(dirIdx % l.fanout)
-		dirIdx /= l.fanout
-	}
-	names[l.depth] = fileName(file)
-	return names
-}
-
-func (ed *editor) setFile(ctx context.Context, l layout, root string, file int, blob string) (string, error) {
-	names := fileNames(l, file)
+func (ed *editor) setFile(ctx context.Context, names []string, root string, blob string) (string, error) {
 	trees := make([][]byte, 0, len(names))
 	cur := root
 	for _, n := range names[:len(names)-1] {
@@ -296,8 +284,6 @@ func (ed *editor) setFile(ctx context.Context, l layout, root string, file int, 
 	return newSHA, nil
 }
 
-func (e *env) layout() layout { return layout{e.m.Fanout, e.m.Depth, e.m.Leaf} }
-
 func (e *env) newCommit(ctx context.Context, c *client.Client, base string, files []int, tag string) (*editor, string, error) {
 	ed := &editor{c: c, local: map[string][]byte{}}
 	bc, err := c.Object(ctx, base)
@@ -308,7 +294,7 @@ func (e *env) newCommit(ctx context.Context, c *client.Client, base string, file
 	root := strings.TrimPrefix(line, "tree ")
 	for _, f := range files {
 		blob := ed.add(gitpack.Blob, []byte(fmt.Sprintf("loadtest %s file %d\n%s\n", tag, f, strings.Repeat("x", 400))))
-		if root, err = ed.setFile(ctx, e.layout(), root, f, blob); err != nil {
+		if root, err = ed.setFile(ctx, e.shape.names(f), root, blob); err != nil {
 			return nil, "", err
 		}
 	}

@@ -40,6 +40,7 @@ type runFlags struct {
 type env struct {
 	f       runFlags
 	m       Manifest
+	shape   *shape
 	blobs   []Sample
 	trees   []Sample
 	commits []Sample
@@ -115,7 +116,7 @@ func runLoad(ctx context.Context, args []string) error {
 	} else if f.scenario != "agents" {
 		return fmt.Errorf("unknown scenario %q", f.scenario)
 	}
-	hot := newHotSet(e.layout(), f.skew)
+	hot := newHotSet(e.shape, f.skew)
 	before := scrape(f.url)
 	ws := startWatch(f.watch)
 	start := time.Now()
@@ -205,7 +206,11 @@ func setup(ctx context.Context, f runFlags) (*env, error) {
 	if err != nil {
 		return nil, err
 	}
-	e := &env{f: f, m: m, sg: signer{s: sk, repo: m.Repo}}
+	sh, err := loadShape(f.dir, m)
+	if err != nil {
+		return nil, err
+	}
+	e := &env{f: f, m: m, shape: sh, sg: signer{s: sk, repo: m.Repo}}
 	for _, s := range smp {
 		switch s.Kind {
 		case 'b':

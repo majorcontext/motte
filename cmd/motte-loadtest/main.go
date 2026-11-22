@@ -85,20 +85,24 @@ func (g signer) client(url string, scope grant.Scope) *client.Client {
 
 // Manifest describes a generated repository for the run phase.
 type Manifest struct {
-	Repo       string  `json:"repo"`
-	Path       string  `json:"path"`
-	Tip        string  `json:"tip"`
-	Objects    int     `json:"objects"`
-	Commits    int     `json:"commits"`
-	Files      int     `json:"files"`
-	Fanout     int     `json:"fanout"`
-	Depth      int     `json:"depth"`
-	Leaf       int     `json:"leaf"`
-	Packs      int     `json:"packs"`
-	PackBytes  int64   `json:"pack_bytes"`
-	GenSeconds float64 `json:"gen_seconds"`
-	ImportSec  float64 `json:"import_seconds"`
-	BlobMedian int     `json:"blob_median"`
+	Repo        string  `json:"repo"`
+	Path        string  `json:"path"`
+	Tip         string  `json:"tip"`
+	Objects     int     `json:"objects"`
+	Commits     int     `json:"commits"`
+	Files       int     `json:"files"`
+	Fanout      int     `json:"fanout"`
+	Depth       int     `json:"depth"`
+	Leaf        int     `json:"leaf"`
+	Packs       int     `json:"packs"`
+	PackBytes   int64   `json:"pack_bytes"`
+	GenSeconds  float64 `json:"gen_seconds"`
+	ImportSec   float64 `json:"import_seconds"`
+	BlobMedian  int     `json:"blob_median"`
+	Shape       string  `json:"shape,omitempty"`
+	Content     string  `json:"content,omitempty"`
+	Dirs        int     `json:"dirs,omitempty"`
+	LinesMedian float64 `json:"lines_median,omitempty"`
 }
 
 func readManifest(dir string) (Manifest, error) {

@@ -263,9 +263,8 @@ func lookup(ents []api.TreeEntry, name string) (string, bool) {
 }
 
 func (a *agent) readFiles(ctx context.Context, root string, dir int, files []int) error {
-	l := a.e.layout()
 	cur := root
-	for _, n := range fileNames(l, dir*l.leaf)[:l.depth] {
+	for _, n := range a.e.shape.paths[dir] {
 		ents, err := a.entries(ctx, cur)
 		if err != nil {
 			return err
@@ -329,7 +328,7 @@ func (a *agent) commitAll(ctx context.Context, base string, edits [][]fileEdit, 
 					work[fe.file] = data
 				}
 				var err error
-				if tree, err = a.ed.setFile(c, a.e.layout(), tree, fe.file, a.ed.add(gitpack.Blob, data)); err != nil {
+				if tree, err = a.ed.setFile(c, a.e.shape.names(fe.file), tree, a.ed.add(gitpack.Blob, data)); err != nil {
 					return err
 				}
 			}
@@ -422,7 +421,6 @@ func (a *agent) rebase(ctx context.Context, edits [][]fileEdit, br *branch, path
 	if err != nil {
 		return
 	}
-	l := a.e.layout()
 	if !a.e.f.editWhole {
 		paths = nil
 	}
@@ -431,7 +429,7 @@ func (a *agent) rebase(ctx context.Context, edits [][]fileEdit, br *branch, path
 		if _, serr := fmt.Sscanf(p[strings.LastIndexByte(p, '/')+1:], "f%07d.go", &f); serr != nil {
 			continue
 		}
-		if err = a.readFiles(ctx, root, f/l.leaf, []int{f}); err != nil {
+		if err = a.readFiles(ctx, root, a.e.shape.dirOf(f), []int{f}); err != nil {
 			return
 		}
 	}

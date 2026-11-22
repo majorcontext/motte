@@ -56,7 +56,7 @@ func (fe fileEdit) apply(data []byte, tag string) []byte {
 
 func (a *agent) blobSHA(ctx context.Context, root string, file int) (string, error) {
 	cur := root
-	for _, n := range fileNames(a.e.layout(), file) {
+	for _, n := range a.e.shape.names(file) {
 		ents, err := a.entries(ctx, cur)
 		if err != nil {
 			return "", err
