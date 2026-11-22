@@ -194,7 +194,7 @@ func runGen(ctx context.Context, args []string) error {
 	fs.IntVar(&f.builders, "builders", 4, "pack builders")
 	fs.IntVar(&f.up, "uploaders", 2, "pack uploaders")
 	fs.IntVar(&f.packObjects, "pack-objects", maxPackObjects, "objects of one pack or one put")
-	fs.StringVar(&f.via, "via", "import", "import to send packs by PUT /v1/vcs/packs, or push to send each pack, cut at a commit, by git receive-pack to its own ref")
+	fs.StringVar(&f.via, "via", "import", "import to send packs by PUT /v1/vcs/packs, or push to send each pack, cut at a commit, by git receive-pack to its own ref, which needs a first snapshot of under 100000 objects")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

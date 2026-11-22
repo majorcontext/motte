@@ -30,6 +30,8 @@ const (
 	// inlineMaxObjects bounds the layer merge that a write does before it returns.
 	inlineMaxObjects = 1 << 17
 	maxFanIn         = 64
+	// splitEntryBytes bounds the maps and lists that a split keeps for each object.
+	splitEntryBytes = 400
 	// maintainBudget bounds the time that one pass spends on the compactions and merges of a repository.
 	maintainBudget = 20 * time.Second
 	claimPoll      = 100 * time.Millisecond
@@ -396,8 +398,10 @@ func (s *Service) compactRun(ctx context.Context, repo Repo, layers []midx.Entry
 	}
 	need := total + biggest + 3*int64(midx.RecordSize)*int64(r.objects()) + 4<<20
 	class := layers[0].Class
-	if class != midx.ClassBlob {
-		need += 2 * total
+	splitNeed := need + 2*total + splitEntryBytes*int64(r.objects())
+	split := class != midx.ClassBlob && splitNeed <= MemoryBudget/2
+	if split {
+		need = splitNeed
 	}
 	release, err := s.Reserve(ctx, need)
 	if err != nil {
@@ -405,18 +409,13 @@ func (s *Service) compactRun(ctx context.Context, repo Repo, layers []midx.Entry
 	}
 	defer release()
 	var outs []packOut
-	if class == midx.ClassBlob {
-		var o packOut
-		if o, err = s.copyPacks(ctx, prefix, r, midx.ClassBlob); err == nil {
-			outs = []packOut{o}
-		}
-	} else {
+	if split {
 		outs, err = s.splitPacks(ctx, prefix, r)
-		if errors.Is(err, errInflated) {
-			var o packOut
-			if o, err = s.copyPacks(ctx, prefix, r, class); err == nil {
-				outs = []packOut{o}
-			}
+	}
+	if !split || errors.Is(err, errInflated) {
+		var o packOut
+		if o, err = s.copyPacks(ctx, prefix, r, class); err == nil {
+			outs = []packOut{o}
 		}
 	}
 	if err != nil {
