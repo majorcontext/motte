@@ -389,6 +389,23 @@ func (p *Pack) Size(s SHA) (int64, Type, error) {
 	return p.sizeAt(off, 0)
 }
 
+// Footprint is the bytes that Get of s holds at most for its result: the size of an object that the pack stores whole,
+// and MaxObjectBytes for a delta, because its base is inflated first and can be of any size.
+func (p *Pack) Footprint(s SHA) (int64, error) {
+	off, ok := p.find(s)
+	if !ok {
+		return 0, ErrNotFound
+	}
+	h, err := p.readHeader(off)
+	if err != nil {
+		return 0, err
+	}
+	if h.delta != 0 {
+		return MaxObjectBytes, nil
+	}
+	return h.size, nil
+}
+
 func (p *Pack) sizeAt(off int64, depth int) (int64, Type, error) {
 	if depth > maxDeltaDepth {
 		return 0, 0, ErrCorrupt

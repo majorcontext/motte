@@ -15,8 +15,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/majorcontext/motte/api"
+	"github.com/majorcontext/motte/client"
 	"github.com/majorcontext/motte/internal/gitpack"
 	"github.com/majorcontext/motte/internal/server"
 	"github.com/majorcontext/motte/internal/store"
@@ -95,7 +97,7 @@ func TestGitCloneFetchAndPush(t *testing.T) {
 	}
 }
 
-func TestGitSmallPushAndFetchNeedLittleMemory(t *testing.T) {
+func TestSmallRequestsNeedLittleMemory(t *testing.T) {
 	t.Parallel()
 	ts := testserver.StartLocal(t)
 	srv := server.New(server.Config{Meta: ts.Meta, Bucket: ts.Bucket, Verifier: ts.Verifier})
@@ -113,6 +115,20 @@ func TestGitSmallPushAndFetchNeedLittleMemory(t *testing.T) {
 	patient := []string{"-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=3"}
 	g.git(w, true, append(patient, "push", "-q", "origin", "HEAD:main")...)
 	g.git(r, true, append(patient, "fetch", "-q", "origin")...)
+	server.HoldBudget(t, srv, 90<<20)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	c := client.New(web.URL, client.StaticGrant(g.readGrant(g.text)))
+	ref, err := c.Ref(ctx, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Commit(ctx, ref.Commit); err != nil {
+		t.Errorf("commit read: %v", err)
+	}
+	if _, err := c.Object(ctx, ref.Commit); err != nil {
+		t.Errorf("object read: %v", err)
+	}
 }
 
 func TestGitAnnotatedTags(t *testing.T) {

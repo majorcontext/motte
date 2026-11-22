@@ -545,7 +545,7 @@ func (v *view) getSized(ctx context.Context, sha gitpack.SHA, before func(size i
 		return 0, nil, err
 	}
 	if before != nil {
-		n, _, err := p.Size(sha)
+		n, err := p.Footprint(sha)
 		if errors.Is(err, gitpack.ErrNotFound) {
 			return 0, nil, v.missing()
 		}
@@ -634,7 +634,9 @@ func (r *Reader) Has(ctx context.Context, shas []gitpack.SHA) ([]bool, error) {
 	return out, nil
 }
 
-func (s *Service) Blobs(ctx context.Context, repo Repo, shas []gitpack.SHA) ([][]byte, error) {
+// Blobs returns the blobs of shas. Before it reads a blob, it calls grow, when it is set, with the bytes of the blobs
+// read so far and the size that this one holds while it is read, taken from the pack.
+func (s *Service) Blobs(ctx context.Context, repo Repo, shas []gitpack.SHA, grow func(size int64) error) ([][]byte, error) {
 	v, err := s.view(ctx, repo)
 	if err != nil {
 		return nil, err
@@ -642,7 +644,12 @@ func (s *Service) Blobs(ctx context.Context, repo Repo, shas []gitpack.SHA) ([][
 	out := make([][]byte, len(shas))
 	total := 0
 	for i, sha := range shas {
-		t, d, err := v.get(ctx, sha)
+		t, d, err := v.getSized(ctx, sha, func(n int64) error {
+			if grow == nil {
+				return nil
+			}
+			return grow(int64(total) + n)
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -666,9 +673,14 @@ func (s *Service) Has(ctx context.Context, repo Repo, shas []gitpack.SHA) ([]boo
 	return r.Has(ctx, shas)
 }
 
-// Commit returns the tree of a commit and its committer time.
-func (s *Service) Commit(ctx context.Context, repo Repo, sha gitpack.SHA) (gitpack.SHA, time.Time, error) {
-	t, d, err := s.Get(ctx, repo, sha)
+// Commit returns the tree of a commit and its committer time. It calls grow, when it is set, with the size of the
+// commit before it reads it.
+func (s *Service) Commit(ctx context.Context, repo Repo, sha gitpack.SHA, grow func(size int64) error) (gitpack.SHA, time.Time, error) {
+	v, err := s.view(ctx, repo)
+	if err != nil {
+		return gitpack.SHA{}, time.Time{}, err
+	}
+	t, d, err := v.getSized(ctx, sha, grow)
 	if err != nil {
 		return gitpack.SHA{}, time.Time{}, err
 	}

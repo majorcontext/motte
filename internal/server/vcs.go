@@ -102,16 +102,17 @@ func refName(r *http.Request) (string, error) {
 }
 
 func (s *Server) getCommit(w http.ResponseWriter, r *http.Request, c call) error {
-	release, err := s.reserve(r, reserveCommit)
+	release, err := s.reserve(r, reserveRead)
 	if err != nil {
 		return err
 	}
-	defer release()
+	hold := s.holding(r, reserveRead, release)
+	defer hold.drop()
 	sha, err := parseSHA(r.PathValue("sha"))
 	if err != nil {
 		return err
 	}
-	tree, when, err := s.objects.Commit(r.Context(), c.repo, sha)
+	tree, when, err := s.objects.Commit(r.Context(), c.repo, sha, func(size int64) error { return hold.grow(readCost(size, 3)) })
 	if err != nil {
 		return err
 	}
@@ -158,16 +159,17 @@ func (s *Server) getBlobs(w http.ResponseWriter, r *http.Request, c call) error 
 	if err := decodeBody(w, r, smallBodyMax, &req); err != nil {
 		return err
 	}
-	release, err := s.reserve(r, reserveObject)
+	release, err := s.reserve(r, reserveRead)
 	if err != nil {
 		return err
 	}
-	defer release()
+	hold := s.holding(r, reserveRead, release)
+	defer hold.drop()
 	shas, err := parseSHAs(req.SHAs)
 	if err != nil {
 		return err
 	}
-	blobs, err := s.objects.Blobs(r.Context(), c.repo, shas)
+	blobs, err := s.objects.Blobs(r.Context(), c.repo, shas, func(size int64) error { return hold.grow(readCost(size, 5)) })
 	if err != nil {
 		return err
 	}
@@ -309,16 +311,21 @@ func (s *Server) putObjects(w http.ResponseWriter, r *http.Request, c call) erro
 }
 
 func (s *Server) getObject(w http.ResponseWriter, r *http.Request, c call) error {
-	release, err := s.reserve(r, reserveObject)
+	release, err := s.reserve(r, reserveRead)
 	if err != nil {
 		return err
 	}
-	defer release()
+	hold := s.holding(r, reserveRead, release)
+	defer hold.drop()
 	sha, err := parseSHA(r.PathValue("sha"))
 	if err != nil {
 		return err
 	}
-	t, data, err := s.objects.Get(r.Context(), c.repo, sha)
+	rd, err := s.objects.Reader(r.Context(), c.repo)
+	if err != nil {
+		return err
+	}
+	t, data, err := rd.GetSized(r.Context(), sha, func(size int64) error { return hold.grow(readCost(size, 5)) })
 	if err != nil {
 		return err
 	}

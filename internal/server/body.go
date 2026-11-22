@@ -34,7 +34,7 @@ const uploadReaders = 4
 
 // The reservation of a request is the peak of its live buffers, derived from the code path. B is the body length.
 //
-//	read of one commit      3 objects: the delta, its base and its result
+//	read of one commit      3 times its size, at least 4 MiB: the delta, its base and its result
 //	read of trees           the tree bytes read so far, 8 bytes of views and JSON for each, and 16 MiB of slack; grown as trees are met
 //	read of one op          8 MiB data, its base64 text and the encoder buffer
 //	read of one object or blob batch
@@ -44,10 +44,9 @@ const uploadReaders = 4
 //	put op                  the body, the Data string and the decoded op: 3B
 //	import pack             the body, the strings of both fields, the decoded pack and index (3B/4), and the verification work
 const (
-	reserveHas    = 1 << 20
-	reserveCommit = 3 * gitpack.MaxObjectBytes
-	reserveOp     = 5 * store.MaxOpBytes
-	reserveObject = 5 * gitpack.MaxObjectBytes
+	reserveHas  = 1 << 20
+	reserveOp   = 5 * store.MaxOpBytes
+	reserveRead = 4 << 20
 	// decodeSlack is the decoder buffer (twice the window and one read), the text of one object and the pack index.
 	decodeSlack = 80 << 20
 )
@@ -66,6 +65,11 @@ var (
 
 // treeCost is the reservation of a tree read that holds treeBytes of tree data.
 func treeCost(treeBytes int64) int64 { return 8*treeBytes + treeSlack }
+
+// readCost is the reservation of a read of size bytes of objects, grown as the sizes are met. A commit read holds the
+// delta, its base and its result: 3 times. An object or blob read holds the data, its base64 text and an encoder
+// buffer that doubled once: 5 times.
+func readCost(size, times int64) int64 { return max(reserveRead, times*size) }
 
 func objectsCost(n int64) int64 { return n + 5*n/2 + decodeSlack }
 

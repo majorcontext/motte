@@ -121,9 +121,9 @@ motte-loadtest run -key motte.key -out lt -scenario agents -c 64 -d 3m
 | `POST /v1/vcs/objects` | B, the decoded objects (3B/4), the pack body and the pack (each 3B/4 plus 2 percent), and 80 MiB for the decoder: B + 2.5B + 80 MiB | 416 MiB |
 | `PUT /v1/vcs/packs/{pack_id}` | the body, the two base64 strings, the decoded pack and index, and pack verification: 3B + 96 MiB | 384 MiB |
 | `PUT /v1/vcs/ops/{kind}/{id}` | the body, the Data string and the decoded op: 3B | 32 MiB |
-| `GET /v1/vcs/objects/{sha}`, `POST /v1/vcs/blobs/batch` | 16 MiB of data, its base64 text and an encoder buffer that doubled once: 80 MiB | 80 MiB |
+| `GET /v1/vcs/objects/{sha}`, `POST /v1/vcs/blobs/batch` | 4 MiB at first. Before it reads an object, the request reads the size from the pack (16 MiB for an object that the pack stores as a delta, because its base is inflated first) and, when 5 times the object bytes read so far exceeds what it holds, releases its reservation and takes that larger one: the data, its base64 text and an encoder buffer that doubled once. It never holds one reservation while it waits for another. | 80 MiB, or 5 times the object bytes |
 | `GET /v1/vcs/trees/{sha}` | 48 MiB at first. Before it reads a tree, the request reads the size from the pack index and, when 8 times the tree bytes read so far plus 16 MiB exceeds what it holds, releases its reservation and takes the larger one. It never holds one reservation while it waits for another. A reservation above the budget waits for the whole budget and does not fail. | 48 MiB, or 8 times the tree bytes plus 16 MiB |
-| `GET /v1/vcs/commits/{sha}` | a delta, its base and its result, 3 objects: 48 MiB | 48 MiB |
+| `GET /v1/vcs/commits/{sha}` | 4 MiB at first, and 3 times the size of the commit, read from the pack before the commit, when that is more: a delta, its base and its result | 48 MiB |
 | `GET /v1/vcs/ops/{kind}/{id}` | 8 MiB of data, its base64 text and the encoder buffer: 40 MiB | 40 MiB |
 | `POST /v1/vcs/objects/has` | 1 MiB | 1 MiB |
 | `POST /v1/repos/{repo}/lands` | Nothing: the handler holds a body of at most 1 MiB. The leader that ends the land reserves for each batch (see Land). | 16 MiB plus 4 times the bytes that the batch holds |
