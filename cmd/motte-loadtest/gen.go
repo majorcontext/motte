@@ -65,6 +65,8 @@ type emitter struct {
 	sampleN    int
 	batch      []gitpack.Object
 	batchBytes int
+	maxBatch   int
+	atCommit   bool
 	flush      func([]gitpack.Object)
 	total      atomic.Int64
 	samples    *bufio.Writer
@@ -109,7 +111,7 @@ func (e *emitter) put(t gitpack.Type, data []byte, kind byte) gitpack.SHA {
 	if e.sampleN > 0 && (kind == 'c' && e.commitSeq%25 == 0 || kind != 'c' && e.rng.IntN(e.sampleN) == 0) {
 		fmt.Fprintf(e.samples, "%c %s %d\n", kind, sha, e.commitSeq)
 	}
-	if len(e.batch) >= maxPackObjects || e.batchBytes >= 40<<20 {
+	if !e.atCommit && len(e.batch) >= e.maxBatch || e.batchBytes >= 40<<20 {
 		e.flushBatch()
 	}
 	return sha
@@ -169,6 +171,8 @@ type genFlags struct {
 	seed                  uint64
 	sampleN, builders, up int
 	skew                  float64
+	packObjects           int
+	via                   string
 }
 
 func runGen(ctx context.Context, args []string) error {
@@ -189,6 +193,8 @@ func runGen(ctx context.Context, args []string) error {
 	fs.Float64Var(&f.skew, "skew", 0, "Zipf exponent of the popularity of the files that history changes; 0 is uniform")
 	fs.IntVar(&f.builders, "builders", 4, "pack builders")
 	fs.IntVar(&f.up, "uploaders", 2, "pack uploaders")
+	fs.IntVar(&f.packObjects, "pack-objects", maxPackObjects, "objects of one pack or one put")
+	fs.StringVar(&f.via, "via", "import", "import to send packs by PUT /v1/vcs/packs, or push to send each pack, cut at a commit, by git receive-pack to its own ref")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -211,6 +217,7 @@ func generate(ctx context.Context, f genFlags) error {
 	repo := "native:" + path
 	g := signer{s: sg, repo: repo}
 	imp, merge := g.client(f.url, grant.ScopeImport), g.client(f.url, grant.ScopeMerge)
+	hg := newHTTPGit(f.url, path, g.mint(grant.ScopeRead), g.mint(grant.ScopeWrite))
 
 	sf, err := os.Create(f.out + "/samples.txt")
 	if err != nil {
@@ -218,7 +225,7 @@ func generate(ctx context.Context, f genFlags) error {
 	}
 	defer sf.Close()
 	rng := rand.New(rand.NewPCG(f.seed, 7))
-	e := &emitter{rng: rng, corpus: newCorpus(rng), median: f.median, sampleN: f.sampleN, samples: bufio.NewWriterSize(sf, 1<<20)}
+	e := &emitter{rng: rng, corpus: newCorpus(rng), median: f.median, sampleN: f.sampleN, maxBatch: f.packObjects, atCommit: f.via == "push", samples: bufio.NewWriterSize(sf, 1<<20)}
 
 	built := make(chan builtPack, f.builders)
 	raw := make(chan []gitpack.Object, f.builders)
@@ -238,10 +245,14 @@ func generate(ctx context.Context, f genFlags) error {
 		eg.Go(func() error {
 			defer bw.Done()
 			for objs := range raw {
-				pack, idx, _ := gitpack.Build(objs)
-				sum := sha256.Sum256(pack)
+				bp := builtPack{objs: objs}
+				if f.via != "push" {
+					pack, idx, _ := gitpack.Build(objs)
+					sum := sha256.Sum256(pack)
+					bp = builtPack{id: hex.EncodeToString(sum[:]), pack: pack, idx: idx}
+				}
 				select {
-				case built <- builtPack{hex.EncodeToString(sum[:]), pack, idx}:
+				case built <- bp:
 				case <-gctx.Done():
 					return gctx.Err()
 				}
@@ -259,7 +270,12 @@ func generate(ctx context.Context, f genFlags) error {
 				t0 := time.Now()
 				var err error
 				for try := 0; try < 4; try++ {
-					if err = imp.ImportPack(gctx, p.id, p.idx, p.pack); err == nil {
+					if p.objs != nil {
+						err = pushObjects(gctx, hg, p.objs, int(packs.Load()))
+					} else {
+						err = imp.ImportPack(gctx, p.id, p.idx, p.pack)
+					}
+					if err == nil {
 						break
 					}
 				}
@@ -269,6 +285,9 @@ func generate(ctx context.Context, f genFlags) error {
 				importNanos.Add(int64(time.Since(t0)))
 				packs.Add(1)
 				packBytes.Add(int64(len(p.pack)))
+				for _, o := range p.objs {
+					packBytes.Add(int64(len(o.Data)))
+				}
 			}
 			return nil
 		})
@@ -355,6 +374,14 @@ func generate(ctx context.Context, f genFlags) error {
 type builtPack struct {
 	id        string
 	pack, idx []byte
+	objs      []gitpack.Object
+}
+
+func pushObjects(ctx context.Context, h *httpGit, objs []gitpack.Object, n int) error {
+	pack, _, _ := gitpack.Build(objs)
+	last := objs[len(objs)-1]
+	tip := gitpack.Hash(last.Type, last.Data).String()
+	return h.push(ctx, fmt.Sprintf("refs/heads/gen/%d-%s", n, tip[:8]), zeroSHA, tip, pack)
 }
 
 func (e *emitter) commit(root *node, parent string, seq *int) string {
@@ -367,5 +394,9 @@ func (e *emitter) commit(root *node, parent string, seq *int) string {
 		fmt.Fprintf(&sb, "parent %s\n", parent)
 	}
 	fmt.Fprintf(&sb, "author %s\ncommitter %s\n\ncommit %d\n", who, who, *seq)
-	return e.put(gitpack.Commit, []byte(sb.String()), 'c').String()
+	sha := e.put(gitpack.Commit, []byte(sb.String()), 'c').String()
+	if e.atCommit && (len(e.batch) >= e.maxBatch || e.batchBytes >= 40<<20) {
+		e.flushBatch()
+	}
+	return sha
 }
