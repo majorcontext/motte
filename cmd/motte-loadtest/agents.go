@@ -93,11 +93,12 @@ type agent struct {
 	nonce   int64
 	trees   map[string][]api.TreeEntry
 	roots   map[string]string
+	content map[string][]byte
 }
 
 func (e *env) agentLoop(run, ctx context.Context, w *worker, hot hotSet, rec func(string, time.Duration, error, bool)) {
 	a := &agent{id: w.id, e: e, rng: w.rng, hot: hot, run: run, rec: rec, nonce: time.Now().UnixNano() % 1e9,
-		ed: &editor{c: e.read, local: map[string][]byte{}, keep: true}, trees: map[string][]api.TreeEntry{}, roots: map[string]string{}}
+		ed: &editor{c: e.read, local: map[string][]byte{}, keep: true}, trees: map[string][]api.TreeEntry{}, roots: map[string]string{}, content: map[string][]byte{}}
 	a.seen = e.behind(w.rng)
 	for run.Err() == nil {
 		a.task(ctx)
@@ -164,9 +165,9 @@ func (a *agent) runTask(ctx context.Context) error {
 		}
 		a.think()
 	}
-	edits := make([][]int, max(1, f.commits-1+a.rng.IntN(3)))
+	edits := make([][]fileEdit, max(1, f.commits-1+a.rng.IntN(3)))
 	for i := range edits {
-		edits[i] = a.pickFiles(cluster)
+		edits[i] = a.planEdits(a.pickFiles(cluster))
 	}
 	br := &branch{ref: fmt.Sprintf("refs/heads/lt/agent/%d/%d-%d", a.id, a.nonce, a.seq), old: zeroSHA}
 	head, err := a.commitAll(ctx, base, edits, br)
@@ -189,6 +190,7 @@ func (a *agent) start(ctx context.Context) (tip, root string, err error) {
 		clear(a.trees)
 		clear(a.roots)
 		clear(a.ed.local)
+		clear(a.content)
 		err = a.pull(ctx, "clone", tip, "", true)
 	case a.seen != tip:
 		err = a.pull(ctx, "fetch", tip, a.seen, false)
@@ -304,20 +306,30 @@ func (a *agent) pickFiles(cluster []int) []int {
 	return out
 }
 
-func (a *agent) commitAll(ctx context.Context, base string, edits [][]int, br *branch) (string, error) {
+func (a *agent) commitAll(ctx context.Context, base string, edits [][]fileEdit, br *branch) (string, error) {
 	a.ed.objs, br.sent = nil, 0
 	parent := base
 	tree, err := a.rootOf(ctx, base)
 	if err != nil {
 		return "", err
 	}
+	root, work := tree, map[int][]byte{}
 	for i, files := range edits {
 		tag := fmt.Sprintf("agent %d task %d commit %d", a.id, a.seq, i)
+		if !a.e.f.editWhole {
+			if err := a.load(ctx, root, work, files); err != nil {
+				return "", err
+			}
+		}
 		err := a.do(ctx, "edit", func(c context.Context) error {
-			for _, f := range files {
-				blob := a.ed.add(gitpack.Blob, []byte(fmt.Sprintf("%s file %d\n%s\n", tag, f, strings.Repeat("y", 200+a.rng.IntN(1800)))))
+			for _, fe := range files {
+				data := []byte(fmt.Sprintf("%s file %d\n%s\n", tag, fe.file, strings.Repeat("y", 200+a.rng.IntN(1800))))
+				if !a.e.f.editWhole {
+					data = fe.apply(work[fe.file], tag)
+					work[fe.file] = data
+				}
 				var err error
-				if tree, err = a.ed.setFile(c, a.e.layout(), tree, f, blob); err != nil {
+				if tree, err = a.ed.setFile(c, a.e.layout(), tree, fe.file, a.ed.add(gitpack.Blob, data)); err != nil {
 					return err
 				}
 			}
@@ -357,7 +369,7 @@ func (a *agent) push(ctx context.Context, br *branch, head string) error {
 	return nil
 }
 
-func (a *agent) land(ctx context.Context, base string, edits [][]int, br *branch, head string) error {
+func (a *agent) land(ctx context.Context, base string, edits [][]fileEdit, br *branch, head string) error {
 	for attempt := 0; ; attempt++ {
 		id := fmt.Sprintf("agent-%d-%d-%d-%d", a.id, a.nonce, a.seq, attempt)
 		a.e.agents.attempts.Add(1)
@@ -386,13 +398,15 @@ func (a *agent) land(ctx context.Context, base string, edits [][]int, br *branch
 			return errAbandoned
 		}
 		a.e.agents.retries.Add(1)
+		t0 := time.Now()
 		if base, head, err = a.rebase(ctx, edits, br, client.ConflictPaths(err)); err != nil {
 			return err
 		}
+		a.rec("retry", time.Since(t0), nil, false)
 	}
 }
 
-func (a *agent) rebase(ctx context.Context, edits [][]int, br *branch, paths []string) (base, head string, err error) {
+func (a *agent) rebase(ctx context.Context, edits [][]fileEdit, br *branch, paths []string) (base, head string, err error) {
 	var r api.Ref
 	if err = a.do(ctx, "ref", func(c context.Context) (err error) { r, err = a.e.read.Ref(c, a.e.f.mainRef); return }); err != nil {
 		return
@@ -409,6 +423,9 @@ func (a *agent) rebase(ctx context.Context, edits [][]int, br *branch, paths []s
 		return
 	}
 	l := a.e.layout()
+	if !a.e.f.editWhole {
+		paths = nil
+	}
 	for _, p := range paths[:min(len(paths), 3)] {
 		var f int
 		if _, serr := fmt.Sscanf(p[strings.LastIndexByte(p, '/')+1:], "f%07d.go", &f); serr != nil {

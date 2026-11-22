@@ -32,7 +32,8 @@ type runFlags struct {
 	skew, coldRate                 float64
 	cluster, commits, editFiles    int
 	pushEvery, exploreReads        int
-	landRetries                    int
+	landRetries, editLines         int
+	editWhole                      bool
 	think                          time.Duration
 }
 
@@ -95,6 +96,8 @@ func runLoad(ctx context.Context, args []string) error {
 	fs.IntVar(&f.pushEvery, "push-every", 2, "agents: commits between two pushes of the task branch")
 	fs.IntVar(&f.exploreReads, "explore-reads", 8, "agents: directory reads before the first edit")
 	fs.IntVar(&f.landRetries, "land-retries", 5, "agents: retries of a land after a conflict")
+	fs.IntVar(&f.editLines, "edit-lines", 20, "agents: most lines that one edit of a file replaces or inserts, at most a quarter of the file")
+	fs.BoolVar(&f.editWhole, "edit-whole", false, "agents: rewrite each edited file as a whole instead of changing a region of it")
 	fs.Float64Var(&f.coldRate, "cold-rate", 0.05, "agents: chance that a task starts from a cold partial clone")
 	fs.DurationVar(&f.think, "think", 50*time.Millisecond, "agents: mean pause between steps")
 	if err := fs.Parse(args); err != nil {
