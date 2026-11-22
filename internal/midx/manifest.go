@@ -70,7 +70,7 @@ const Factor = 2
 // while the next older layer is at most Factor times the window, the window stays under limit, and it has at most
 // fanIn layers. The first window that is worth its cost is the plan. A run in the middle can need a merge when a
 // newer layer is large, so the window does not always end at the newest layer.
-func plan(layers []Entry, size func(Entry) int64, limit int64, fanIn int, worth func(lo, hi int) bool) (Plan, bool) {
+func plan(layers []Entry, size func(Entry) int64, limit int64, fanIn int, fits, worth func(lo, hi int) bool) (Plan, bool) {
 	for hi := len(layers); hi >= 1; hi-- {
 		lo := hi - 1
 		sum := size(layers[lo])
@@ -79,7 +79,7 @@ func plan(layers []Entry, size func(Entry) int64, limit int64, fanIn int, worth 
 		}
 		for lo > 0 && hi-lo < fanIn {
 			prev := size(layers[lo-1])
-			if prev > Factor*sum || sum+prev > limit {
+			if prev > Factor*sum || sum+prev > limit || !fits(lo-1, hi) {
 				break
 			}
 			lo--
@@ -93,16 +93,26 @@ func plan(layers []Entry, size func(Entry) int64, limit int64, fanIn int, worth 
 }
 
 // PlanMerge picks the newest window of layers to merge into one layer file, by object count. The merged layer holds at
-// most maxObjects records and the window at most fanIn layers.
-func PlanMerge(layers []Entry, maxObjects, fanIn int) (Plan, bool) {
-	return plan(layers, func(e Entry) int64 { return int64(e.Objects) }, int64(maxObjects), fanIn, func(lo, hi int) bool { return hi-lo >= 2 })
+// most maxObjects records and the window at most fanIn layers. A window whose packs hold more than compactBytes, with
+// an average pack under half of it, is not merged: a layer that big is never compacted, so its small packs would stay.
+func PlanMerge(layers []Entry, maxObjects, fanIn int, compactBytes int64) (Plan, bool) {
+	fits := func(lo, hi int) bool {
+		var bytes int64
+		packs := 0
+		for _, e := range layers[lo:hi] {
+			bytes += e.Bytes
+			packs += e.NPacks
+		}
+		return bytes <= compactBytes || bytes/int64(max(packs, 1)) >= compactBytes/2
+	}
+	return plan(layers, func(e Entry) int64 { return int64(e.Objects) }, int64(maxObjects), fanIn, fits, func(lo, hi int) bool { return hi-lo >= 2 })
 }
 
 // PlanCompact picks the newest window of layers whose packs to rewrite as one pack, by pack bytes. The new pack has at
 // most maxBytes and at most maxObjects objects, and the window holds at least two packs. A single layer that holds
 // several packs, which merges of the index alone made, is a window.
 func PlanCompact(layers []Entry, maxBytes int64, maxObjects, fanIn int) (Plan, bool) {
-	return plan(layers, func(e Entry) int64 { return e.Bytes }, maxBytes, fanIn, func(lo, hi int) bool {
+	return plan(layers, func(e Entry) int64 { return e.Bytes }, maxBytes, fanIn, func(int, int) bool { return true }, func(lo, hi int) bool {
 		packs, objects := 0, 0
 		for _, e := range layers[lo:hi] {
 			packs += e.NPacks

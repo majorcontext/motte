@@ -191,9 +191,10 @@ func TestPlansFollowTheGeometricRule(t *testing.T) {
 		{"sizes that double apart are left", []Entry{e(1000, 1), e(300, 1), e(100, 1)}, Plan{}, Plan{}},
 		{"a layer of many packs compacts alone", []Entry{e(1000, 1), e(300, 5), e(100, 1)}, Plan{}, Plan{1, 2}},
 		{"tiny layers under a larger newer one still join it", []Entry{e(5, 1), e(5, 1), e(5, 1), e(900, 1)}, Plan{0, 4}, Plan{0, 4}},
+		{"small packs past the compaction cap are compacted before they merge", []Entry{{Key: "a", Objects: 400000, Bytes: 8 << 20, NPacks: 800}, {Key: "b", Objects: 400000, Bytes: 8 << 20, NPacks: 800}}, Plan{}, Plan{1, 2}},
 		{"over the cap stays", []Entry{e(1<<20, 1), e(1<<20, 1)}, Plan{}, Plan{}},
 	} {
-		got, ok := PlanMerge(c.layers, 1<<20, 64)
+		got, ok := PlanMerge(c.layers, 1<<20, 64, 10<<20)
 		if (c.merge != Plan{}) != ok || (ok && got != c.merge) {
 			t.Errorf("%s: merge = %+v, %v; want %+v", c.name, got, ok, c.merge)
 		}

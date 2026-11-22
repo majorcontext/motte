@@ -227,7 +227,9 @@ func (s *Service) mergeOnce(ctx context.Context, repo Repo, maxObjects int, try 
 	if err != nil {
 		return false, err
 	}
-	run, ok := planByClass(m.Layers, func(l []midx.Entry) (midx.Plan, bool) { return midx.PlanMerge(l, maxObjects, maxFanIn) })
+	run, ok := planByClass(m.Layers, func(l []midx.Entry) (midx.Plan, bool) {
+		return midx.PlanMerge(l, maxObjects, maxFanIn, CompactMaxBytes)
+	})
 	if !ok {
 		return false, nil
 	}
