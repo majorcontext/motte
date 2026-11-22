@@ -54,6 +54,9 @@ const (
 	// inlineBudget is the bytes that the tail merges of writes may hold, apart from MemoryBudget. A write that runs
 	// while requests hold the whole of MemoryBudget still merges its tail.
 	inlineBudget = 64 << 20
+	// LandBudget is the bytes that the leaders of lands may hold, apart from MemoryBudget. A leader that waits behind
+	// fetches holds up every land of its ref.
+	LandBudget   = 128 << 20
 	blockTimeout = 30 * time.Second
 	// inFlightBytes bounds the bytes that the prefetches of one request have in flight. ReadAheadBytes adds what they
 	// keep, the most that the read-ahead of a request holds.
@@ -121,6 +124,7 @@ type Service struct {
 
 	budget *semaphore.Weighted
 	inline *semaphore.Weighted
+	landed *semaphore.Weighted
 
 	icache *lru
 	ocache *lru
@@ -173,6 +177,16 @@ func (s *Service) Reserve(ctx context.Context, bytes int64) (release func(), err
 	return func() { s.budget.Release(n) }, nil
 }
 
+// ReserveLand takes bytes of LandBudget, at most the whole budget, and waits while the budget is spent. The caller
+// releases it.
+func (s *Service) ReserveLand(ctx context.Context, bytes int64) (release func(), err error) {
+	n := min(bytes, LandBudget)
+	if err := s.landed.Acquire(ctx, n); err != nil {
+		return nil, err
+	}
+	return func() { s.landed.Release(n) }, nil
+}
+
 // Option tunes a Service.
 type Option func(*Service)
 
@@ -199,7 +213,7 @@ func (s *Service) tryReserveInline(bytes int64) (release func()) {
 }
 
 func New(st bucket.Store, index PackIndex, opts ...Option) *Service {
-	s := &Service{st: st, index: index, clk: clock.Real(), grace: DefaultGrace, open: map[string]*openPack{}, budget: semaphore.NewWeighted(MemoryBudget), inline: semaphore.NewWeighted(inlineBudget), icache: newLRU(maxIndexBytes), ocache: newLRU(maxObjectCacheBytes)}
+	s := &Service{st: st, index: index, clk: clock.Real(), grace: DefaultGrace, open: map[string]*openPack{}, budget: semaphore.NewWeighted(MemoryBudget), inline: semaphore.NewWeighted(inlineBudget), landed: semaphore.NewWeighted(LandBudget), icache: newLRU(maxIndexBytes), ocache: newLRU(maxObjectCacheBytes)}
 	for _, o := range opts {
 		o(s)
 	}

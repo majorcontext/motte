@@ -159,7 +159,7 @@ func (s *Server) failLands(ctx context.Context, key meta.LandKey, owner string, 
 }
 
 func (r *reservation) growLand(retained int64) error {
-	return r.grow(min(landSlack+4*retained, store.MemoryBudget))
+	return r.grow(min(landSlack+4*retained, store.LandBudget))
 }
 
 type landSource struct{ r *store.Reader }
@@ -173,7 +173,7 @@ func (s *Server) landBatch(ctx context.Context, key meta.LandKey, owner string, 
 	if err != nil {
 		return err
 	}
-	res := &reservation{take: func(n int64) (func(), error) { return s.objects.Reserve(ctx, n) }}
+	res := &reservation{take: func(n int64) (func(), error) { return s.objects.ReserveLand(ctx, n) }}
 	defer res.drop()
 	for range landAttempts {
 		retry, err := (&batchRun{s: s, key: key, owner: owner, repo: repo, items: items, res: res}).attempt(ctx)

@@ -15,7 +15,9 @@ import (
 	"github.com/majorcontext/motte/api"
 	"github.com/majorcontext/motte/client"
 	"github.com/majorcontext/motte/internal/server"
+	"github.com/majorcontext/motte/internal/store"
 	"github.com/majorcontext/motte/meta"
+	"github.com/majorcontext/motte/testserver"
 )
 
 const signature = "gpgsig -----BEGIN SIGNATURE-----\n sig\n -----END SIGNATURE-----\n"
@@ -485,4 +487,27 @@ func TestLandLeaderRestartsAfterItLosesTheLeaseToAnotherOwner(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestALandFinishesWhileRequestsHoldTheMemoryBudget(t *testing.T) {
+	t.Parallel()
+	ts := testserver.StartLocal(t)
+	srv := server.New(server.Config{Meta: ts.Meta, Bucket: ts.Bucket, Verifier: ts.Verifier})
+	web := httptest.NewServer(srv.Handler())
+	t.Cleanup(web.Close)
+	ts.URL = web.URL
+	l := newLandEnv(t, &env{Server: ts, t: t, url: web.URL, cp: ts.Operator, node: ts.Node})
+	var o objSet
+	c1 := o.commit(map[string]string{"f1": "1"}, "", "one", l.root)
+	c2 := o.commit(map[string]string{"f2": "2"}, "", "two", l.root)
+	o.upload(t, l.env, l.repo)
+	if _, err := l.land(l.merge, "main", l.root, c1); err != nil {
+		t.Fatal(err)
+	}
+	server.HoldBudget(t, srv, store.MemoryBudget)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if _, err := l.merge.Land(ctx, l.repo, api.LandRequest{Ref: "main", Base: l.root, Head: c2}); err != nil {
+		t.Errorf("a rebase while requests hold the whole memory budget: %v", err)
+	}
 }
