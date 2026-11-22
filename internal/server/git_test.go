@@ -95,7 +95,7 @@ func TestGitCloneFetchAndPush(t *testing.T) {
 	}
 }
 
-func TestGitSmallPushNeedsLittleMemory(t *testing.T) {
+func TestGitSmallPushAndFetchNeedLittleMemory(t *testing.T) {
 	t.Parallel()
 	ts := testserver.StartLocal(t)
 	srv := server.New(server.Config{Meta: ts.Meta, Bucket: ts.Bucket, Verifier: ts.Verifier})
@@ -107,10 +107,12 @@ func TestGitSmallPushNeedsLittleMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 	g := &gitEnv{env: e, path: path, text: "native:" + path}
-	w := g.clone(g.WriteGrant(t, g.text))
+	w, r := g.clone(g.WriteGrant(t, g.text)), g.clone(g.readGrant(g.text))
 	g.commit(w, "a.txt", "a")
 	server.HoldBudget(t, srv, store.MemoryBudget-100<<20)
-	g.git(w, true, "-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=3", "push", "-q", "origin", "HEAD:main")
+	patient := []string{"-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=3"}
+	g.git(w, true, append(patient, "push", "-q", "origin", "HEAD:main")...)
+	g.git(r, true, append(patient, "fetch", "-q", "origin")...)
 }
 
 func TestGitAnnotatedTags(t *testing.T) {

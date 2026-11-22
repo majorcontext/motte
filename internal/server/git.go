@@ -22,9 +22,15 @@ const (
 	fetchBodyMax = 8 << 20
 	// pushBodyMax bounds the commands and the pack of one push.
 	pushBodyMax = store.MaxPackBytes + 1<<20
-	// fetchReserve is the memory of a fetch: its object sets, and one object with the buffers that stream it.
-	fetchReserve = 128<<20 + 3*gitpack.MaxObjectBytes
+	// fetchBase is the memory that a fetch needs before its sets hold an object: one object with the buffers that
+	// stream it, and the ranges that the read-ahead of the walk has in flight. fetchPerObject is what each object of
+	// the sets adds.
+	fetchBase      = 3*gitpack.MaxObjectBytes + fetchAhead
+	fetchAhead     = 16 << 20
+	fetchPerObject = 128
 )
+
+func fetchCost(objects int) int64 { return fetchBase + fetchPerObject*int64(objects) }
 
 // pushCost is the reservation of a push whose body has n bytes and whose unpack holds inflated bytes: the body, the
 // entries, the objects, the rebuilt pack, and the delta, its base and its result while one object resolves.
@@ -227,11 +233,12 @@ func (s *Server) uploadPack(w http.ResponseWriter, r *http.Request, c call) erro
 	if protocolVersion(r) != "2" {
 		return errProtocolV2
 	}
-	body, release, err := s.gitBody(w, r, fetchBodyMax, func(int64) int64 { return fetchReserve })
+	body, release, err := s.gitBody(w, r, fetchBodyMax, func(int64) int64 { return fetchCost(0) })
 	if err != nil {
 		return err
 	}
-	defer release()
+	hold := s.holding(r, fetchCost(0), release)
+	defer hold.drop()
 	refs, head, err := s.gitRefs(r.Context(), c.repo)
 	if err != nil {
 		return err
@@ -241,7 +248,7 @@ func (s *Server) uploadPack(w http.ResponseWriter, r *http.Request, c call) erro
 		return err
 	}
 	gitHeaders(w, "application/x-git-upload-pack-result")
-	up := &gitproto.Upload{Objects: reader{rd}, Refs: refs, Head: head}
+	up := &gitproto.Upload{Objects: reader{rd}, Refs: refs, Head: head, Track: func(n int) error { return hold.grow(fetchCost(n)) }}
 	return s.abortAfterHeaders(w, r, up.Serve(r.Context(), w, bytes.NewReader(body)))
 }
 

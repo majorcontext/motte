@@ -50,10 +50,33 @@ type collector struct {
 	skip       map[gitpack.SHA]struct{}
 	sent       map[gitpack.SHA]struct{}
 	out        []gitpack.SHA
+
+	track    func(objects int) error
+	reported int
+	err      error
 }
 
+// trackStep is how many more objects the sets hold before track is called again.
+const trackStep = 1 << 16
+
 func (c *collector) tracked() bool {
-	return len(c.skip)+len(c.sent)+len(c.commits)+c.parentRefs > MaxTracked
+	n := len(c.skip) + len(c.sent) + len(c.commits) + c.parentRefs
+	if n > MaxTracked {
+		return true
+	}
+	if c.track != nil && n > c.reported && c.err == nil {
+		c.reported = n + trackStep
+		c.err = c.track(min(c.reported, MaxTracked))
+	}
+	return c.err != nil
+}
+
+// limit is the error of a collector for which tracked is true.
+func (c *collector) limit() error {
+	if c.err != nil {
+		return c.err
+	}
+	return ErrTooLarge
 }
 
 func parseCommit(sha gitpack.SHA, data []byte) (*commitNode, bool) {
@@ -113,7 +136,7 @@ func (c *collector) adopt(sha gitpack.SHA, data []byte) (*commitNode, error) {
 	}
 	c.commits[sha] = n
 	if c.parentRefs += len(n.parents); c.tracked() {
-		return nil, ErrTooLarge
+		return nil, c.limit()
 	}
 	return n, nil
 }
@@ -127,7 +150,7 @@ func (c *collector) mark(n *commitNode, unint bool) error {
 			c.live++
 		}
 		if c.tracked() {
-			return ErrTooLarge
+			return c.limit()
 		}
 		return nil
 	}
@@ -313,7 +336,7 @@ func (c *collector) walkTrees(roots []gitpack.SHA, seen map[gitpack.SHA]struct{}
 				return err
 			}
 			if c.tracked() {
-				return ErrTooLarge
+				return c.limit()
 			}
 			return nil
 		})

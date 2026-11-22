@@ -24,6 +24,9 @@ type Upload struct {
 	Refs []Ref
 	// Head is the git name of the ref that HEAD names, or empty.
 	Head string
+	// Track, when set, is called with the objects that a fetch holds in its sets, before it holds them, each time
+	// that count grows. An error of Track stops the fetch.
+	Track func(objects int) error
 }
 
 // AdvertiseUpload writes the protocol v2 capability advertisement.
@@ -230,7 +233,7 @@ func (u *Upload) fetch(ctx context.Context, w io.Writer, args []string) error {
 		pw.Flush()
 		return pw.Err()
 	}
-	c := &collector{objs: u.Objects, ctx: ctx, blobNone: req.blobNone}
+	c := &collector{objs: u.Objects, ctx: ctx, blobNone: req.blobNone, track: u.Track}
 	shas, err := c.collect(req.wants, common)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
