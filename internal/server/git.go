@@ -26,11 +26,14 @@ const (
 	fetchReserve = 128<<20 + 3*gitpack.MaxObjectBytes
 )
 
-// pushCost is the reservation of a push whose body has n bytes: the body, the objects of the pack, the objects
-// of the rebuilt pack, its body, and the delta, its base and its result while one object resolves.
-func pushCost(n int64) int64 {
-	return n + 3*gitpack.MaxUnpackBytes + 4*gitpack.MaxObjectBytes + gitpack.VerifyWorkBytes
+// pushCost is the reservation of a push whose body has n bytes and whose unpack holds inflated bytes: the body, the
+// entries, the objects, the rebuilt pack, and the delta, its base and its result while one object resolves.
+func pushCost(n, inflated int64) int64 {
+	return n + 3*inflated + 4*gitpack.MaxObjectBytes
 }
+
+// pushStep is the granule of the growing reservation of a push.
+const pushStep = 8 << 20
 
 var errProtocolV2 = gitproto.RequestError("protocol v2 is required: use git 2.26 or later")
 
@@ -260,16 +263,20 @@ func (o reader) Has(ctx context.Context, shas []gitpack.SHA) ([]bool, error) {
 }
 
 func (s *Server) receivePack(w http.ResponseWriter, r *http.Request, c call) error {
-	body, release, err := s.gitBody(w, r, pushBodyMax, pushCost)
+	var bodyLen int64
+	body, release, err := s.gitBody(w, r, pushBodyMax, func(n int64) int64 { bodyLen = n; return pushCost(n, 0) })
 	if err != nil {
 		return err
 	}
-	defer release()
+	hold := s.holding(r, pushCost(bodyLen, 0), release)
+	defer hold.drop()
 	push, err := gitproto.ParsePush(body)
 	if err != nil {
 		return err
 	}
-	unpackErr, err := s.storePush(r.Context(), c, push)
+	unpackErr, err := s.storePush(r.Context(), c, push, func(inflated int64) error {
+		return hold.grow(pushCost(bodyLen, (inflated+pushStep-1)/pushStep*pushStep))
+	})
 	if err != nil {
 		return err
 	}
@@ -292,14 +299,14 @@ func (s *Server) receivePack(w http.ResponseWriter, r *http.Request, c call) err
 }
 
 // storePush stores the pack of a push. A refused pack is the text of the report, and any other failure is an error.
-func (s *Server) storePush(ctx context.Context, c call, push gitproto.Push) (string, error) {
+func (s *Server) storePush(ctx context.Context, c call, push gitproto.Push, held func(int64) error) (string, error) {
 	if !slices.ContainsFunc(push.Commands, func(cmd gitproto.Command) bool { return cmd.New != gitproto.Zero }) {
 		return "", nil
 	}
 	if len(push.Pack) == 0 {
 		return "missing pack", nil
 	}
-	err := s.objects.ReceivePack(ctx, c.repo, push.Pack)
+	err := s.objects.ReceivePack(ctx, c.repo, push.Pack, held)
 	switch {
 	case errors.Is(err, store.ErrInvalid):
 		return "invalid pack", nil

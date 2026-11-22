@@ -158,32 +158,8 @@ func (s *Server) failLands(ctx context.Context, key meta.LandKey, owner string, 
 	}
 }
 
-type reservation struct {
-	s       *Server
-	ctx     context.Context
-	held    int64
-	release func()
-}
-
-func (r *reservation) grow(retained int64) error {
-	need := min(landSlack+4*retained, store.MemoryBudget)
-	if need <= r.held {
-		return nil
-	}
-	r.drop()
-	rel, err := r.s.objects.Reserve(r.ctx, need)
-	if err != nil {
-		return err
-	}
-	r.release, r.held = rel, need
-	return nil
-}
-
-func (r *reservation) drop() {
-	if r.release != nil {
-		r.release()
-	}
-	r.release, r.held = nil, 0
+func (r *reservation) growLand(retained int64) error {
+	return r.grow(min(landSlack+4*retained, store.MemoryBudget))
 }
 
 type landSource struct{ r *store.Reader }
@@ -197,7 +173,7 @@ func (s *Server) landBatch(ctx context.Context, key meta.LandKey, owner string, 
 	if err != nil {
 		return err
 	}
-	res := &reservation{s: s, ctx: ctx}
+	res := &reservation{take: func(n int64) (func(), error) { return s.objects.Reserve(ctx, n) }}
 	defer res.drop()
 	for range landAttempts {
 		retry, err := (&batchRun{s: s, key: key, owner: owner, repo: repo, items: items, res: res}).attempt(ctx)
@@ -245,7 +221,7 @@ func (b *batchRun) attempt(ctx context.Context) (retry bool, err error) {
 		return false, protected
 	}
 	writeRefused := protected != nil
-	if err := b.res.grow(0); err != nil {
+	if err := b.res.growLand(0); err != nil {
 		return false, err
 	}
 	reader, err := s.objects.Reader(ctx, b.repo)
@@ -256,7 +232,7 @@ func (b *batchRun) attempt(ctx context.Context) (retry bool, err error) {
 	if err != nil {
 		return false, err
 	}
-	batch := land.NewBatch(landSource{reader}, b.res.grow, tip, s.landHistory(b.key, tip))
+	batch := land.NewBatch(landSource{reader}, b.res.growLand, tip, s.landHistory(b.key, tip))
 	when := s.events.Clock.Now()
 	for _, it := range b.items {
 		if batch.Bytes() >= softBatchBytes {
@@ -274,7 +250,7 @@ func (b *batchRun) attempt(ctx context.Context) (retry bool, err error) {
 		return false, b.finish(ctx)
 	}
 	if objs := batch.Objects(); len(objs) > 0 {
-		if err := b.res.grow(int64(batch.Bytes())); err != nil {
+		if err := b.res.growLand(int64(batch.Bytes())); err != nil {
 			return false, err
 		}
 		for _, part := range splitObjects(objs, store.MaxBatch/2, store.MaxPackBytes/2) {

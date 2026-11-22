@@ -124,22 +124,9 @@ func (s *Server) getTrees(w http.ResponseWriter, r *http.Request, c call) error 
 	if err != nil {
 		return err
 	}
-	held := treeReserve
-	defer func() { release() }()
-	// grow swaps the reservation for a larger one. It never holds the old one while it waits for the new one.
-	grow := func(treeBytes int64) error {
-		if need := treeCost(treeBytes); need > held {
-			release()
-			release = func() {}
-			var err error
-			if release, err = s.reserve(r, need); err != nil {
-				release = func() {}
-				return err
-			}
-			held = need
-		}
-		return nil
-	}
+	hold := s.holding(r, treeReserve, release)
+	defer hold.drop()
+	grow := func(treeBytes int64) error { return hold.grow(treeCost(treeBytes)) }
 	sha, err := parseSHA(r.PathValue("sha"))
 	if err != nil {
 		return err

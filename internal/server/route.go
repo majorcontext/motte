@@ -146,3 +146,36 @@ func (s *Server) reserve(r *http.Request, bytes int64) (func(), error) {
 	store.StatsFrom(r.Context()).AddSlotWait(time.Since(start))
 	return release, err
 }
+
+// reservation is a hold on the memory budget that grows with its request.
+type reservation struct {
+	take    func(bytes int64) (func(), error)
+	held    int64
+	release func()
+}
+
+// grow swaps the hold for one of need bytes when need is larger. It never holds the old one while it waits for the
+// new one.
+func (r *reservation) grow(need int64) error {
+	if need <= r.held {
+		return nil
+	}
+	r.drop()
+	rel, err := r.take(need)
+	if err != nil {
+		return err
+	}
+	r.release, r.held = rel, need
+	return nil
+}
+
+func (r *reservation) drop() {
+	if r.release != nil {
+		r.release()
+	}
+	r.release, r.held = nil, 0
+}
+
+func (s *Server) holding(r *http.Request, held int64, release func()) *reservation {
+	return &reservation{take: func(n int64) (func(), error) { return s.reserve(r, n) }, held: held, release: release}
+}

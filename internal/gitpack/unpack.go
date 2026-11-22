@@ -34,6 +34,12 @@ type unpacked struct {
 // Unpack reads the whole pack and returns its objects with every delta resolved. The pack may be thin: external
 // resolves the base of a ref delta that the pack does not hold.
 func Unpack(ctx context.Context, pack []byte, external func(SHA) (Type, []byte, error)) ([]Object, error) {
+	return UnpackHeld(ctx, pack, external, nil)
+}
+
+// UnpackHeld is Unpack that calls held with the inflated bytes that it holds, before it allocates them, each time
+// that count grows. An error of held stops the unpack.
+func UnpackHeld(ctx context.Context, pack []byte, external func(SHA) (Type, []byte, error), held func(int64) error) ([]Object, error) {
 	if len(pack) < 32 || string(pack[:4]) != "PACK" || (binary.BigEndian.Uint32(pack[4:8]) != 2 && binary.BigEndian.Uint32(pack[4:8]) != 3) {
 		return nil, ErrCorrupt
 	}
@@ -54,7 +60,7 @@ func Unpack(ctx context.Context, pack []byte, external func(SHA) (Type, []byte, 
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		e, err := readEntry(r, int64(len(body))-int64(r.Len()), &declared)
+		e, err := readEntry(r, int64(len(body))-int64(r.Len()), &declared, held)
 		if err != nil {
 			return nil, err
 		}
@@ -64,10 +70,10 @@ func Unpack(ctx context.Context, pack []byte, external func(SHA) (Type, []byte, 
 	if r.Len() != 0 {
 		return nil, ErrCorrupt
 	}
-	return resolveEntries(ctx, entries, byOff, external)
+	return resolveEntries(ctx, entries, byOff, external, held)
 }
 
-func readEntry(r *bytes.Reader, off int64, declared *int64) (*unpacked, error) {
+func readEntry(r *bytes.Reader, off int64, declared *int64, held func(int64) error) (*unpacked, error) {
 	e := &unpacked{off: off}
 	c, err := r.ReadByte()
 	if err != nil {
@@ -110,6 +116,11 @@ func readEntry(r *bytes.Reader, off int64, declared *int64) (*unpacked, error) {
 	if *declared += size; size > MaxObjectBytes || *declared > unpackLimit {
 		return nil, ErrTooLarge
 	}
+	if held != nil {
+		if err := held(*declared); err != nil {
+			return nil, err
+		}
+	}
 	zr, err := zlib.NewReader(r)
 	if err != nil {
 		return nil, ErrCorrupt
@@ -133,7 +144,7 @@ func readEntry(r *bytes.Reader, off int64, declared *int64) (*unpacked, error) {
 
 // resolveEntries resolves each delta once, when its base is resolved. A ref delta whose base the pack does not hold
 // asks external once for each base name, after every entry that the pack can resolve is resolved.
-func resolveEntries(ctx context.Context, entries []*unpacked, byOff map[int64]*unpacked, external func(SHA) (Type, []byte, error)) ([]Object, error) {
+func resolveEntries(ctx context.Context, entries []*unpacked, byOff map[int64]*unpacked, external func(SHA) (Type, []byte, error), held func(int64) error) ([]Object, error) {
 	var total int64
 	var queue []*unpacked
 	waitName := map[SHA][]*unpacked{}
@@ -163,6 +174,11 @@ func resolveEntries(ctx context.Context, entries []*unpacked, byOff map[int64]*u
 			}
 			if total += int64(len(out)); total > unpackLimit {
 				return ErrTooLarge
+			}
+			if held != nil {
+				if err := held(total); err != nil {
+					return err
+				}
 			}
 			e.t, e.data, e.done = base.t, out, true
 			e.name = Hash(e.t, e.data)

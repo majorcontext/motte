@@ -20,7 +20,7 @@ type objects interface {
 	Get(ctx context.Context, repo store.Repo, sha gitpack.SHA) (gitpack.Type, []byte, error)
 	PutObjects(ctx context.Context, repo store.Repo, objs []gitpack.Object) ([]gitpack.SHA, error)
 	Reader(ctx context.Context, repo store.Repo) (*store.Reader, error)
-	ReceivePack(ctx context.Context, repo store.Repo, pack []byte) error
+	ReceivePack(ctx context.Context, repo store.Repo, pack []byte, held func(int64) error) error
 	ImportPack(ctx context.Context, repo store.Repo, id string, idx, pack []byte) error
 	Warm(ctx context.Context, repos []store.Repo, parallel int) error
 	Maintain(ctx context.Context, repo store.Repo) error

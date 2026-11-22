@@ -297,13 +297,14 @@ func (s *Service) ImportPack(ctx context.Context, repo Repo, id string, idx, pac
 }
 
 // ReceivePack stores the objects of a pushed pack as one pack of the repo. The pack may be thin: the service
-// resolves the base of a ref delta from the repo, so the stored pack holds whole objects.
-func (s *Service) ReceivePack(ctx context.Context, repo Repo, pack []byte) error {
+// resolves the base of a ref delta from the repo, so the stored pack holds whole objects. A non-nil held is called
+// with the inflated bytes that the unpack holds each time that count grows.
+func (s *Service) ReceivePack(ctx context.Context, repo Repo, pack []byte, held func(int64) error) error {
 	v, err := s.view(ctx, repo)
 	if err != nil {
 		return err
 	}
-	objs, err := gitpack.Unpack(ctx, pack, func(sha gitpack.SHA) (gitpack.Type, []byte, error) { return v.get(ctx, sha) })
+	objs, err := gitpack.UnpackHeld(ctx, pack, func(sha gitpack.SHA) (gitpack.Type, []byte, error) { return v.get(ctx, sha) }, held)
 	switch {
 	case errors.Is(err, gitpack.ErrCorrupt), errors.Is(err, ErrNotFound):
 		return ErrInvalid

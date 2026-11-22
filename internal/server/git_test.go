@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +18,8 @@ import (
 
 	"github.com/majorcontext/motte/api"
 	"github.com/majorcontext/motte/internal/gitpack"
+	"github.com/majorcontext/motte/internal/server"
+	"github.com/majorcontext/motte/internal/store"
 	"github.com/majorcontext/motte/internal/testcount"
 	"github.com/majorcontext/motte/testserver"
 )
@@ -90,6 +93,24 @@ func TestGitCloneFetchAndPush(t *testing.T) {
 	if got := g.git(reader, true, "show", "origin/feature/x:big.txt"); !strings.HasSuffix(got, "two") {
 		t.Errorf("fetched branch content ends %q", got[len(got)-10:])
 	}
+}
+
+func TestGitSmallPushNeedsLittleMemory(t *testing.T) {
+	t.Parallel()
+	ts := testserver.StartLocal(t)
+	srv := server.New(server.Config{Meta: ts.Meta, Bucket: ts.Bucket, Verifier: ts.Verifier})
+	web := httptest.NewServer(srv.Handler())
+	t.Cleanup(web.Close)
+	e := &env{Server: ts, t: t, url: web.URL, cp: ts.Operator, node: ts.Node}
+	path, err := e.Client(e.operator()).CreateRepo(context.Background(), "widgets", "o1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := &gitEnv{env: e, path: path, text: "native:" + path}
+	w := g.clone(g.WriteGrant(t, g.text))
+	g.commit(w, "a.txt", "a")
+	server.HoldBudget(t, srv, store.MemoryBudget-100<<20)
+	g.git(w, true, "-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=3", "push", "-q", "origin", "HEAD:main")
 }
 
 func TestGitAnnotatedTags(t *testing.T) {
