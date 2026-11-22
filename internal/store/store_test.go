@@ -331,6 +331,14 @@ func TestPrefetchReadsFarApartRangesAtTheSameTime(t *testing.T) {
 			t.Fatalf("a prefetch of %d far apart ranges took %v of 20 ms reads: it must not read them one after another", len(far), d)
 		}
 		before := svc.CacheStats().RangeReads
+		for _, sha := range far {
+			if _, _, err := rd.Get(t.Context(), sha); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := svc.CacheStats().RangeReads - before; got != 0 {
+			t.Fatalf("reading %d prefetched objects of 20 KiB made %d range reads; the prefetch must keep each object whole", len(far), got)
+		}
 		rd.Prefetch(t.Context(), far)
 		if again := svc.CacheStats().RangeReads - before; again != 0 {
 			t.Fatalf("a second prefetch of the same objects made %d range reads; it must read none", again)

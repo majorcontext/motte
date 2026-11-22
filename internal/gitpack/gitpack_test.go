@@ -3,6 +3,7 @@ package gitpack
 import (
 	"bytes"
 	"context"
+	"math/rand/v2"
 	"testing"
 )
 
@@ -46,5 +47,32 @@ func TestVerifyRestoresReadState(t *testing.T) {
 	}
 	if _, _, err := p.Get(names[0]); err != nil {
 		t.Errorf("read after canceled verify: %v", err)
+	}
+}
+
+func TestEntryBoundCoversTheStoredEntry(t *testing.T) {
+	t.Parallel()
+	rnd := rand.New(rand.NewPCG(1, 2))
+	noise := func(n int) []byte {
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = byte(rnd.Uint32())
+		}
+		return b
+	}
+	objs := []Object{{Blob, []byte("x")}, {Blob, noise(100)}, {Blob, noise(70000)}, {Blob, bytes.Repeat([]byte("line\n"), 9000)}}
+	pack, _, _ := Build(objs)
+	spans, err := Scan(pack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sp := range spans {
+		bound, ok := EntryBound(pack[sp.Off:])
+		if !ok || bound < sp.End-sp.Off {
+			t.Errorf("entry at %d: bound %d (%v) is below its length %d", sp.Off, bound, ok, sp.End-sp.Off)
+		}
+	}
+	if _, ok := EntryBound(nil); ok {
+		t.Error("an empty buffer has a bound")
 	}
 }

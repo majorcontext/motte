@@ -9,8 +9,10 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/sync/semaphore"
 
 	"github.com/majorcontext/motte/bucket"
+	"github.com/majorcontext/motte/internal/gitpack"
 )
 
 const (
@@ -148,25 +150,60 @@ type prefetchRun struct {
 	offs       []int64
 }
 
-// fetchRun reads the run and keeps the minRead bytes at each object, not the gaps that the read closed.
-func (b *packReader) fetchRun(ctx context.Context, r prefetchRun) error {
+// maxEntry bounds the bytes that the read-ahead keeps for one object.
+const maxEntry = 256 << 10
+
+// fetchRun reads the run and keeps each object whole, from its header to the bound that the header gives, and not the
+// gaps that the read closed. release frees the bytes that the run holds in the read-ahead once its read ends, and the
+// tail of an object that runs past the end of the run is read after that, from ahead.
+func (b *packReader) fetchRun(ctx context.Context, r prefetchRun, release func(), ahead *semaphore.Weighted) error {
 	d, err := b.read(ctx, r.start, r.end)
+	if err == nil && int64(len(d)) != r.end-r.start {
+		err = io.ErrUnexpectedEOF
+	}
 	if err != nil {
+		release()
 		return err
 	}
-	if int64(len(d)) != r.end-r.start {
-		return io.ErrUnexpectedEOF
+	ends := make([]int64, len(r.offs))
+	for i, o := range r.offs {
+		need := int64(minRead)
+		if bound, ok := gitpack.EntryBound(d[o-r.start:]); ok {
+			need = max(need, min(bound, maxEntry))
+		}
+		ends[i] = min(o+need, b.size)
 	}
+	type tail struct {
+		from, to int64
+		head     []byte
+	}
+	var tails []tail
 	for i := 0; i < len(r.offs); {
-		from, to := r.offs[i], min(r.offs[i]+minRead, r.end)
+		from, to := r.offs[i], ends[i]
 		for i++; i < len(r.offs) && r.offs[i] <= to; i++ {
-			to = min(max(to, r.offs[i]+minRead), r.end)
+			to = max(to, ends[i])
 		}
-		if from == r.start && to == r.end {
+		switch {
+		case to > r.end:
+			tails = append(tails, tail{from, to, bytes.Clone(d[from-r.start:])})
+		case from == r.start && to == r.end:
 			b.keep(from, d)
-			continue
+		default:
+			b.keep(from, bytes.Clone(d[from-r.start:to-r.start]))
 		}
-		b.keep(from, bytes.Clone(d[from-r.start:min(to-r.start, int64(len(d)))]))
+	}
+	release()
+	for _, t := range tails {
+		n := t.to - r.end
+		if err := ahead.Acquire(ctx, n); err != nil {
+			return err
+		}
+		x, err := b.read(ctx, r.end, t.to)
+		ahead.Release(n)
+		if err != nil {
+			return err
+		}
+		b.keep(t.from, append(t.head, x...))
 	}
 	return nil
 }

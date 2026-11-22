@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"slices"
 	"sort"
 	"sync"
@@ -303,6 +304,25 @@ func (p *Pack) readHeader(off int64) (header, error) {
 	if err != nil && (n == 0 || !errors.Is(err, io.EOF)) {
 		return header{}, err
 	}
+	return parseHeader(buf[:n], off)
+}
+
+// EntryBound is the most bytes that the pack entry at the start of data takes: its header, the base name of a ref
+// delta, and its deflate stream even if the stream stores the data. It reports false when data does not hold the
+// header.
+func EntryBound(data []byte) (int64, bool) {
+	h, err := parseHeader(data[:min(len(data), 64)], math.MaxInt64)
+	if err != nil {
+		return 0, false
+	}
+	return int64(h.hlen) + deflateBound(h.size), true
+}
+
+// deflateBound is the most bytes that a zlib stream of size bytes takes.
+func deflateBound(size int64) int64 { return size + 5*(size/16384+1) + 16 }
+
+func parseHeader(buf []byte, off int64) (header, error) {
+	n := len(buf)
 	i := 0
 	next := func() (byte, bool) {
 		if i >= n {
@@ -361,8 +381,7 @@ func (p *Pack) readHeader(off int64) (header, error) {
 }
 
 func (p *Pack) inflate(off int64, size int64) ([]byte, error) {
-	end := p.pack.Size()
-	sr := io.NewSectionReader(p.pack, off, end-off)
+	sr := io.NewSectionReader(p.pack, off, min(p.pack.Size()-off, deflateBound(size)))
 	zr, err := zlib.NewReader(bufioReader(sr, size))
 	if err != nil {
 		return nil, err

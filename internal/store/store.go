@@ -622,9 +622,10 @@ func (r *Reader) Prefetch(ctx context.Context, shas []gitpack.SHA) {
 			if r.ahead.Acquire(ctx, run.end-run.start) != nil {
 				break
 			}
+			release := sync.OnceFunc(func() { r.ahead.Release(run.end - run.start) })
 			g.Go(func() error {
-				defer r.ahead.Release(run.end - run.start)
-				_ = e.b.fetchRun(ctx, run)
+				defer release()
+				_ = e.b.fetchRun(ctx, run, release, r.ahead)
 				return nil
 			})
 		}
