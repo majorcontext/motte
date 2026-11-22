@@ -367,40 +367,25 @@ func (s *Service) updateManifest(ctx context.Context, repo Repo, f func(*midx.Ma
 	return fmt.Errorf("store: manifest of %s changes too fast", repo)
 }
 
-// appendPacks adds the packs that putPacks stored as the newest layers, in one swap, and merges the small layers at
-// the tail.
-func (s *Service) appendPacks(ctx context.Context, repo Repo, files []packFile) error {
-	var add []midx.Entry
-	for _, f := range files {
-		n, err := gitpack.IdxCount(f.idx[:min(len(f.idx), gitpack.IdxHeadBytes)])
-		if err != nil {
-			return err
-		}
-		e := indexEntry(f.id, int64(len(f.pack)), n)
-		e.Class = f.class
-		add = append(add, e)
+// appendPack adds the pack that putPack stored as the newest layer, and merges the small layers at the tail.
+func (s *Service) appendPack(ctx context.Context, repo Repo, id string, bytes int64, idx []byte) error {
+	n, err := gitpack.IdxCount(idx[:min(len(idx), gitpack.IdxHeadBytes)])
+	if err != nil {
+		return err
 	}
-	err := s.updateManifest(ctx, repo, func(m *midx.Manifest) (bool, error) {
-		held := map[string]bool{}
+	e := indexEntry(id, bytes, n)
+	err = s.updateManifest(ctx, repo, func(m *midx.Manifest) (bool, error) {
 		for _, l := range m.Layers {
-			if l.IsIndex() {
-				held[l.Packs[0].ID] = true
+			if l.IsIndex() && l.Packs[0].ID == id {
+				return false, nil
 			}
 		}
-		changed := false
-		for _, e := range add {
-			if !held[e.Packs[0].ID] {
-				m.Layers = append(m.Layers, e)
-				changed = true
-			}
-		}
-		return changed, nil
+		m.Layers = append(m.Layers, e)
+		return true, nil
 	})
 	if err != nil {
 		return err
 	}
-	for range files {
-		s.mergeTail(ctx, repo)
-	}
+	s.mergeTail(ctx, repo)
 	return nil
 }
