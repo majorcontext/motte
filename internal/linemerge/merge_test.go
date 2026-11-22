@@ -19,6 +19,7 @@ func text(edits map[int]string) string {
 
 func TestMergeByLines(t *testing.T) {
 	t.Parallel()
+	long := strings.Repeat("x\n", MaxLines)
 	cases := []struct {
 		name               string
 		base, ours, theirs string
@@ -31,6 +32,7 @@ func TestMergeByLines(t *testing.T) {
 		{"same line", text(nil), text(map[int]string{5: "a\n"}), text(map[int]string{5: "b\n"}), "", false},
 		{"touching lines", text(nil), text(map[int]string{5: "a\n"}), text(map[int]string{6: "b\n"}), "", false},
 		{"large insertion", text(nil), text(map[int]string{2: strings.Repeat("a\n", maxEdits+1) + "line\n"}), text(map[int]string{8: "b\n"}), "", false},
+		{"same change of a long file", long, long + "a\n", long + "a\n", "", false},
 		{"binary", text(nil), text(map[int]string{2: "a\x00\n"}), text(map[int]string{8: "b\n"}), "", false},
 	}
 	for _, c := range cases {

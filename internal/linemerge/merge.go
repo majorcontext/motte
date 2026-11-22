@@ -31,6 +31,9 @@ const (
 // Merge returns the base with the edits of both sides. It returns ErrTooLarge, ErrBinary, ErrOverlap or
 // ErrTooManyEdits when it cannot merge them. Two sides that make the same change merge.
 func Merge(base, ours, theirs []byte) ([]byte, error) {
+	if lineCount(base) > MaxLines || lineCount(ours) > MaxLines || lineCount(theirs) > MaxLines {
+		return nil, ErrTooLarge
+	}
 	switch {
 	case len(base) > MaxBytes || len(ours) > MaxBytes || len(theirs) > MaxBytes:
 		return nil, ErrTooLarge
@@ -230,4 +233,12 @@ func myers(a, b []int32) ([][2]int, bool) {
 	}
 	slices.Reverse(rev)
 	return rev, true
+}
+
+func lineCount(data []byte) int {
+	n := bytes.Count(data, []byte("\n"))
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		n++
+	}
+	return n
 }
