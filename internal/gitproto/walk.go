@@ -292,6 +292,7 @@ func (c *collector) walkTree(root gitpack.SHA, seen map[gitpack.SHA]struct{}, ad
 		if t != gitpack.Tree {
 			return errMalformed
 		}
+		first := len(stack)
 		err = forEachEntry(data, func(mode uint32, child gitpack.SHA) {
 			if c.tracked() {
 				return
@@ -311,6 +312,11 @@ func (c *collector) walkTree(root gitpack.SHA, seen map[gitpack.SHA]struct{}, ad
 		}
 		if c.tracked() {
 			return ErrTooLarge
+		}
+		if pf, ok := c.objs.(Prefetcher); ok && len(stack)-first > 1 {
+			for kids := stack[first:]; len(kids) > 0; kids = kids[min(prefetchBatch, len(kids)):] {
+				pf.Prefetch(c.ctx, kids[:min(prefetchBatch, len(kids))])
+			}
 		}
 	}
 	return nil

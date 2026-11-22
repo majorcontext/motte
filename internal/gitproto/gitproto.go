@@ -32,6 +32,12 @@ type Objects interface {
 	Has(ctx context.Context, shas []gitpack.SHA) ([]bool, error)
 }
 
+// Prefetcher is an optional method of Objects: it reads the objects of shas ahead, so the Get calls that follow cost
+// few reads. It never fails a fetch.
+type Prefetcher interface {
+	Prefetch(ctx context.Context, shas []gitpack.SHA)
+}
+
 // Ref is a ref under its git name.
 type Ref struct {
 	Name string

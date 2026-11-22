@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -239,6 +240,51 @@ func TestEveryObjectStaysReachableThroughPushesAndMaintenance(t *testing.T) {
 	packs, err := w.meta.Packs(t.Context(), repo.String())
 	if err != nil || len(packs) >= 36 {
 		t.Errorf("%d pack rows after compaction and deletion, %v; want fewer than the 36 pushed", len(packs), err)
+	}
+}
+
+func TestReadingSmallObjectsOfABigPackCostsFewSmallRanges(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	rng := rand.New(rand.NewPCG(1, 2))
+	objs := make([]gitpack.Object, 2000)
+	for i := range objs {
+		data := make([]byte, 400)
+		for j := range data {
+			data[j] = byte(rng.Uint32())
+		}
+		objs[i] = gitpack.Object{Type: gitpack.Blob, Data: data}
+	}
+	names, err := w.svc.PutObjects(t.Context(), repo, objs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := func(shas []gitpack.SHA, prefetch bool) store.CacheStats {
+		svc := w.cold()
+		rd, err := svc.Reader(t.Context(), repo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if prefetch {
+			rd.Prefetch(t.Context(), shas)
+		}
+		for _, sha := range shas {
+			if _, _, err := rd.Get(t.Context(), sha); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return svc.CacheStats()
+	}
+	var spread []gitpack.SHA
+	for i := 0; i < len(names); i += 100 {
+		spread = append(spread, names[i])
+	}
+	near := names[:200]
+	if st := read(spread, false); st.RangeReads > int64(len(spread)) || st.RangeBytes > int64(len(spread))*16<<10 {
+		t.Fatalf("%d objects cost %d range reads and %d bytes: a read must fetch the bytes of its object, not a block", len(spread), st.RangeReads, st.RangeBytes)
+	}
+	if st := read(near, true); st.RangeReads > 2 || st.RangeBytes > 200*500 {
+		t.Fatalf("%d near objects cost %d range reads and %d bytes after a prefetch: near objects must share ranges", len(near), st.RangeReads, st.RangeBytes)
 	}
 }
 

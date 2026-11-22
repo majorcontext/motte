@@ -19,9 +19,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
-
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 	"golang.org/x/sync/singleflight"
@@ -51,8 +48,6 @@ const (
 	maxOpenBytes = 256 << 20
 	// maxIndexBytes is the memory of the layer cache: layer directories, index layers and blocks of records.
 	maxIndexBytes = 128 << 20
-	blockSize     = 256 << 10
-	maxBlocks     = 4
 	// MemoryBudget is the bytes that requests may hold while they work, apart from the bodies that are still being read.
 	MemoryBudget = 512 << 20
 	blockTimeout = 30 * time.Second
@@ -349,106 +344,11 @@ func (b bytesReader) ReadAt(p []byte, off int64) (int, error) {
 }
 func (b bytesReader) Size() int64 { return int64(len(b)) }
 
-// blockReader reads a pack from the object store in blocks and keeps the
-// last few, so one object costs about one range read.
-type blockReader struct {
-	svc  *Service
-	st   bucket.Store
-	key  string
-	size int64
-
-	mu     sync.Mutex
-	blocks map[int64][]byte
-	order  []int64
-	// changed runs, with no lock held, after the cached blocks change.
-	changed func()
-}
-
-func (b *blockReader) cachedBytes() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	n := 0
-	for _, d := range b.blocks {
-		n += len(d)
-	}
-	return n
-}
-
-func (b *blockReader) Size() int64 { return b.size }
-
-// reqReader reads through a blockReader under the context of one request.
-type reqReader struct {
-	b   *blockReader
-	ctx context.Context
-}
-
-func (r reqReader) Size() int64 { return r.b.size }
-
-func (r reqReader) ReadAt(p []byte, off int64) (int, error) { return r.b.readAt(r.ctx, p, off) }
-
-func (b *blockReader) readAt(ctx context.Context, p []byte, off int64) (int, error) {
-	if off < 0 {
-		return 0, io.EOF
-	}
-	n := 0
-	for n < len(p) && off < b.size {
-		blk := off / blockSize
-		data, err := b.block(ctx, blk)
-		if err != nil {
-			return n, err
-		}
-		c := copy(p[n:], data[off-blk*blockSize:])
-		n += c
-		off += int64(c)
-	}
-	if n < len(p) {
-		return n, io.EOF
-	}
-	return n, nil
-}
-
-func (b *blockReader) block(ctx context.Context, i int64) ([]byte, error) {
-	b.mu.Lock()
-	if d, ok := b.blocks[i]; ok {
-		b.mu.Unlock()
-		return d, nil
-	}
-	b.mu.Unlock()
-	ctx, cancel := context.WithTimeout(ctx, blockTimeout)
-	defer cancel()
-	ctx, sp := tracer.Start(ctx, "vcs.pack.read", trace.WithAttributes(attribute.Int64("offset", i*blockSize), attribute.Int("range_bytes", blockSize)))
-	d, err := b.st.GetRange(ctx, b.key, i*blockSize, blockSize)
-	statsFrom(ctx).rangeRead(len(d))
-	b.svc.rangeReads.Add(1)
-	b.svc.rangeBytes.Add(int64(len(d)))
-	sp.SetAttributes(attribute.Int("bytes", len(d)))
-	finishSpan(sp, err)
-	if err != nil {
-		return nil, err
-	}
-	b.mu.Lock()
-	if cached, ok := b.blocks[i]; ok {
-		b.mu.Unlock()
-		return cached, nil
-	}
-	if len(b.blocks) >= maxBlocks {
-		delete(b.blocks, b.order[0])
-		b.order = b.order[1:]
-	}
-	b.blocks[i] = d
-	b.order = append(b.order, i)
-	b.mu.Unlock()
-	if b.changed != nil {
-		b.changed()
-	}
-	return d, nil
-}
-
 // openPack is a pack kept across requests. A request reads it through
 // Bind, so the reads carry the context of the request.
 type openPack struct {
 	p *gitpack.Pack
-	b *blockReader
+	b *packReader
 	// charged and cached are guarded by Service.mu. charged is what the pack
 	// adds to Service.openBytes while cached is true.
 	charged int
@@ -490,7 +390,7 @@ func (s *Service) openPack(prefix string, ref midx.Pack) *openPack {
 	}
 	s.mu.Unlock()
 	s.misses.Add(1)
-	br := &blockReader{svc: s, st: s.st, key: prefix + "/" + ref.ID + ".pack", size: ref.Bytes, blocks: map[int64][]byte{}}
+	br := &packReader{svc: s, st: s.st, key: prefix + "/" + ref.ID + ".pack", size: ref.Bytes}
 	e := &openPack{b: br, p: gitpack.NewAt(reqReader{b: br, ctx: context.Background()})}
 	br.changed = func() { s.recharge(e) }
 	e.p.OnCacheChange(func() { s.recharge(e) })
@@ -559,32 +459,39 @@ func (s *Service) view(ctx context.Context, repo Repo) (*view, error) {
 	return &view{s: s, prefix: prefix, layers: m.Layers}, nil
 }
 
-// find returns the pack that holds sha, probing the newest layer first. A layer costs at most one block read.
-func (v *view) find(ctx context.Context, sha gitpack.SHA) (*gitpack.Pack, error) {
+// locate returns the pack that holds sha, probing the newest layer first, with the layer and the number of the pack in
+// it. A layer costs at most one block read.
+func (v *view) locate(ctx context.Context, sha gitpack.SHA) (*openPack, *layerH, int, int64, error) {
 	st := statsFrom(ctx)
 	for i := len(v.layers) - 1; i >= 0; i-- {
 		st.layer()
 		h, err := v.s.layer(ctx, v.prefix, v.layers[i])
 		if err != nil {
-			return nil, err
+			return nil, nil, 0, 0, err
 		}
-		ord, _, ok, err := v.s.lookup(ctx, h, sha, -1)
+		ord, off, ok, err := v.s.lookup(ctx, h, sha, -1)
 		if err != nil {
-			return nil, err
+			return nil, nil, 0, 0, err
 		}
-		if !ok {
-			continue
+		if ok {
+			return v.s.openPack(v.prefix, h.packs[ord]), h, ord, off, nil
 		}
-		e := v.s.openPack(v.prefix, h.packs[ord])
-		return e.p.Bind(reqReader{b: e.b, ctx: ctx}).WithLookup(func(name gitpack.SHA) (int64, bool) {
-			_, off, ok, err := v.s.lookup(ctx, h, name, ord)
-			if err != nil {
-				v.lerr.Store(&err)
-			}
-			return off, ok && err == nil
-		}), nil
 	}
-	return nil, ErrNotFound
+	return nil, nil, 0, 0, ErrNotFound
+}
+
+func (v *view) find(ctx context.Context, sha gitpack.SHA) (*gitpack.Pack, error) {
+	e, h, ord, _, err := v.locate(ctx, sha)
+	if err != nil {
+		return nil, err
+	}
+	return e.p.Bind(reqReader{b: e.b, ctx: ctx}).WithLookup(func(name gitpack.SHA) (int64, bool) {
+		_, off, ok, err := v.s.lookup(ctx, h, name, ord)
+		if err != nil {
+			v.lerr.Store(&err)
+		}
+		return off, ok && err == nil
+	}), nil
 }
 
 // size is the inflated size of sha, from the pack header.
@@ -664,6 +571,20 @@ func (r *Reader) Get(ctx context.Context, sha gitpack.SHA) (gitpack.Type, []byte
 // the read.
 func (r *Reader) GetSized(ctx context.Context, sha gitpack.SHA, before func(size int64) error) (gitpack.Type, []byte, error) {
 	return r.v.getSized(ctx, sha, before)
+}
+
+// Prefetch reads the pack bytes that Get of shas will need, in few large ranges. It skips what it cannot place, and a
+// failed read is left to the Get that needs it.
+func (r *Reader) Prefetch(ctx context.Context, shas []gitpack.SHA) {
+	byPack := map[*openPack][]int64{}
+	for _, sha := range shas {
+		if e, _, _, off, err := r.v.locate(ctx, sha); err == nil {
+			byPack[e] = append(byPack[e], off)
+		}
+	}
+	for e, offs := range byPack {
+		e.b.prefetch(ctx, offs)
+	}
 }
 
 // Has reports for each sha whether the repo holds it, from the pack indexes only.

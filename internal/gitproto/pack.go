@@ -10,6 +10,8 @@ import (
 	"github.com/majorcontext/motte/internal/gitpack"
 )
 
+const prefetchBatch = 256
+
 // writePack streams shas as a pack of whole objects, one object in memory at a time.
 func writePack(ctx context.Context, w io.Writer, objs Objects, shas []gitpack.SHA) error {
 	h := sha1.New()
@@ -23,9 +25,13 @@ func writePack(ctx context.Context, w io.Writer, objs Objects, shas []gitpack.SH
 	if err != nil {
 		return err
 	}
-	for _, sha := range shas {
+	pf, _ := objs.(Prefetcher)
+	for i, sha := range shas {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if pf != nil && i%prefetchBatch == 0 {
+			pf.Prefetch(ctx, shas[i:min(i+prefetchBatch, len(shas))])
 		}
 		t, data, err := objs.Get(ctx, sha)
 		if err != nil {

@@ -253,6 +253,8 @@ func (o reader) Get(ctx context.Context, sha gitpack.SHA) (gitpack.Type, []byte,
 	return t, data, err
 }
 
+func (o reader) Prefetch(ctx context.Context, shas []gitpack.SHA) { o.r.Prefetch(ctx, shas) }
+
 func (o reader) Has(ctx context.Context, shas []gitpack.SHA) ([]bool, error) {
 	return o.r.Has(ctx, shas)
 }
