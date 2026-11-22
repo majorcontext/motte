@@ -153,8 +153,12 @@ func TestSmallRequestsNeedLittleMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Commit(ctx, ref.Commit); err != nil {
+	commit, err := c.Commit(ctx, ref.Commit)
+	if err != nil {
 		t.Errorf("commit read: %v", err)
+	}
+	if _, err := c.Trees(ctx, commit.Tree, 0); err != nil {
+		t.Errorf("tree read: %v", err)
 	}
 	if _, err := c.Object(ctx, ref.Commit); err != nil {
 		t.Errorf("object read: %v", err)

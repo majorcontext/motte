@@ -35,7 +35,7 @@ const uploadReaders = 4
 // The reservation of a request is the peak of its live buffers, derived from the code path. B is the body length.
 //
 //	read of one commit      3 times its size, at least 4 MiB: the delta, its base and its result
-//	read of trees           the tree bytes read so far, 8 bytes of views and JSON for each, and 16 MiB of slack; grown as trees are met
+//	read of trees           the tree bytes read so far, 8 bytes of views and JSON for each, and 8 MiB of slack, which holds the read-ahead; grown as trees are met
 //	read of one op          8 MiB data, its base64 text and the encoder buffer
 //	read of one object or blob batch
 //	                        16 MiB data, its base64 text, and an encoder buffer that has doubled once
@@ -59,8 +59,8 @@ var (
 	// some slack.
 	decodeWindow int64 = 24 << 20
 	// treeReserve is the first reservation of a tree read, and treeSlack the fixed part of every later one.
-	treeReserve int64 = 48 << 20
-	treeSlack   int64 = 16 << 20
+	treeReserve int64 = 8 << 20
+	treeSlack   int64 = 8 << 20
 )
 
 // treeCost is the reservation of a tree read that holds treeBytes of tree data.
