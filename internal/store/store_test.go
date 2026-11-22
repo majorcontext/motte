@@ -749,3 +749,22 @@ func TestAnotherRequestCannotPushOutWhatAPrefetchKept(t *testing.T) {
 		t.Errorf("reading %d prefetched objects after another request read 8 MiB made %d range reads; it must make none", len(mine), got)
 	}
 }
+
+func TestAWrittenCommitAndTreeNeedNoRangeRead(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	tree := append([]byte("100644 a\x00"), make([]byte, 20)...)
+	names, err := w.svc.PutObjects(t.Context(), repo, []gitpack.Object{{Type: gitpack.Commit, Data: []byte("tree x\n\nm\n")}, {Type: gitpack.Tree, Data: tree}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := w.svc.CacheStats().RangeReads
+	for _, name := range names {
+		if _, _, err := w.svc.Get(t.Context(), repo, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := w.svc.CacheStats().RangeReads - before; got != 0 {
+		t.Errorf("reading the commit and tree that a put just wrote made %d range reads; it must make none", got)
+	}
+}

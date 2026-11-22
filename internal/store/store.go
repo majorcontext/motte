@@ -59,6 +59,10 @@ const (
 	// keep, the most that the read-ahead of a request holds.
 	inFlightBytes  = 2 << 20
 	ReadAheadBytes = inFlightBytes + aheadKeep
+	// maxObjectCacheBytes is the memory of the cache of commits and trees.
+	maxObjectCacheBytes = 64 << 20
+	// maxCachedObject is the largest commit or tree that the cache keeps.
+	maxCachedObject = 64 << 10
 	// readWorkers bounds the concurrent bucket reads of one prefetch or one batched lookup.
 	readWorkers = 16
 	// treeAhead is the trees of a bulk tree read that one prefetch reads in advance.
@@ -119,6 +123,7 @@ type Service struct {
 	inline *semaphore.Weighted
 
 	icache *lru
+	ocache *lru
 	loads  singleflight.Group
 	maint  sync.Map
 	stats  maintStats
@@ -194,7 +199,7 @@ func (s *Service) tryReserveInline(bytes int64) (release func()) {
 }
 
 func New(st bucket.Store, index PackIndex, opts ...Option) *Service {
-	s := &Service{st: st, index: index, clk: clock.Real(), grace: DefaultGrace, open: map[string]*openPack{}, budget: semaphore.NewWeighted(MemoryBudget), inline: semaphore.NewWeighted(inlineBudget), icache: newLRU(maxIndexBytes)}
+	s := &Service{st: st, index: index, clk: clock.Real(), grace: DefaultGrace, open: map[string]*openPack{}, budget: semaphore.NewWeighted(MemoryBudget), inline: semaphore.NewWeighted(inlineBudget), icache: newLRU(maxIndexBytes), ocache: newLRU(maxObjectCacheBytes)}
 	for _, o := range opts {
 		o(s)
 	}
@@ -269,6 +274,7 @@ func (s *Service) PutObjects(ctx context.Context, repo Repo, objs []gitpack.Obje
 	if err := s.putPack(ctx, repo, hex.EncodeToString(sum[:]), idx, pack); err != nil {
 		return nil, err
 	}
+	s.keepObjects(repo, objs, names)
 	return names, nil
 }
 
@@ -319,9 +325,13 @@ func (s *Service) ReceivePack(ctx context.Context, repo Repo, pack []byte, held 
 	case len(objs) == 0:
 		return nil
 	}
-	built, idx, _ := gitpack.Build(objs)
+	built, idx, names := gitpack.Build(objs)
 	sum := sha256.Sum256(built)
-	return s.putPack(ctx, repo, hex.EncodeToString(sum[:]), idx, built)
+	if err := s.putPack(ctx, repo, hex.EncodeToString(sum[:]), idx, built); err != nil {
+		return err
+	}
+	s.keepObjects(repo, objs, names)
+	return nil
 }
 
 func (s *Service) putPack(ctx context.Context, repo Repo, id string, idx, pack []byte) error {
@@ -546,6 +556,9 @@ func (v *view) get(ctx context.Context, sha gitpack.SHA) (gitpack.Type, []byte, 
 // getSized is get that tells before the size of the object, from the pack header, so a caller can reserve memory
 // before the object is inflated.
 func (v *view) getSized(ctx context.Context, sha gitpack.SHA, before func(size int64) error) (gitpack.Type, []byte, error) {
+	if t, d, ok := v.s.cached(v.prefix, sha); ok {
+		return t, d, nil
+	}
 	p, err := v.find(ctx, sha)
 	if err != nil {
 		return 0, nil, err
@@ -564,6 +577,9 @@ func (v *view) getSized(ctx context.Context, sha gitpack.SHA, before func(size i
 	}
 	t, d, depth, err := p.GetDepth(sha)
 	statsFrom(ctx).object(len(d), depth)
+	if err == nil {
+		v.s.keepObject(v.prefix, sha, t, d)
+	}
 	switch {
 	case errors.Is(err, gitpack.ErrNotFound):
 		return 0, nil, v.missing()
@@ -573,6 +589,42 @@ func (v *view) getSized(ctx context.Context, sha gitpack.SHA, before func(size i
 		return 0, nil, ErrInvalid
 	}
 	return t, d, err
+}
+
+type objKey struct {
+	prefix string
+	sha    gitpack.SHA
+}
+
+type cachedObject struct {
+	t    gitpack.Type
+	data []byte
+}
+
+// cached returns a commit or tree that an earlier read or write kept. The caller never changes the data.
+func (s *Service) cached(prefix string, sha gitpack.SHA) (gitpack.Type, []byte, bool) {
+	o, ok := s.ocache.get(objKey{prefix, sha})
+	if !ok {
+		return 0, nil, false
+	}
+	c := o.(cachedObject)
+	return c.t, c.data, true
+}
+
+func (s *Service) keepObject(prefix string, sha gitpack.SHA, t gitpack.Type, data []byte) {
+	if (t == gitpack.Commit || t == gitpack.Tree) && len(data) <= maxCachedObject {
+		s.ocache.put(objKey{prefix, sha}, cachedObject{t, data}, len(data)+96)
+	}
+}
+
+func (s *Service) keepObjects(repo Repo, objs []gitpack.Object, names []gitpack.SHA) {
+	prefix, err := repoPrefix(repo)
+	if err != nil {
+		return
+	}
+	for i, o := range objs {
+		s.keepObject(prefix, names[i], o.Type, o.Data)
+	}
 }
 
 func (s *Service) Get(ctx context.Context, repo Repo, sha gitpack.SHA) (gitpack.Type, []byte, error) {
@@ -618,6 +670,7 @@ func (r *Reader) Prefetch(ctx context.Context, shas []gitpack.SHA) {
 	sorted := slices.Clone(shas)
 	slices.SortFunc(sorted, func(a, b gitpack.SHA) int { return bytes.Compare(a[:], b[:]) })
 	sorted = slices.Compact(sorted)
+	sorted = slices.DeleteFunc(sorted, func(sha gitpack.SHA) bool { _, _, ok := r.v.s.cached(r.v.prefix, sha); return ok })
 	byPack, _ := r.v.place(ctx, sorted)
 	var g errgroup.Group
 	g.SetLimit(readWorkers)
