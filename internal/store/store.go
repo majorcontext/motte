@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -54,6 +55,10 @@ const (
 	// while requests hold the whole of MemoryBudget still merges its tail.
 	inlineBudget = 64 << 20
 	blockTimeout = 30 * time.Second
+	// readWorkers bounds the concurrent bucket reads of one prefetch or one batched lookup.
+	readWorkers = 16
+	// treeAhead is the trees of a bulk tree read that one prefetch reads in advance.
+	treeAhead = 256
 )
 
 // Repo names a repository as <prefix>:<path>.
@@ -576,18 +581,26 @@ func (r *Reader) GetSized(ctx context.Context, sha gitpack.SHA, before func(size
 	return r.v.getSized(ctx, sha, before)
 }
 
-// Prefetch reads the pack bytes that Get of shas will need, in few large ranges. It skips what it cannot place, and a
-// failed read is left to the Get that needs it.
+// Prefetch reads the pack bytes that Get of shas will need, in few large ranges that it reads at most readWorkers at
+// a time. It skips what it cannot place, and a failed read is left to the Get that needs it.
 func (r *Reader) Prefetch(ctx context.Context, shas []gitpack.SHA) {
-	byPack := map[*openPack][]int64{}
-	for _, sha := range shas {
-		if e, _, _, off, err := r.v.locate(ctx, sha); err == nil {
-			byPack[e] = append(byPack[e], off)
+	sorted := slices.Clone(shas)
+	slices.SortFunc(sorted, func(a, b gitpack.SHA) int { return bytes.Compare(a[:], b[:]) })
+	sorted = slices.Compact(sorted)
+	byPack, _ := r.v.place(ctx, sorted)
+	var g errgroup.Group
+	g.SetLimit(readWorkers)
+	for e, offs := range byPack {
+		for _, run := range e.b.plan(offs) {
+			g.Go(func() error {
+				if ctx.Err() == nil {
+					_ = e.b.fetchRun(ctx, run)
+				}
+				return nil
+			})
 		}
 	}
-	for e, offs := range byPack {
-		e.b.prefetch(ctx, offs)
-	}
+	_ = g.Wait()
 }
 
 // Has reports for each sha whether the repo holds it, from the pack indexes only.
@@ -685,9 +698,14 @@ func (s *Service) TreeBulk(ctx context.Context, repo Repo, sha gitpack.SHA, maxE
 	var out []Tree
 	queue := []gitpack.SHA{sha}
 	total, held := 0, int64(0)
-	for len(queue) > 0 && (len(out) == 0 || total < maxEntries) {
-		cur := queue[0]
-		queue = queue[1:]
+	rd := &Reader{v}
+	ahead := 0
+	for k := 0; k < len(queue) && (len(out) == 0 || total < maxEntries); k++ {
+		if k == ahead {
+			ahead = min(k+treeAhead, len(queue))
+			rd.Prefetch(ctx, queue[k:ahead])
+		}
+		cur := queue[k]
 		size, err := v.size(ctx, cur)
 		if err != nil {
 			return nil, err
@@ -723,6 +741,7 @@ func (s *Service) TreeBulk(ctx context.Context, repo Repo, sha gitpack.SHA, maxE
 
 func (v *view) parseTree(ctx context.Context, sha gitpack.SHA, data []byte) (Tree, error) {
 	tree := Tree{SHA: sha}
+	var blobs []gitpack.SHA
 	for len(data) > 0 {
 		if err := ctx.Err(); err != nil {
 			return Tree{}, err
@@ -739,16 +758,29 @@ func (v *view) parseTree(ctx context.Context, sha gitpack.SHA, data []byte) (Tre
 		e := Entry{Name: string(data[sp+1 : nul]), Mode: mode}
 		copy(e.SHA[:], data[nul+1:nul+21])
 		if mode != 0o40000 && mode != 0o160000 {
-			p, err := v.find(ctx, e.SHA)
-			if err != nil {
-				return Tree{}, err
-			}
-			if e.Size, _, err = p.Size(e.SHA); err != nil {
-				return Tree{}, ErrNotFound
-			}
+			blobs = append(blobs, e.SHA)
 		}
 		tree.Entries = append(tree.Entries, e)
 		data = data[nul+21:]
+	}
+	rd := &Reader{v}
+	next := 0
+	for i := range tree.Entries {
+		e := &tree.Entries[i]
+		if e.Mode == 0o40000 || e.Mode == 0o160000 {
+			continue
+		}
+		if next%treeAhead == 0 {
+			rd.Prefetch(ctx, blobs[next:min(next+treeAhead, len(blobs))])
+		}
+		next++
+		p, err := v.find(ctx, e.SHA)
+		if err != nil {
+			return Tree{}, err
+		}
+		if e.Size, _, err = p.Size(e.SHA); err != nil {
+			return Tree{}, ErrNotFound
+		}
 	}
 	return tree, nil
 }

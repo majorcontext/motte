@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/coder/quartz"
@@ -286,6 +287,55 @@ func TestReadingSmallObjectsOfABigPackCostsFewSmallRanges(t *testing.T) {
 	if st := read(near, true); st.RangeReads > 2 || st.RangeBytes > 200*500 {
 		t.Fatalf("%d near objects cost %d range reads and %d bytes after a prefetch: near objects must share ranges", len(near), st.RangeReads, st.RangeBytes)
 	}
+}
+
+type slowBucket struct {
+	bucket.Store
+	wait func()
+}
+
+func (b slowBucket) GetRange(ctx context.Context, key string, off, n int64) ([]byte, error) {
+	b.wait()
+	return b.Store.GetRange(ctx, key, off, n)
+}
+
+func TestPrefetchReadsFarApartRangesAtTheSameTime(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	rng := rand.New(rand.NewPCG(3, 4))
+	objs := make([]gitpack.Object, 200)
+	for i := range objs {
+		data := make([]byte, 20<<10)
+		for j := range data {
+			data[j] = byte(rng.Uint32())
+		}
+		objs[i] = gitpack.Object{Type: gitpack.Blob, Data: data}
+	}
+	names, err := w.svc.PutObjects(t.Context(), repo, objs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var far []gitpack.SHA
+	for i := 0; i < len(names); i += 20 {
+		far = append(far, names[i])
+	}
+	synctest.Test(t, func(t *testing.T) {
+		svc := store.New(slowBucket{w.mem, func() { time.Sleep(20 * time.Millisecond) }}, w.meta, store.WithGrace(grace))
+		rd, err := svc.Reader(t.Context(), repo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		start := time.Now()
+		rd.Prefetch(t.Context(), far)
+		if d := time.Since(start); d > 100*time.Millisecond {
+			t.Fatalf("a prefetch of %d far apart ranges took %v of 20 ms reads: it must not read them one after another", len(far), d)
+		}
+		before := svc.CacheStats().RangeReads
+		rd.Prefetch(t.Context(), far)
+		if again := svc.CacheStats().RangeReads - before; again != 0 {
+			t.Fatalf("a second prefetch of the same objects made %d range reads; it must read none", again)
+		}
+	})
 }
 
 func TestACrashDuringMaintenanceLosesNothing(t *testing.T) {

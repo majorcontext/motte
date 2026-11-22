@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"encoding/binary"
 	"encoding/hex"
+	"slices"
 	"testing"
 )
 
@@ -97,6 +98,28 @@ func TestLookupFindsEveryRecordAndAnswersNoForOthers(t *testing.T) {
 	}
 	if _, ok, _ := d.Lookup(t.Context(), sha(1), 2, fetch); ok {
 		t.Error("a lookup in a pack that does not hold the object found it")
+	}
+	var names []SHA
+	for i := -1; i < 2400; i += 3 {
+		names = append(names, sha(i))
+	}
+	slices.SortFunc(names, func(a, b SHA) int { return bytes.Compare(a[:], b[:]) })
+	got, found, err := d.LookupMany(t.Context(), names, func(ctx context.Context, idx []int) ([][]byte, error) {
+		var out [][]byte
+		for _, i := range idx {
+			blk, _ := fetch(ctx, i)
+			out = append(out, blk)
+		}
+		return out, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, n := range names {
+		want, ok, _ := d.Lookup(t.Context(), n, -1, fetch)
+		if found[i] != ok || got[i] != want {
+			t.Fatalf("batched lookup of %x = %+v, %v; want %+v, %v", n, got[i], found[i], want, ok)
+		}
 	}
 }
 

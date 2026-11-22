@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -167,6 +168,65 @@ func (s *Service) lookup(ctx context.Context, h *layerH, sha gitpack.SHA, ord in
 	}
 	r, ok, err := h.dir.Lookup(ctx, sha, ord, func(ctx context.Context, i int) ([]byte, error) { return s.block(ctx, h, i) })
 	return int(r.Ord), int64(r.Off), ok, err
+}
+
+// place finds the pack and offset of each name of shas, sorted and distinct, newest layer first. A layer probes its
+// names in one pass and reads each block of records once, at most readWorkers at a time.
+func (v *view) place(ctx context.Context, shas []gitpack.SHA) (map[*openPack][]int64, error) {
+	out := map[*openPack][]int64{}
+	pending := slices.Clone(shas)
+	for i := len(v.layers) - 1; i >= 0 && len(pending) > 0; i-- {
+		h, err := v.s.layer(ctx, v.prefix, v.layers[i])
+		if err != nil {
+			return nil, err
+		}
+		keep := pending[:0]
+		if h.idx != nil {
+			for _, sha := range pending {
+				if off, ok := h.idx.Lookup(sha); ok {
+					e := v.s.openPack(v.prefix, h.packs[0])
+					out[e] = append(out[e], off)
+				} else {
+					keep = append(keep, sha)
+				}
+			}
+			pending = keep
+			continue
+		}
+		names := make([]midx.SHA, len(pending))
+		for j, sha := range pending {
+			names[j] = sha
+		}
+		recs, found, err := h.dir.LookupMany(ctx, names, func(ctx context.Context, idx []int) ([][]byte, error) {
+			return v.s.blocks(ctx, h, idx)
+		})
+		if err != nil {
+			return nil, err
+		}
+		for j, sha := range pending {
+			if found[j] {
+				e := v.s.openPack(v.prefix, h.packs[recs[j].Ord])
+				out[e] = append(out[e], int64(recs[j].Off))
+			} else {
+				keep = append(keep, sha)
+			}
+		}
+		pending = keep
+	}
+	return out, nil
+}
+
+func (s *Service) blocks(ctx context.Context, h *layerH, idx []int) ([][]byte, error) {
+	out := make([][]byte, len(idx))
+	var g errgroup.Group
+	g.SetLimit(readWorkers)
+	for i, b := range idx {
+		g.Go(func() (err error) {
+			out[i], err = s.block(ctx, h, b)
+			return err
+		})
+	}
+	return out, g.Wait()
 }
 
 func (s *Service) block(ctx context.Context, h *layerH, i int) ([]byte, error) {

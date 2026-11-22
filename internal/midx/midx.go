@@ -279,3 +279,61 @@ func (d *Dir) Lookup(ctx context.Context, s SHA, ord int, fetch Fetch) (Record, 
 	}
 	return Record{}, false, nil
 }
+
+// FetchMany returns the records of the blocks in idx, in the same order.
+type FetchMany func(ctx context.Context, idx []int) ([][]byte, error)
+
+// LookupMany is Lookup of every name of shas in any pack. shas are sorted and distinct. It tests the filter and walks
+// the block fences once for the whole list, and asks fetch for each needed block once.
+func (d *Dir) LookupMany(ctx context.Context, shas []SHA, fetch FetchMany) ([]Record, []bool, error) {
+	recs, found := make([]Record, len(shas)), make([]bool, len(shas))
+	nb := d.Blocks()
+	var at, of, blocks []int
+	lo := 0
+	for i, s := range shas {
+		if !d.MayContain(s) {
+			continue
+		}
+		want := Record{SHA: s}
+		lo += sort.Search(nb-lo, func(j int) bool { return getRecord(d.fence[RecordSize*(lo+j):]).compare(want) >= 0 })
+		if lo < nb {
+			if r := getRecord(d.fence[RecordSize*lo:]); r.SHA == s {
+				recs[i], found[i] = r, true
+				continue
+			}
+		}
+		if lo == 0 {
+			continue
+		}
+		at, of = append(at, i), append(of, lo-1)
+		if len(blocks) == 0 || blocks[len(blocks)-1] != lo-1 {
+			blocks = append(blocks, lo-1)
+		}
+	}
+	if len(at) == 0 {
+		return recs, found, nil
+	}
+	data, err := fetch(ctx, blocks)
+	if err != nil {
+		return nil, nil, err
+	}
+	b := 0
+	for k, i := range at {
+		want := Record{SHA: shas[i]}
+		for blocks[b] < of[k] {
+			b++
+		}
+		blk := data[b]
+		if len(blk)%RecordSize != 0 {
+			return nil, nil, ErrCorrupt
+		}
+		n := len(blk) / RecordSize
+		j := sort.Search(n, func(j int) bool { return getRecord(blk[RecordSize*j:]).compare(want) >= 0 })
+		if j < n {
+			if r := getRecord(blk[RecordSize*j:]); r.SHA == shas[i] {
+				recs[i], found[i] = r, true
+			}
+		}
+	}
+	return recs, found, nil
+}

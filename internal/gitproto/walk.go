@@ -197,6 +197,7 @@ func (c *collector) collect(wants, haves []gitpack.SHA) ([]gitpack.SHA, error) {
 		}
 	}
 	var trees []gitpack.SHA
+	var edges []gitpack.SHA
 	for _, n := range picked {
 		if n.unint {
 			continue
@@ -205,16 +206,15 @@ func (c *collector) collect(wants, haves []gitpack.SHA) ([]gitpack.SHA, error) {
 		trees = append(trees, n.tree)
 		for _, p := range n.parents {
 			if pn := c.commits[p]; pn.unint {
-				if err := c.walkTree(pn.tree, c.skip, nil); err != nil {
-					return nil, err
-				}
+				edges = append(edges, pn.tree)
 			}
 		}
 	}
-	for _, t := range trees {
-		if err := c.walkTree(t, c.sent, c.add); err != nil {
-			return nil, err
-		}
+	if err := c.walkTrees(edges, c.skip, nil); err != nil {
+		return nil, err
+	}
+	if err := c.walkTrees(trees, c.sent, c.add); err != nil {
+		return nil, err
 	}
 	return c.out, nil
 }
@@ -245,7 +245,7 @@ func (c *collector) want(sha gitpack.SHA, depth int) error {
 		}
 		return c.want(target, depth+1)
 	case gitpack.Tree:
-		return c.walkTree(sha, c.sent, c.add)
+		return c.walkTrees([]gitpack.SHA{sha}, c.sent, c.add)
 	}
 	c.add(sha)
 	return nil
@@ -261,9 +261,10 @@ func (c *collector) add(sha gitpack.SHA) {
 	}
 }
 
-// walkTree records the tree and what it holds in seen, once for each object. A tree is recorded when it is queued, so
-// the queue holds each tree once and counts toward the bound. add, when set, takes each new object in place of seen.
-func (c *collector) walkTree(root gitpack.SHA, seen map[gitpack.SHA]struct{}, add func(gitpack.SHA)) error {
+// walkTrees records the trees of roots and what they hold in seen, once for each object, one level of trees at a time.
+// A tree is recorded when it is queued, so a level holds each tree once and counts toward the bound. add, when set,
+// takes each new object in place of seen. Objects reach add level by level.
+func (c *collector) walkTrees(roots []gitpack.SHA, seen map[gitpack.SHA]struct{}, add func(gitpack.SHA)) error {
 	record := func(sha gitpack.SHA) bool {
 		if _, ok := seen[sha]; ok {
 			return false
@@ -278,46 +279,86 @@ func (c *collector) walkTree(root gitpack.SHA, seen map[gitpack.SHA]struct{}, ad
 		}
 		return true
 	}
-	if !record(root) {
-		return nil
+	var level []gitpack.SHA
+	for _, r := range roots {
+		if record(r) {
+			level = append(level, r)
+		}
 	}
-	stack := []gitpack.SHA{root}
-	for len(stack) > 0 {
-		sha := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		t, data, err := c.objs.Get(c.ctx, sha)
-		if err != nil {
-			return err
-		}
-		if t != gitpack.Tree {
-			return errMalformed
-		}
-		first := len(stack)
-		err = forEachEntry(data, func(mode uint32, child gitpack.SHA) {
-			if c.tracked() {
-				return
+	for len(level) > 0 {
+		var next []gitpack.SHA
+		err := c.eachAhead(level, func(sha gitpack.SHA) error {
+			t, data, err := c.objs.Get(c.ctx, sha)
+			if err != nil {
+				return err
 			}
-			switch {
-			case mode == 0o160000:
-			case mode == 0o40000:
-				if record(child) {
-					stack = append(stack, child)
+			if t != gitpack.Tree {
+				return errMalformed
+			}
+			err = forEachEntry(data, func(mode uint32, child gitpack.SHA) {
+				if c.tracked() {
+					return
 				}
-			case !c.blobNone || add == nil:
-				record(child)
+				switch {
+				case mode == 0o160000:
+				case mode == 0o40000:
+					if record(child) {
+						next = append(next, child)
+					}
+				case !c.blobNone || add == nil:
+					record(child)
+				}
+			})
+			if err != nil {
+				return err
 			}
+			if c.tracked() {
+				return ErrTooLarge
+			}
+			return nil
 		})
 		if err != nil {
 			return err
 		}
-		if c.tracked() {
-			return ErrTooLarge
-		}
-		if pf, ok := c.objs.(Prefetcher); ok && len(stack)-first > 1 {
-			for kids := stack[first:]; len(kids) > 0; kids = kids[min(prefetchBatch, len(kids)):] {
-				pf.Prefetch(c.ctx, kids[:min(prefetchBatch, len(kids))])
+		level = next
+	}
+	return nil
+}
+
+// eachAhead calls fn for each sha in order. While it runs fn on one batch, the objects reader reads the next batch in
+// advance.
+func (c *collector) eachAhead(shas []gitpack.SHA, fn func(gitpack.SHA) error) error {
+	pf, ok := c.objs.(Prefetcher)
+	if !ok {
+		for _, sha := range shas {
+			if err := fn(sha); err != nil {
+				return err
 			}
 		}
+		return nil
+	}
+	ahead := func(batch []gitpack.SHA) chan struct{} {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			if len(batch) > 1 {
+				pf.Prefetch(c.ctx, batch)
+			}
+		}()
+		return done
+	}
+	batch := func(i int) []gitpack.SHA { return shas[min(i, len(shas)):min(i+prefetchBatch, len(shas))] }
+	cur := ahead(batch(0))
+	for i := 0; i < len(shas); i += prefetchBatch {
+		nxt := ahead(batch(i + prefetchBatch))
+		<-cur
+		for _, sha := range batch(i) {
+			if err := fn(sha); err != nil {
+				<-nxt
+				return err
+			}
+		}
+		cur = nxt
 	}
 	return nil
 }

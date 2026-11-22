@@ -26,12 +26,35 @@ func writePack(ctx context.Context, w io.Writer, objs Objects, shas []gitpack.SH
 		return err
 	}
 	pf, _ := objs.(Prefetcher)
+	var cur, nxt chan struct{}
+	ahead := func(from int) chan struct{} {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			if pf != nil && from < len(shas) {
+				pf.Prefetch(ctx, shas[from:min(from+prefetchBatch, len(shas))])
+			}
+		}()
+		return done
+	}
+	defer func() {
+		for _, ch := range []chan struct{}{cur, nxt} {
+			if ch != nil {
+				<-ch
+			}
+		}
+	}()
 	for i, sha := range shas {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if pf != nil && i%prefetchBatch == 0 {
-			pf.Prefetch(ctx, shas[i:min(i+prefetchBatch, len(shas))])
+		if i%prefetchBatch == 0 {
+			if cur == nil {
+				cur = ahead(i)
+			}
+			nxt = ahead(i + prefetchBatch)
+			<-cur
+			cur, nxt = nxt, nil
 		}
 		t, data, err := objs.Get(ctx, sha)
 		if err != nil {

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"slices"
@@ -101,8 +102,8 @@ func (b *packReader) cover(start, end int64) []byte {
 	return nil
 }
 
-// fetch reads [off, end) of the pack, keeps it and returns it.
-func (b *packReader) fetch(ctx context.Context, off, end int64) ([]byte, error) {
+// read reads [off, end) of the pack from the object store.
+func (b *packReader) read(ctx context.Context, off, end int64) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, blockTimeout)
 	defer cancel()
 	ctx, sp := tracer.Start(ctx, "vcs.pack.read", trace.WithAttributes(attribute.Int64("offset", off), attribute.Int64("range_bytes", end-off)))
@@ -112,9 +113,11 @@ func (b *packReader) fetch(ctx context.Context, off, end int64) ([]byte, error) 
 	b.svc.rangeBytes.Add(int64(len(d)))
 	sp.SetAttributes(attribute.Int("bytes", len(d)))
 	finishSpan(sp, err)
-	if err != nil {
-		return nil, err
-	}
+	return d, err
+}
+
+// keep adds the range that starts at off, and drops the oldest ranges while the reader holds too much.
+func (b *packReader) keep(off int64, d []byte) {
 	b.mu.Lock()
 	for b.held+len(d) > maxSpanBytes && len(b.spans) > 0 {
 		b.held -= len(b.spans[0].data)
@@ -127,28 +130,67 @@ func (b *packReader) fetch(ctx context.Context, off, end int64) ([]byte, error) 
 	if b.changed != nil {
 		b.changed()
 	}
+}
+
+// fetch reads [off, end) of the pack, keeps it and returns it.
+func (b *packReader) fetch(ctx context.Context, off, end int64) ([]byte, error) {
+	d, err := b.read(ctx, off, end)
+	if err != nil {
+		return nil, err
+	}
+	b.keep(off, d)
 	return d, nil
 }
 
-// prefetch reads the bytes of the objects at offs in as few ranges as it can: it joins objects that lie within
-// spanGap of each other, and it stops after it has read half of what the reader keeps.
-func (b *packReader) prefetch(ctx context.Context, offs []int64) {
+// prefetchRun is one read of Prefetch and the objects that it serves.
+type prefetchRun struct {
+	start, end int64
+	offs       []int64
+}
+
+// fetchRun reads the run and keeps the minRead bytes at each object, not the gaps that the read closed.
+func (b *packReader) fetchRun(ctx context.Context, r prefetchRun) error {
+	d, err := b.read(ctx, r.start, r.end)
+	if err != nil {
+		return err
+	}
+	if int64(len(d)) != r.end-r.start {
+		return io.ErrUnexpectedEOF
+	}
+	for i := 0; i < len(r.offs); {
+		from, to := r.offs[i], min(r.offs[i]+minRead, r.end)
+		for i++; i < len(r.offs) && r.offs[i] <= to; i++ {
+			to = min(max(to, r.offs[i]+minRead), r.end)
+		}
+		if from == r.start && to == r.end {
+			b.keep(from, d)
+			continue
+		}
+		b.keep(from, bytes.Clone(d[from-r.start:min(to-r.start, int64(len(d)))]))
+	}
+	return nil
+}
+
+// plan joins the objects at offs into the ranges that Prefetch reads: it joins objects that lie within spanGap of each
+// other, skips what the reader keeps, and stops after half of what the reader keeps.
+func (b *packReader) plan(offs []int64) []prefetchRun {
 	slices.Sort(offs)
+	offs = slices.DeleteFunc(offs, func(o int64) bool { return b.cover(o, min(o+minRead, b.size)) != nil })
+	var runs []prefetchRun
 	budget := int64(maxSpanBytes / 2)
-	for i := 0; i < len(offs) && budget > 0 && ctx.Err() == nil; {
-		start := offs[i]
+	for i := 0; i < len(offs) && budget > 0; {
+		i0, start := i, offs[i]
 		end := min(start+minRead, b.size)
 		j := i + 1
 		for ; j < len(offs) && offs[j] <= end+spanGap && min(offs[j]+minRead, b.size)-start <= maxRun; j++ {
 			end = max(end, min(offs[j]+minRead, b.size))
 		}
 		i = j
-		if start >= end || b.cover(start, end) != nil {
+		if start >= end {
 			continue
 		}
-		if _, err := b.fetch(ctx, start, end); err != nil {
-			return
-		}
-		budget -= end - start
+		runs = append(runs, prefetchRun{start, end, offs[i0:i]})
+		budget -= int64(i-i0) * minRead
 	}
+	return runs
 }
