@@ -398,7 +398,7 @@ func (s *Service) compactRun(ctx context.Context, repo Repo, layers []midx.Entry
 	}
 	need := total + biggest + 3*int64(midx.RecordSize)*int64(r.objects()) + 4<<20
 	class := layers[0].Class
-	splitNeed := need + 2*total + splitEntryBytes*int64(r.objects())
+	splitNeed := need + 2*total + splitEntryBytes*int64(r.objects()) + 2*gitpack.MaxObjectBytes
 	split := class != midx.ClassBlob && splitNeed <= MemoryBudget/2
 	if split {
 		need = splitNeed
