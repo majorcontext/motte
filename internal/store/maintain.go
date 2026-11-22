@@ -96,6 +96,23 @@ func (s *Service) mergeTail(ctx context.Context, repo Repo) {
 	_, _ = s.mergeOnce(ctx, repo, inlineMaxObjects, true)
 }
 
+// planByClass applies plan to the layers of each class in turn, and returns the layers of the first plan. A layer of
+// one class never merges or compacts with a layer of another, so a class keeps its own geometric sizes.
+func planByClass(layers []midx.Entry, plan func([]midx.Entry) (midx.Plan, bool)) ([]midx.Entry, bool) {
+	for _, class := range []string{"", midx.ClassMeta, midx.ClassBlob} {
+		var sub []midx.Entry
+		for _, e := range layers {
+			if e.Class == class {
+				sub = append(sub, e)
+			}
+		}
+		if p, ok := plan(sub); ok {
+			return sub[p.Lo:p.Hi], true
+		}
+	}
+	return nil, false
+}
+
 // Maintain does one bounded pass over repo: it adds the packs that the manifest lacks, compacts packs, merges layers
 // and deletes the retired files whose grace has passed. It repeats the compactions and the merges until no run is left
 // or maintainBudget has passed, so a burst of writes does not outrun it. Every step ends in one compare and swap of the
@@ -210,11 +227,11 @@ func (s *Service) mergeOnce(ctx context.Context, repo Repo, maxObjects int, try 
 	if err != nil {
 		return false, err
 	}
-	p, ok := midx.PlanMerge(m.Layers, maxObjects, maxFanIn)
+	run, ok := planByClass(m.Layers, func(l []midx.Entry) (midx.Plan, bool) { return midx.PlanMerge(l, maxObjects, maxFanIn) })
 	if !ok {
 		return false, nil
 	}
-	err = s.mergeRun(ctx, repo, m.Layers[p.Lo:p.Hi], try)
+	err = s.mergeRun(ctx, repo, run, try)
 	if errors.Is(err, errStale) {
 		return false, nil
 	}
@@ -226,41 +243,45 @@ func (s *Service) compactOnce(ctx context.Context, repo Repo) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	p, ok := midx.PlanCompact(m.Layers, CompactMaxBytes, MaxLayerObjects, maxFanIn)
+	run, ok := planByClass(m.Layers, func(l []midx.Entry) (midx.Plan, bool) {
+		return midx.PlanCompact(l, CompactMaxBytes, MaxLayerObjects, maxFanIn)
+	})
 	if !ok {
 		return false, nil
 	}
-	err = s.compactRun(ctx, repo, m.Layers[p.Lo:p.Hi])
+	err = s.compactRun(ctx, repo, run)
 	if errors.Is(err, errStale) {
 		return false, nil
 	}
 	return err == nil, err
 }
 
-// replace swaps the run of layers old, found by key, for one new layer. It records the files in retire first, so a crash
-// leaves a file that is retired and still held, which collect forgets, and never a file that is dropped and not
-// retired.
-func (s *Service) replace(ctx context.Context, repo Repo, old []midx.Entry, add midx.Entry, retire []string) error {
+// replace swaps the layers old, found by key, for the layers add. The new layers take the place of the newest of old.
+// It records the files in retire first, so a crash leaves a file that is retired and still held, which collect
+// forgets, and never a file that is dropped and not retired.
+func (s *Service) replace(ctx context.Context, repo Repo, old []midx.Entry, add []midx.Entry, retire []string) error {
 	if err := s.index.RetireFiles(ctx, repo.String(), retire, s.clk.Now()); err != nil {
 		return err
 	}
+	gone := map[string]bool{}
+	for _, e := range old {
+		gone[e.Key] = true
+	}
 	return s.updateManifest(ctx, repo, func(m *midx.Manifest) (bool, error) {
-		lo := -1
-		for i := range m.Layers {
-			if m.Layers[i].Key == old[0].Key {
-				lo = i
-				break
+		var out []midx.Entry
+		found, at := 0, -1
+		for _, e := range m.Layers {
+			if gone[e.Key] {
+				found++
+				at = len(out)
+				continue
 			}
+			out = append(out, e)
 		}
-		if lo < 0 || lo+len(old) > len(m.Layers) {
+		if found != len(old) {
 			return false, errStale
 		}
-		for i, e := range old {
-			if m.Layers[lo+i].Key != e.Key {
-				return false, errStale
-			}
-		}
-		m.Layers = append(append(append([]midx.Entry{}, m.Layers[:lo]...), add), m.Layers[lo+len(old):]...)
+		m.Layers = append(append(append([]midx.Entry{}, out[:at]...), add...), out[at:]...)
 		return true, nil
 	})
 }
@@ -313,7 +334,7 @@ func (s *Service) mergeRun(ctx context.Context, repo Repo, layers []midx.Entry, 
 			retire = append(retire, e.Key)
 		}
 	}
-	if err := s.replace(ctx, repo, layers, entry, retire); err != nil {
+	if err := s.replace(ctx, repo, layers, []midx.Entry{entry}, retire); err != nil {
 		return err
 	}
 	s.stats.mergeRuns.Add(1)
@@ -328,7 +349,7 @@ func (s *Service) putLayer(ctx context.Context, repo Repo, prefix string, l midx
 	if _, err := s.st.Create(ctx, prefix+"/"+l.Key, l.Data); err != nil {
 		return midx.Entry{}, err
 	}
-	return midx.Entry{Key: l.Key, Objects: l.Objects, Bytes: r.bytes(), NPacks: len(r.packs), Size: int64(len(l.Data)), Dir: l.Dir}, nil
+	return midx.Entry{Key: l.Key, Objects: l.Objects, Bytes: r.bytes(), NPacks: len(r.packs), Size: int64(len(l.Data)), Dir: l.Dir, Class: r.layers[0].Class}, nil
 }
 
 // recordIters opens the record streams of the layers of a run, from the index of a pack or from a layer file.
@@ -342,6 +363,16 @@ func (s *Service) recordIters(ctx context.Context, r *run) ([]midx.Iter, error) 
 		out[i] = idxRecords{gitpack.NewIdxIter(ctx, h.entry.Objects, s.readLayer(h))}
 	}
 	return out, nil
+}
+
+// packOut is a pack that a compaction wrote, with its index files and its layer.
+type packOut struct {
+	id      string
+	pack    []byte
+	idx     []byte
+	layer   midx.Layer
+	class   string
+	objects int
 }
 
 func (s *Service) compactRun(ctx context.Context, repo Repo, layers []midx.Entry) error {
@@ -361,87 +392,119 @@ func (s *Service) compactRun(ctx context.Context, repo Repo, layers []midx.Entry
 	for _, p := range r.packs {
 		biggest = max(biggest, p.Bytes)
 	}
-	release, err := s.Reserve(ctx, total+biggest+3*int64(midx.RecordSize)*int64(r.objects())+4<<20)
+	need := total + biggest + 3*int64(midx.RecordSize)*int64(r.objects()) + 4<<20
+	class := layers[0].Class
+	if class != midx.ClassBlob {
+		need += 2 * total
+	}
+	release, err := s.Reserve(ctx, need)
 	if err != nil {
 		return err
 	}
 	defer release()
-	out := make([]byte, 12, total+16)
-	shift := make([]int64, len(r.packs))
-	count := 0
-	for u, p := range r.packs {
-		data, err := s.st.Get(ctx, prefix+"/"+p.ID+".pack")
-		if err != nil {
-			return mapNotFound(err)
+	var outs []packOut
+	if class == midx.ClassBlob {
+		var o packOut
+		if o, err = s.copyPacks(ctx, prefix, r); err == nil {
+			outs = []packOut{o}
 		}
-		n, err := packEntries(data, p.Bytes)
-		if err != nil {
-			return fmt.Errorf("store: pack %s: %w", p.ID, err)
-		}
-		shift[u] = int64(len(out) - 12)
-		out = append(out, data[12:len(data)-20]...)
-		count += n
+	} else {
+		outs, err = s.splitPacks(ctx, prefix, r)
 	}
-	if int64(len(out)) > midx.MaxOffset {
-		return errors.New("store: compacted pack is too large")
-	}
-	copy(out, "PACK")
-	binary.BigEndian.PutUint32(out[4:], 2)
-	binary.BigEndian.PutUint32(out[8:], uint32(count))
-	sum := sha1.Sum(out)
-	out = append(out, sum[:]...)
-	idSum := sha256.Sum256(out)
-	id := hex.EncodeToString(idSum[:])
-	ins, err := s.recordIters(ctx, r)
 	if err != nil {
 		return err
 	}
-	l, seen, err := midx.Merge(ctx, ins, []midx.Pack{{ID: id, Bytes: int64(len(out))}}, r.objects(), func(in int, rec midx.Record) (midx.Record, error) {
-		if int(rec.Ord) >= len(r.ords[in]) || rec.Off < 12 {
-			return rec, midx.ErrCorrupt
+	var entries []midx.Entry
+	var bytes int64
+	objects := 0
+	for _, o := range outs {
+		if err := s.claim(ctx, repo, o.id+".pack", o.id+".idx", o.layer.Key); err != nil {
+			return err
 		}
-		u := r.ords[in][rec.Ord]
-		off := int64(rec.Off) + shift[u]
-		if off >= int64(len(out))-20 {
-			return rec, midx.ErrCorrupt
+		for key, data := range map[string][]byte{o.id + ".pack": o.pack, o.id + ".idx": o.idx, o.layer.Key: o.layer.Data} {
+			if _, err := s.st.Create(ctx, prefix+"/"+key, data); err != nil {
+				return err
+			}
 		}
-		return midx.Record{SHA: rec.SHA, Off: uint32(off)}, nil
-	})
-	if err != nil {
-		return err
-	}
-	if seen != r.objects() {
-		return fmt.Errorf("store: compaction read %d records of %d", seen, r.objects())
-	}
-	idx, err := legacyIndex(ctx, l, sum)
-	if err != nil {
-		return err
-	}
-	if err := s.claim(ctx, repo, id+".pack", id+".idx", l.Key); err != nil {
-		return err
-	}
-	if _, err := s.st.Create(ctx, prefix+"/"+id+".pack", out); err != nil {
-		return err
-	}
-	if _, err := s.st.Create(ctx, prefix+"/"+id+".idx", idx); err != nil {
-		return err
-	}
-	entry := midx.Entry{Key: l.Key, Objects: l.Objects, Bytes: int64(len(out)), NPacks: 1, Size: int64(len(l.Data)), Dir: l.Dir}
-	if _, err := s.st.Create(ctx, prefix+"/"+l.Key, l.Data); err != nil {
-		return err
+		entries = append(entries, midx.Entry{Key: o.layer.Key, Objects: o.layer.Objects, Bytes: int64(len(o.pack)), NPacks: 1, Size: int64(len(o.layer.Data)), Dir: o.layer.Dir, Class: o.class})
+		bytes += int64(len(o.pack))
+		objects += o.objects
 	}
 	retire, err := s.retiredByCompaction(ctx, repo, prefix, r)
 	if err != nil {
 		return err
 	}
-	if err := s.replace(ctx, repo, layers, entry, retire); err != nil {
+	if err := s.replace(ctx, repo, layers, entries, retire); err != nil {
 		return err
 	}
-	_ = s.index.AddPack(ctx, repo.String(), id, int64(len(out)))
+	for _, o := range outs {
+		_ = s.index.AddPack(ctx, repo.String(), o.id, int64(len(o.pack)))
+	}
 	s.stats.compactRuns.Add(1)
-	s.stats.compactBytes.Add(int64(len(out)))
-	s.stats.compactObjects.Add(int64(count))
+	s.stats.compactBytes.Add(bytes)
+	s.stats.compactObjects.Add(int64(objects))
 	return nil
+}
+
+// finishPack seals the entries of a pack body, copied from sources, into a pack of count entries and its layer.
+func (s *Service) finishPack(ctx context.Context, body []byte, count int, class string, ins []midx.Iter, objects int, remap func(int, midx.Record) (midx.Record, error)) (packOut, int, error) {
+	if int64(len(body)) > midx.MaxOffset {
+		return packOut{}, 0, errors.New("store: compacted pack is too large")
+	}
+	copy(body, "PACK")
+	binary.BigEndian.PutUint32(body[4:], 2)
+	binary.BigEndian.PutUint32(body[8:], uint32(count))
+	sum := sha1.Sum(body)
+	body = append(body, sum[:]...)
+	idSum := sha256.Sum256(body)
+	id := hex.EncodeToString(idSum[:])
+	l, seen, err := midx.Merge(ctx, ins, []midx.Pack{{ID: id, Bytes: int64(len(body))}}, objects, remap)
+	if err != nil {
+		return packOut{}, 0, err
+	}
+	idx, err := legacyIndex(ctx, l, sum)
+	if err != nil {
+		return packOut{}, 0, err
+	}
+	return packOut{id: id, pack: body, idx: idx, layer: l, class: class, objects: count}, seen, nil
+}
+
+// copyPacks copies the entries of the packs of r, in order and unchanged, into one pack.
+func (s *Service) copyPacks(ctx context.Context, prefix string, r *run) (packOut, error) {
+	out := make([]byte, 12, r.bytes()+16)
+	shift := make([]int64, len(r.packs))
+	count := 0
+	for u, p := range r.packs {
+		data, err := s.st.Get(ctx, prefix+"/"+p.ID+".pack")
+		if err != nil {
+			return packOut{}, mapNotFound(err)
+		}
+		n, err := packEntries(data, p.Bytes)
+		if err != nil {
+			return packOut{}, fmt.Errorf("store: pack %s: %w", p.ID, err)
+		}
+		shift[u] = int64(len(out) - 12)
+		out = append(out, data[12:len(data)-20]...)
+		count += n
+	}
+	ins, err := s.recordIters(ctx, r)
+	if err != nil {
+		return packOut{}, err
+	}
+	o, seen, err := s.finishPack(ctx, out, count, midx.ClassBlob, ins, r.objects(), func(in int, rec midx.Record) (midx.Record, error) {
+		if int(rec.Ord) >= len(r.ords[in]) || rec.Off < 12 {
+			return rec, midx.ErrCorrupt
+		}
+		off := int64(rec.Off) + shift[r.ords[in][rec.Ord]]
+		if off >= int64(len(out)) {
+			return rec, midx.ErrCorrupt
+		}
+		return midx.Record{SHA: rec.SHA, Off: uint32(off)}, nil
+	})
+	if err == nil && seen != r.objects() {
+		err = fmt.Errorf("store: compaction read %d records of %d", seen, r.objects())
+	}
+	return o, err
 }
 
 // legacyIndex writes the v2 index of a compacted pack from its layer, so a release that reads packs by their own index

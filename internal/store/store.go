@@ -123,6 +123,7 @@ type Service struct {
 	open      map[string]*openPack
 	order     []string
 	openBytes int
+	metaBytes int
 	evicted   int
 
 	hits, misses, idxBytes, rangeReads, rangeBytes atomic.Int64
@@ -241,7 +242,7 @@ func (s *Service) GetOp(ctx context.Context, ws string, kind OpKind, id string) 
 	return data, mapNotFound(err)
 }
 
-// PutObjects stores objects as one pack and returns their names in order.
+// PutObjects stores objects as a metadata pack and a blob pack and returns their names in order.
 func (s *Service) PutObjects(ctx context.Context, repo Repo, objs []gitpack.Object) ([]gitpack.SHA, error) {
 	if len(objs) == 0 || len(objs) > MaxBatch {
 		return nil, ErrInvalid
@@ -259,12 +260,35 @@ func (s *Service) PutObjects(ctx context.Context, repo Repo, objs []gitpack.Obje
 	if size > MaxPackBytes {
 		return nil, ErrTooLarge
 	}
-	pack, idx, names := gitpack.Build(objs)
-	sum := sha256.Sum256(pack)
-	if err := s.putPack(ctx, repo, hex.EncodeToString(sum[:]), idx, pack); err != nil {
-		return nil, err
+	names := make([]gitpack.SHA, len(objs))
+	for i, o := range objs {
+		names[i] = gitpack.Hash(o.Type, o.Data)
 	}
-	return names, nil
+	return names, s.putObjects(ctx, repo, objs)
+}
+
+// putObjects stores objs as one pack of metadata and one pack of blobs, in one swap of the manifest.
+func (s *Service) putObjects(ctx context.Context, repo Repo, objs []gitpack.Object) error {
+	var meta, blobs []gitpack.Object
+	for _, o := range objs {
+		if o.Type == gitpack.Blob {
+			blobs = append(blobs, o)
+		} else {
+			meta = append(meta, o)
+		}
+	}
+	var files []packFile
+	for _, c := range []struct {
+		class string
+		objs  []gitpack.Object
+	}{{midx.ClassMeta, orderMeta(meta)}, {midx.ClassBlob, blobs}} {
+		if len(c.objs) > 0 {
+			pack, idx, _ := gitpack.Build(c.objs)
+			sum := sha256.Sum256(pack)
+			files = append(files, packFile{hex.EncodeToString(sum[:]), idx, pack, c.class})
+		}
+	}
+	return s.putPacks(ctx, repo, files...)
 }
 
 // ImportPack stores a pack and its v2 index under the SHA-256 of the pack.
@@ -295,7 +319,7 @@ func (s *Service) ImportPack(ctx context.Context, repo Repo, id string, idx, pac
 	return s.putPack(ctx, repo, id, idx, pack)
 }
 
-// ReceivePack stores the objects of a pushed pack as one pack of the repo. The pack may be thin: the service
+// ReceivePack stores the objects of a pushed pack as a metadata pack and a blob pack. The pack may be thin: the service
 // resolves the base of a ref delta from the repo, so the stored pack holds whole objects.
 func (s *Service) ReceivePack(ctx context.Context, repo Repo, pack []byte) error {
 	v, err := s.view(ctx, repo)
@@ -313,29 +337,43 @@ func (s *Service) ReceivePack(ctx context.Context, repo Repo, pack []byte) error
 	case len(objs) == 0:
 		return nil
 	}
-	built, idx, _ := gitpack.Build(objs)
-	sum := sha256.Sum256(built)
-	return s.putPack(ctx, repo, hex.EncodeToString(sum[:]), idx, built)
+	return s.putObjects(ctx, repo, objs)
+}
+
+type packFile struct {
+	id        string
+	idx, pack []byte
+	class     string
 }
 
 func (s *Service) putPack(ctx context.Context, repo Repo, id string, idx, pack []byte) error {
+	return s.putPacks(ctx, repo, packFile{id, idx, pack, ""})
+}
+
+func (s *Service) putPacks(ctx context.Context, repo Repo, files ...packFile) error {
 	prefix, err := repoPrefix(repo)
 	if err != nil {
 		return err
 	}
-	if err := s.claim(ctx, repo, id+".pack", id+".idx"); err != nil {
-		return err
+	for _, f := range files {
+		if err := s.claim(ctx, repo, f.id+".pack", f.id+".idx"); err != nil {
+			return err
+		}
 	}
 	var g errgroup.Group
-	g.Go(func() error { _, err := s.st.Create(ctx, prefix+"/"+id+".idx", idx); return err })
-	g.Go(func() error { _, err := s.st.Create(ctx, prefix+"/"+id+".pack", pack); return err })
+	for _, f := range files {
+		g.Go(func() error { _, err := s.st.Create(ctx, prefix+"/"+f.id+".idx", f.idx); return err })
+		g.Go(func() error { _, err := s.st.Create(ctx, prefix+"/"+f.id+".pack", f.pack); return err })
+	}
 	if err := g.Wait(); err != nil {
 		return err
 	}
-	if err := s.index.AddPack(ctx, repo.String(), id, int64(len(pack))); err != nil {
-		return err
+	for _, f := range files {
+		if err := s.index.AddPack(ctx, repo.String(), f.id, int64(len(f.pack))); err != nil {
+			return err
+		}
 	}
-	return s.appendPack(ctx, repo, id, int64(len(pack)), idx)
+	return s.appendPacks(ctx, repo, files)
 }
 
 type bytesReader []byte
@@ -361,6 +399,7 @@ type openPack struct {
 	// adds to Service.openBytes while cached is true.
 	charged int
 	cached  bool
+	meta    bool
 }
 
 // recharge sets the charge of e to its index plus its cached blocks and
@@ -373,6 +412,9 @@ func (s *Service) recharge(e *openPack) {
 	}
 	n := e.p.Bytes() + e.p.CachedBytes() + e.b.cachedBytes()
 	s.openBytes += n - e.charged
+	if e.meta {
+		s.metaBytes += n - e.charged
+	}
 	e.charged = n
 	for len(s.order) > 1 && s.openBytes > maxOpenBytes {
 		s.evict()
@@ -380,15 +422,27 @@ func (s *Service) recharge(e *openPack) {
 }
 
 func (s *Service) evict() {
-	old := s.open[s.order[0]]
+	at := 0
+	if s.metaBytes <= maxOpenBytes/4*3 {
+		for i, k := range s.order {
+			if !s.open[k].meta {
+				at = i
+				break
+			}
+		}
+	}
+	old := s.open[s.order[at]]
 	s.openBytes -= old.charged
+	if old.meta {
+		s.metaBytes -= old.charged
+	}
 	old.cached = false
 	s.evicted++
-	delete(s.open, s.order[0])
-	s.order = s.order[1:]
+	delete(s.open, s.order[at])
+	s.order = append(s.order[:at], s.order[at+1:]...)
 }
 
-func (s *Service) openPack(prefix string, ref midx.Pack) *openPack {
+func (s *Service) openPack(prefix string, ref midx.Pack, meta bool) *openPack {
 	key := prefix + "|" + ref.ID
 	s.mu.Lock()
 	if e, ok := s.open[key]; ok {
@@ -399,7 +453,7 @@ func (s *Service) openPack(prefix string, ref midx.Pack) *openPack {
 	s.mu.Unlock()
 	s.misses.Add(1)
 	br := &packReader{svc: s, st: s.st, key: prefix + "/" + ref.ID + ".pack", size: ref.Bytes}
-	e := &openPack{b: br, p: gitpack.NewAt(reqReader{b: br, ctx: context.Background()})}
+	e := &openPack{meta: meta, b: br, p: gitpack.NewAt(reqReader{b: br, ctx: context.Background()})}
 	br.changed = func() { s.recharge(e) }
 	e.p.OnCacheChange(func() { s.recharge(e) })
 	s.mu.Lock()
@@ -482,7 +536,7 @@ func (v *view) locate(ctx context.Context, sha gitpack.SHA) (*openPack, *layerH,
 			return nil, nil, 0, 0, err
 		}
 		if ok {
-			return v.s.openPack(v.prefix, h.packs[ord]), h, ord, off, nil
+			return v.s.openPack(v.prefix, h.packs[ord], h.entry.Class == midx.ClassMeta), h, ord, off, nil
 		}
 	}
 	return nil, nil, 0, 0, ErrNotFound

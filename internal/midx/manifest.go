@@ -20,7 +20,16 @@ type Entry struct {
 	Dir  int   `json:"d,omitempty"`
 	// Packs lists the pack of an index layer.
 	Packs []Pack `json:"p,omitempty"`
+	// Class is ClassMeta or ClassBlob when every pack of the layer holds only that class of object, and empty when a
+	// pack may hold both.
+	Class string `json:"c,omitempty"`
 }
+
+// The classes of a layer. Metadata is commits, trees and tags.
+const (
+	ClassMeta = "m"
+	ClassBlob = "b"
+)
 
 // IsIndex reports whether the layer is the v2 index of one pack.
 func (e Entry) IsIndex() bool { return strings.HasSuffix(e.Key, ".idx") }

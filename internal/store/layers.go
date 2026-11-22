@@ -184,7 +184,7 @@ func (v *view) place(ctx context.Context, shas []gitpack.SHA) (map[*openPack][]i
 		if h.idx != nil {
 			for _, sha := range pending {
 				if off, ok := h.idx.Lookup(sha); ok {
-					e := v.s.openPack(v.prefix, h.packs[0])
+					e := v.s.openPack(v.prefix, h.packs[0], h.entry.Class == midx.ClassMeta)
 					out[e] = append(out[e], off)
 				} else {
 					keep = append(keep, sha)
@@ -205,7 +205,7 @@ func (v *view) place(ctx context.Context, shas []gitpack.SHA) (map[*openPack][]i
 		}
 		for j, sha := range pending {
 			if found[j] {
-				e := v.s.openPack(v.prefix, h.packs[recs[j].Ord])
+				e := v.s.openPack(v.prefix, h.packs[recs[j].Ord], h.entry.Class == midx.ClassMeta)
 				out[e] = append(out[e], int64(recs[j].Off))
 			} else {
 				keep = append(keep, sha)
@@ -367,25 +367,40 @@ func (s *Service) updateManifest(ctx context.Context, repo Repo, f func(*midx.Ma
 	return fmt.Errorf("store: manifest of %s changes too fast", repo)
 }
 
-// appendPack adds the pack that putPack stored as the newest layer, and merges the small layers at the tail.
-func (s *Service) appendPack(ctx context.Context, repo Repo, id string, bytes int64, idx []byte) error {
-	n, err := gitpack.IdxCount(idx[:min(len(idx), gitpack.IdxHeadBytes)])
-	if err != nil {
-		return err
+// appendPacks adds the packs that putPacks stored as the newest layers, in one swap, and merges the small layers at
+// the tail.
+func (s *Service) appendPacks(ctx context.Context, repo Repo, files []packFile) error {
+	var add []midx.Entry
+	for _, f := range files {
+		n, err := gitpack.IdxCount(f.idx[:min(len(f.idx), gitpack.IdxHeadBytes)])
+		if err != nil {
+			return err
+		}
+		e := indexEntry(f.id, int64(len(f.pack)), n)
+		e.Class = f.class
+		add = append(add, e)
 	}
-	e := indexEntry(id, bytes, n)
-	err = s.updateManifest(ctx, repo, func(m *midx.Manifest) (bool, error) {
+	err := s.updateManifest(ctx, repo, func(m *midx.Manifest) (bool, error) {
+		held := map[string]bool{}
 		for _, l := range m.Layers {
-			if l.IsIndex() && l.Packs[0].ID == id {
-				return false, nil
+			if l.IsIndex() {
+				held[l.Packs[0].ID] = true
 			}
 		}
-		m.Layers = append(m.Layers, e)
-		return true, nil
+		changed := false
+		for _, e := range add {
+			if !held[e.Packs[0].ID] {
+				m.Layers = append(m.Layers, e)
+				changed = true
+			}
+		}
+		return changed, nil
 	})
 	if err != nil {
 		return err
 	}
-	s.mergeTail(ctx, repo)
+	for range files {
+		s.mergeTail(ctx, repo)
+	}
 	return nil
 }
