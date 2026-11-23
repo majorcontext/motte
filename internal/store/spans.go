@@ -204,7 +204,8 @@ const maxEntry = 256 << 10
 
 // fetchRun reads the run and keeps each object whole in a, from its header to the bound that the header gives, and not
 // the gaps that the read closed. release frees the bytes that the run holds in flight once its read ends, and the tail
-// of an object that runs past the end of the run is read after that, from flight.
+// of an object that runs past the end of the run is read after that, from flight, and kept as a range of its own that
+// follows the head.
 func (b *packReader) fetchRun(ctx context.Context, a *aheadBuf, r prefetchRun, release func(), flight *semaphore.Weighted) error {
 	d, err := b.read(ctx, r.start, r.end)
 	if err == nil && int64(len(d)) != r.end-r.start {
@@ -222,11 +223,7 @@ func (b *packReader) fetchRun(ctx context.Context, a *aheadBuf, r prefetchRun, r
 		}
 		ends[i] = min(o+need, b.size)
 	}
-	type tail struct {
-		from, to int64
-		head     []byte
-	}
-	var tails []tail
+	var tailTo int64
 	for i := 0; i < len(r.offs); {
 		from, to := r.offs[i], ends[i]
 		for i++; i < len(r.offs) && r.offs[i] <= to; i++ {
@@ -234,7 +231,8 @@ func (b *packReader) fetchRun(ctx context.Context, a *aheadBuf, r prefetchRun, r
 		}
 		switch {
 		case to > r.end:
-			tails = append(tails, tail{from, to, bytes.Clone(d[from-r.start:])})
+			tailTo = to
+			a.keep(b, from, bytes.Clone(d[from-r.start:]))
 		case from == r.start && to == r.end:
 			a.keep(b, from, d)
 		default:
@@ -242,18 +240,19 @@ func (b *packReader) fetchRun(ctx context.Context, a *aheadBuf, r prefetchRun, r
 		}
 	}
 	release()
-	for _, t := range tails {
-		n := t.to - r.end
-		if err := flight.Acquire(ctx, n); err != nil {
-			return err
-		}
-		x, err := b.read(ctx, r.end, t.to)
-		flight.Release(n)
-		if err != nil {
-			return err
-		}
-		a.keep(b, t.from, append(t.head, x...))
+	if tailTo == 0 {
+		return nil
 	}
+	n := tailTo - r.end
+	if err := flight.Acquire(ctx, n); err != nil {
+		return err
+	}
+	defer flight.Release(n)
+	x, err := b.read(ctx, r.end, tailTo)
+	if err != nil {
+		return err
+	}
+	a.keep(b, r.end, x)
 	return nil
 }
 

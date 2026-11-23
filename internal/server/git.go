@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"net/http"
 	"slices"
@@ -93,11 +94,21 @@ func pushCost(n, inflated int64) int64 {
 	return n + 3*inflated + 4*min(inflated, gitpack.MaxObjectBytes) + pushBase
 }
 
-// pushStep is the granule of the growing reservation of a push, and pushBase its fixed part.
+// pushStep is the granule of the growing reservation of a push, pushBase its fixed part, and pushPerObject the
+// bookkeeping of the unpack for each object that the header of the pack names.
 const (
-	pushStep = 1 << 20
-	pushBase = 2 << 20
+	pushStep      = 1 << 20
+	pushBase      = 2 << 20
+	pushPerObject = 512
 )
+
+// packObjects is the number of objects that the header of pack names.
+func packObjects(pack []byte) int64 {
+	if len(pack) < 12 {
+		return 0
+	}
+	return int64(binary.BigEndian.Uint32(pack[8:12]))
+}
 
 var errProtocolV2 = gitproto.RequestError("protocol v2 is required: use git 2.26 or later")
 
@@ -343,9 +354,14 @@ func (s *Server) receivePack(w http.ResponseWriter, r *http.Request, c call) err
 	if err != nil {
 		return err
 	}
-	unpackErr, err := s.storePush(r.Context(), c, push, func(inflated int64) error {
-		return hold.grow(pushCost(bodyLen, (inflated+pushStep-1)/pushStep*pushStep))
-	})
+	objects := packObjects(push.Pack)
+	need := func(inflated int64) error {
+		return hold.grow(pushCost(bodyLen, (inflated+pushStep-1)/pushStep*pushStep) + pushPerObject*objects)
+	}
+	if err := need(0); err != nil {
+		return err
+	}
+	unpackErr, err := s.storePush(r.Context(), c, push, need)
 	if err != nil {
 		return err
 	}
@@ -353,7 +369,7 @@ func (s *Server) receivePack(w http.ResponseWriter, r *http.Request, c call) err
 	for i, cmd := range push.Commands {
 		results[i] = gitproto.Result{Ref: cmd.Ref, Reason: unpackErr}
 		if unpackErr == "" {
-			if results[i].Reason, err = s.applyCommand(r.Context(), c, cmd); err != nil {
+			if results[i].Reason, err = s.applyCommand(r.Context(), c, cmd, need); err != nil {
 				return err
 			}
 		} else {
@@ -386,7 +402,7 @@ func (s *Server) storePush(ctx context.Context, c call, push gitproto.Push, held
 }
 
 // applyCommand checks and applies one ref command. It returns the reason that the command fails, or empty.
-func (s *Server) applyCommand(ctx context.Context, c call, cmd gitproto.Command) (string, error) {
+func (s *Server) applyCommand(ctx context.Context, c call, cmd gitproto.Command, need func(inflated int64) error) (string, error) {
 	name, ok := gitproto.StoredRefName(cmd.Ref)
 	if !ok || cmd.Old == gitproto.Zero && cmd.New == gitproto.Zero {
 		return "refusing to update this ref", nil
@@ -396,7 +412,7 @@ func (s *Server) applyCommand(ctx context.Context, c call, cmd gitproto.Command)
 		if err != nil {
 			return "", err
 		}
-		t, _, err := rd.Get(ctx, cmd.New)
+		t, _, err := rd.GetSized(ctx, cmd.New, need)
 		switch {
 		case errors.Is(err, store.ErrNotFound):
 			return "missing necessary objects", nil
