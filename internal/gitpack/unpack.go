@@ -168,6 +168,11 @@ func resolveEntries(ctx context.Context, entries []*unpacked, byOff map[int64]*u
 		delete(waitName, base.name)
 		delete(waitOff, base.off)
 		for _, e := range deps {
+			if held != nil {
+				if err := held(total + deltaResultSize(e.data)); err != nil {
+					return err
+				}
+			}
 			out, err := applyDelta(base.data, e.data)
 			if err != nil {
 				return err

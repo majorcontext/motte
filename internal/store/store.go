@@ -506,6 +506,9 @@ type view struct {
 	lerr atomic.Pointer[error]
 	// ahead holds what the prefetches of the request read.
 	ahead *aheadBuf
+	// before is a time before the view read the manifest, and after a time after it. A write that ended before
+	// before is in the view, and a view of a later before holds what this view read.
+	before, after time.Time
 }
 
 // missing is the error for a name that a pack lacks: the failed read of a delta base when there was one.
@@ -521,11 +524,12 @@ func (s *Service) view(ctx context.Context, repo Repo) (*view, error) {
 	if err != nil {
 		return nil, err
 	}
+	before := time.Now()
 	m, _, err := s.loadManifest(ctx, repo)
 	if err != nil {
 		return nil, err
 	}
-	return &view{s: s, prefix: prefix, layers: m.Layers, ahead: &aheadBuf{}}, nil
+	return &view{s: s, prefix: prefix, layers: m.Layers, ahead: &aheadBuf{}, before: before, after: time.Now()}, nil
 }
 
 // locate returns the pack that holds sha, probing the newest layer first, with the layer and the number of the pack in
@@ -583,7 +587,7 @@ func (v *view) get(ctx context.Context, sha gitpack.SHA) (gitpack.Type, []byte, 
 // getSized is get that tells before the size of the object, from the pack header, so a caller can reserve memory
 // before the object is inflated.
 func (v *view) getSized(ctx context.Context, sha gitpack.SHA, before func(size int64) error) (gitpack.Type, []byte, error) {
-	if t, d, ok := v.s.cached(v.prefix, sha); ok {
+	if t, d, ok := v.s.cached(v.prefix, sha, v.before); ok {
 		if before != nil {
 			if err := before(int64(len(d))); err != nil {
 				return 0, nil, err
@@ -610,7 +614,7 @@ func (v *view) getSized(ctx context.Context, sha gitpack.SHA, before func(size i
 	t, d, depth, err := p.GetDepth(sha)
 	statsFrom(ctx).object(len(d), depth)
 	if err == nil {
-		v.s.keepObject(v.prefix, sha, t, d)
+		v.s.keepObject(v.prefix, sha, t, d, v.after)
 	}
 	switch {
 	case errors.Is(err, gitpack.ErrNotFound):
@@ -631,21 +635,26 @@ type objKey struct {
 type cachedObject struct {
 	t    gitpack.Type
 	data []byte
+	at   time.Time
 }
 
-// cached returns a commit or tree that an earlier read or write kept. The caller never changes the data.
-func (s *Service) cached(prefix string, sha gitpack.SHA) (gitpack.Type, []byte, bool) {
+// cached returns a commit or tree that an earlier read or write kept, when a view that read its manifest at before
+// holds it: the cache keeps the time after which every such view does. The caller never changes the data.
+func (s *Service) cached(prefix string, sha gitpack.SHA, before time.Time) (gitpack.Type, []byte, bool) {
 	o, ok := s.ocache.get(objKey{prefix, sha})
 	if !ok {
 		return 0, nil, false
 	}
 	c := o.(cachedObject)
+	if c.at.After(before) {
+		return 0, nil, false
+	}
 	return c.t, c.data, true
 }
 
-func (s *Service) keepObject(prefix string, sha gitpack.SHA, t gitpack.Type, data []byte) {
+func (s *Service) keepObject(prefix string, sha gitpack.SHA, t gitpack.Type, data []byte, at time.Time) {
 	if (t == gitpack.Commit || t == gitpack.Tree) && len(data) <= maxCachedObject {
-		s.ocache.put(objKey{prefix, sha}, cachedObject{t, data}, len(data)+96)
+		s.ocache.put(objKey{prefix, sha}, cachedObject{t, data, at}, len(data)+96)
 	}
 }
 
@@ -654,8 +663,9 @@ func (s *Service) keepObjects(repo Repo, objs []gitpack.Object, names []gitpack.
 	if err != nil {
 		return
 	}
+	at := time.Now()
 	for i, o := range objs {
-		s.keepObject(prefix, names[i], o.Type, o.Data)
+		s.keepObject(prefix, names[i], o.Type, o.Data, at)
 	}
 }
 
@@ -702,7 +712,7 @@ func (r *Reader) Prefetch(ctx context.Context, shas []gitpack.SHA) {
 	sorted := slices.Clone(shas)
 	slices.SortFunc(sorted, func(a, b gitpack.SHA) int { return bytes.Compare(a[:], b[:]) })
 	sorted = slices.Compact(sorted)
-	sorted = slices.DeleteFunc(sorted, func(sha gitpack.SHA) bool { _, _, ok := r.v.s.cached(r.v.prefix, sha); return ok })
+	sorted = slices.DeleteFunc(sorted, func(sha gitpack.SHA) bool { _, _, ok := r.v.s.cached(r.v.prefix, sha, r.v.before); return ok })
 	byPack, _ := r.v.place(ctx, sorted)
 	var g errgroup.Group
 	g.SetLimit(readWorkers)

@@ -603,6 +603,13 @@ func (p *Pack) objAt(off int64, chain []int64) (*resolved, error) {
 	return r, nil
 }
 
+// deltaResultSize is the size of the result that the delta d makes, at most MaxObjectBytes, or 0 when d does not say.
+func deltaResultSize(d []byte) int64 {
+	_, k := uvarint(d)
+	size, _ := uvarint(d[k:])
+	return int64(min(size, MaxObjectBytes))
+}
+
 func applyDelta(base, d []byte) ([]byte, error) {
 	srcSize, k := uvarint(d)
 	if srcSize != uint64(len(base)) {

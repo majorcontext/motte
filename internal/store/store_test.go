@@ -768,3 +768,22 @@ func TestAWrittenCommitAndTreeNeedNoRangeRead(t *testing.T) {
 		t.Errorf("reading the commit and tree that a put just wrote made %d range reads; it must make none", got)
 	}
 }
+
+func TestAReaderDoesNotSeeACommitWrittenAfterItsView(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	if _, err := w.svc.PutObjects(t.Context(), repo, []gitpack.Object{{Type: gitpack.Blob, Data: []byte("first")}}); err != nil {
+		t.Fatal(err)
+	}
+	rd, err := w.svc.Reader(t.Context(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names, err := w.svc.PutObjects(t.Context(), repo, []gitpack.Object{{Type: gitpack.Commit, Data: []byte("tree x\n\nm\n")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := rd.Get(t.Context(), names[0]); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("a reader made before a put reads the commit of the put: err = %v, want ErrNotFound", err)
+	}
+}
