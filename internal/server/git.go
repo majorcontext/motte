@@ -54,13 +54,17 @@ func (f *fetchHold) object(size int64) error {
 }
 
 // pushCost is the reservation of a push whose body has n bytes and whose unpack holds inflated bytes: the body, the
-// entries, the objects, the rebuilt pack, and the delta, its base and its result while one object resolves.
+// entries, the objects and the rebuilt pack (3 times the inflated bytes), the delta, its base and its result while one
+// object resolves (4 times the largest object, which is at most the inflated bytes), and the fixed buffers.
 func pushCost(n, inflated int64) int64 {
-	return n + 3*inflated + 4*gitpack.MaxObjectBytes
+	return n + 3*inflated + 4*min(inflated, gitpack.MaxObjectBytes) + pushBase
 }
 
-// pushStep is the granule of the growing reservation of a push.
-const pushStep = 8 << 20
+// pushStep is the granule of the growing reservation of a push, and pushBase its fixed part.
+const (
+	pushStep = 1 << 20
+	pushBase = 2 << 20
+)
 
 var errProtocolV2 = gitproto.RequestError("protocol v2 is required: use git 2.26 or later")
 

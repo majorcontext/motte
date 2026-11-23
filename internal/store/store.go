@@ -328,7 +328,20 @@ func (s *Service) ReceivePack(ctx context.Context, repo Repo, pack []byte, held 
 	if err != nil {
 		return err
 	}
-	objs, err := gitpack.UnpackHeld(ctx, pack, func(sha gitpack.SHA) (gitpack.Type, []byte, error) { return v.get(ctx, sha) }, held)
+	var last int64
+	track := held
+	if held != nil {
+		track = func(n int64) error { last = n; return held(n) }
+	}
+	external := func(sha gitpack.SHA) (gitpack.Type, []byte, error) {
+		return v.getSized(ctx, sha, func(size int64) error {
+			if held == nil {
+				return nil
+			}
+			return held(last + size)
+		})
+	}
+	objs, err := gitpack.UnpackHeld(ctx, pack, external, track)
 	switch {
 	case errors.Is(err, gitpack.ErrCorrupt), errors.Is(err, ErrNotFound):
 		return ErrInvalid
