@@ -27,6 +27,7 @@ count internal/server servers 86
 count internal/server schemas 55
 count internal/server processes 155
 count cmd/motte servers 1
+count cmd/motte-loadtest servers 1
 count meta/postgres schemas 45
 count internal/vfs/ctl servers 20
 count internal/vfs/ctl schemas 20

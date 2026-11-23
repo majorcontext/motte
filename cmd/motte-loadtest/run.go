@@ -37,6 +37,8 @@ type runFlags struct {
 	think                          time.Duration
 }
 
+func (f runFlags) agentic() bool { return f.scenario == "agents" || f.scenario == "vfsd" }
+
 type env struct {
 	f       runFlags
 	m       Manifest
@@ -88,7 +90,7 @@ func runLoad(ctx context.Context, args []string) error {
 	fs.DurationVar(&f.duration, "d", 30*time.Second, "run time")
 	fs.Uint64Var(&f.seed, "seed", 2, "random seed")
 	fs.BoolVar(&f.jsonOut, "json", false, "print the report as JSON")
-	fs.StringVar(&f.scenario, "scenario", "mix", "mix (the weighted micro-operations) or agents (one coding-agent session per client)")
+	fs.StringVar(&f.scenario, "scenario", "mix", "mix (the weighted micro-operations), agents (one coding-agent session per client, with git clones, fetches and pushes) or vfsd (one agent per client that mounts a lazy workspace through the daemon: bulk tree reads, blob read-ahead, object uploads and ref swaps)")
 	fs.StringVar(&f.mainRef, "main-ref", "lt/main", "agents: the ref that agents start from and land on")
 	fs.Float64Var(&f.skew, "skew", 0.8, "agents: Zipf exponent of file and directory popularity; 0 is uniform")
 	fs.IntVar(&f.cluster, "cluster", 3, "agents: leaf directories in the task cluster of an agent")
@@ -113,7 +115,7 @@ func runLoad(ctx context.Context, args []string) error {
 		if ops, err = e.pickOps(f.mix); err != nil {
 			return err
 		}
-	} else if f.scenario != "agents" {
+	} else if !f.agentic() {
 		return fmt.Errorf("unknown scenario %q", f.scenario)
 	}
 	hot := newHotSet(e.shape, f.skew)
@@ -129,7 +131,7 @@ func runLoad(ctx context.Context, args []string) error {
 		go func() {
 			defer wg.Done()
 			w := &worker{id: i, rng: rand.New(rand.NewPCG(f.seed, uint64(i)+100))}
-			if f.scenario == "agents" {
+			if f.agentic() {
 				e.agentLoop(rctx, ctx, w, hot, func(op string, d time.Duration, err error, conflict bool) {
 					if conflict {
 						err = nil
@@ -167,7 +169,7 @@ func runLoad(ctx context.Context, args []string) error {
 	wg.Wait()
 	elapsed := time.Since(start)
 	rep := buildReport(f, e.m, elapsed, outs, before, scrape(f.url), ws.stop())
-	if f.scenario == "agents" {
+	if f.agentic() {
 		rep.Agents = e.agents.report(elapsed, rep.Server)
 	}
 	if f.jsonOut {
@@ -367,8 +369,8 @@ func buildReport(f runFlags, m Manifest, el time.Duration, outs [][]outcome, bef
 
 func (r report) print() {
 	what := "mix=" + r.Flags.mix
-	if r.Flags.scenario == "agents" {
-		what = fmt.Sprintf("scenario=agents skew=%.2f cluster=%d commits=%d push-every=%d think=%s cold=%.2f", r.Flags.skew, r.Flags.cluster, r.Flags.commits, r.Flags.pushEvery, r.Flags.think, r.Flags.coldRate)
+	if r.Flags.agentic() {
+		what = fmt.Sprintf("scenario="+r.Flags.scenario+" skew=%.2f cluster=%d commits=%d push-every=%d think=%s cold=%.2f", r.Flags.skew, r.Flags.cluster, r.Flags.commits, r.Flags.pushEvery, r.Flags.think, r.Flags.coldRate)
 	}
 	fmt.Printf("repo %s objects=%d commits=%d packs=%d c=%d %s %.0fs\n", r.Manifest.Repo, r.Manifest.Objects, r.Manifest.Commits, r.Manifest.Packs, r.Flags.conc, what, r.Seconds)
 	fmt.Printf("%-14s %8s %8s %9s %9s %9s %9s %6s %6s\n", "op", "count", "per_s", "p50_ms", "p95_ms", "p99_ms", "max_ms", "conf", "err")

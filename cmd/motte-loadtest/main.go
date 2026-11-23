@@ -79,6 +79,15 @@ func (g signer) mint(scope grant.Scope) string {
 	return tok
 }
 
+// nodeClient returns a client with the node grant of workspace ws at epoch, as the workspace daemon holds it.
+func (g signer) nodeClient(url, ws string, epoch uint64) *client.Client {
+	tok, err := g.s.Mint(grant.Claims{Scope: grant.ScopeNode, WS: ws, Epoch: epoch, Repo: g.repo, Exp: time.Now().Add(24 * time.Hour).Unix()})
+	if err != nil {
+		panic(err)
+	}
+	return client.New(url, client.StaticGrant(tok), client.WithBudget(2*time.Minute), client.WithHTTPClient(sharedHTTP))
+}
+
 func (g signer) client(url string, scope grant.Scope) *client.Client {
 	return client.New(url, client.StaticGrant(g.mint(scope)), client.WithBudget(2*time.Minute), client.WithHTTPClient(sharedHTTP))
 }

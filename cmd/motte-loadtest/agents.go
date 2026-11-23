@@ -77,6 +77,7 @@ type branch struct {
 	ref  string
 	old  string
 	sent int
+	gen  int64
 }
 
 type agent struct {
@@ -94,12 +95,16 @@ type agent struct {
 	trees   map[string][]api.TreeEntry
 	roots   map[string]string
 	content map[string][]byte
+	node    *client.Client
 }
 
 func (e *env) agentLoop(run, ctx context.Context, w *worker, hot hotSet, rec func(string, time.Duration, error, bool)) {
 	a := &agent{id: w.id, e: e, rng: w.rng, hot: hot, run: run, rec: rec, nonce: time.Now().UnixNano() % 1e9,
 		ed: &editor{c: e.read, local: map[string][]byte{}, keep: true}, trees: map[string][]api.TreeEntry{}, roots: map[string]string{}, content: map[string][]byte{}}
 	a.seen = e.behind(w.rng)
+	if e.f.scenario == "vfsd" && !a.claim(ctx) {
+		return
+	}
 	for run.Err() == nil {
 		a.task(ctx)
 		a.think()
@@ -183,6 +188,14 @@ func (a *agent) start(ctx context.Context) (tip, root string, err error) {
 		return
 	}
 	tip = r.Commit
+	if a.e.f.scenario == "vfsd" {
+		clear(a.content)
+		clear(a.ed.local)
+		clear(a.trees)
+		clear(a.roots)
+		root, err = a.mount(ctx, tip)
+		return
+	}
 	cold := a.seen == "" || a.started && a.rng.Float64() < a.e.f.coldRate
 	a.started = true
 	switch {
@@ -286,6 +299,9 @@ func (a *agent) readFiles(ctx context.Context, root string, dir int, files []int
 		}
 		shas = append(shas, sha)
 	}
+	if a.e.f.scenario == "vfsd" {
+		return a.readAhead(ctx, ents, shas)
+	}
 	return a.do(ctx, "blob", func(c context.Context) error { _, err := a.e.read.Blobs(c, shas); return err })
 }
 
@@ -360,6 +376,13 @@ func (a *agent) push(ctx context.Context, br *branch, head string) error {
 			objs = append(objs, o)
 		}
 	}
+	if a.e.f.scenario == "vfsd" {
+		if err := a.do(ctx, "push", func(c context.Context) error { return a.upload(c, br, head, objs) }); err != nil {
+			return err
+		}
+		br.old, br.sent = head, len(a.ed.objs)
+		return nil
+	}
 	pack, _, _ := gitpack.Build(objs)
 	if err := a.do(ctx, "push", func(c context.Context) error { return a.e.http.push(c, br.ref, br.old, head, pack) }); err != nil {
 		return err
@@ -411,13 +434,18 @@ func (a *agent) rebase(ctx context.Context, edits [][]fileEdit, br *branch, path
 		return
 	}
 	base = r.Commit
-	if base != a.seen {
-		if err = a.pull(ctx, "refetch", base, a.seen, false); err != nil {
-			return
+	var root string
+	if a.e.f.scenario == "vfsd" {
+		root, err = a.mount(ctx, base)
+	} else {
+		if base != a.seen {
+			if err = a.pull(ctx, "refetch", base, a.seen, false); err != nil {
+				return
+			}
+			a.seen = base
 		}
-		a.seen = base
+		root, err = a.rootOf(ctx, base)
 	}
-	root, err := a.rootOf(ctx, base)
 	if err != nil {
 		return
 	}
