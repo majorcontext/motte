@@ -6,7 +6,7 @@ motte is a version control store and a set of virtual workspaces for coding agen
 
 The store service, the client, the workspace daemon and the jj backend exist. Each item below is in `docs/architecture.md`.
 
-- Native repositories: `motte repo create NAME` makes one.
+- Native repositories: `motte repo create NAME` creates one.
 - Git smart HTTP (protocol v2): clone, fetch and push.
 - The jj backend (`jj motte`) and the workspace daemon `motte-vfsd`. The daemon runs on Linux.
 - Protected refs. Only a land with a `merge` grant changes `main`.
