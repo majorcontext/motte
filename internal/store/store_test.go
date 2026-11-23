@@ -444,6 +444,31 @@ func TestAMissingObjectCostsAtMostOneProbePerLayer(t *testing.T) {
 	}
 }
 
+func TestManyProbesOfOneRequestTakeTheLayerCacheOncePerLayer(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	for range 13 {
+		w.push(4)
+	}
+	if err := w.svc.Maintain(t.Context(), repo); err != nil {
+		t.Fatal(err)
+	}
+	layers := int64(w.layers())
+	cold := w.cold()
+	missing := make([]gitpack.SHA, 500)
+	for i := range missing {
+		missing[i][0], missing[i][19], missing[i][18] = 0x7f, byte(i), byte(i>>8)
+	}
+	before := cold.CacheStats()
+	if _, err := cold.Has(t.Context(), repo, missing); err != nil {
+		t.Fatal(err)
+	}
+	after := cold.CacheStats()
+	if n := after.IndexHits + after.IndexMisses - before.IndexHits - before.IndexMisses; n > 4*layers {
+		t.Errorf("500 probes of %d layers took the layer cache %d times, want once for each layer", layers, n)
+	}
+}
+
 // retiredPack returns the objects of a pack that a push stored and a compaction retired, and its file name.
 func (w *world) retiredPack() ([]gitpack.Object, string) {
 	w.t.Helper()

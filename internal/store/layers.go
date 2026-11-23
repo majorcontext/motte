@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sync"
 	"time"
+	"weak"
 
 	"golang.org/x/sync/errgroup"
 
@@ -120,6 +121,23 @@ func (s *Service) layer(ctx context.Context, prefix string, e midx.Entry) (*laye
 	}
 }
 
+// handle returns layer i of the view. The first probe of a request goes through the layer cache; the next ones read a
+// weak pointer, so a layer that the cache evicts is not kept alive outside its budget.
+func (v *view) handle(ctx context.Context, i int) (*layerH, error) {
+	if w := v.handles[i].Load(); w != nil {
+		if h := w.Value(); h != nil {
+			return h, nil
+		}
+	}
+	h, err := v.s.layer(ctx, v.prefix, v.layers[i])
+	if err != nil {
+		return nil, err
+	}
+	w := weak.Make(h)
+	v.handles[i].Store(&w)
+	return h, nil
+}
+
 func (s *Service) loadLayer(ctx context.Context, key string, e midx.Entry) (*layerH, int, error) {
 	h := &layerH{key: key, entry: e}
 	if e.IsIndex() {
@@ -176,7 +194,7 @@ func (v *view) place(ctx context.Context, shas []gitpack.SHA) (map[*openPack][]i
 	out := map[*openPack][]int64{}
 	pending := slices.Clone(shas)
 	for i := len(v.layers) - 1; i >= 0 && len(pending) > 0; i-- {
-		h, err := v.s.layer(ctx, v.prefix, v.layers[i])
+		h, err := v.handle(ctx, i)
 		if err != nil {
 			return nil, err
 		}

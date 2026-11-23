@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
+	"weak"
 
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
@@ -502,6 +503,8 @@ type view struct {
 	s      *Service
 	prefix string
 	layers []midx.Entry
+	// handles holds weak pointers to the layers that the request has probed, so a probe takes no lock after the first.
+	handles []atomic.Pointer[weak.Pointer[layerH]]
 	// lerr is the last failed read of a delta base, which the pack reports as a missing name.
 	lerr atomic.Pointer[error]
 	// ahead holds what the prefetches of the request read.
@@ -529,7 +532,7 @@ func (s *Service) view(ctx context.Context, repo Repo) (*view, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &view{s: s, prefix: prefix, layers: m.Layers, ahead: &aheadBuf{}, before: before, after: time.Now()}, nil
+	return &view{s: s, prefix: prefix, layers: m.Layers, handles: make([]atomic.Pointer[weak.Pointer[layerH]], len(m.Layers)), ahead: &aheadBuf{}, before: before, after: time.Now()}, nil
 }
 
 // locate returns the pack that holds sha, probing the newest layer first, with the layer and the number of the pack in
@@ -538,7 +541,7 @@ func (v *view) locate(ctx context.Context, sha gitpack.SHA) (*openPack, *layerH,
 	st := statsFrom(ctx)
 	for i := len(v.layers) - 1; i >= 0; i-- {
 		st.layer()
-		h, err := v.s.layer(ctx, v.prefix, v.layers[i])
+		h, err := v.handle(ctx, i)
 		if err != nil {
 			return nil, nil, 0, 0, err
 		}
