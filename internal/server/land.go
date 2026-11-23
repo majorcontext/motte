@@ -12,6 +12,7 @@ import (
 
 	"github.com/majorcontext/motte/api"
 	"github.com/majorcontext/motte/grant"
+	"github.com/majorcontext/motte/internal/gitpack"
 	"github.com/majorcontext/motte/internal/land"
 	"github.com/majorcontext/motte/internal/refname"
 	"github.com/majorcontext/motte/internal/store"
@@ -115,6 +116,11 @@ func (s *Server) enqueueAndWait(ctx context.Context, req meta.LandRequest) (land
 	if item.Base != req.Base || item.Head != req.Head || item.Ref != req.Ref || item.ExpectTree != req.ExpectTree {
 		return landOutcome{Code: api.CodeInvalidBody, Message: "the land id is used by another change"}, nil
 	}
+	if !item.Done {
+		warm, stop := context.WithCancel(ctx)
+		defer stop()
+		go s.warmLand(warm, req)
+	}
 	timeout := clk.NewTimer(s.lands.Timeout)
 	defer timeout.Stop()
 	for !item.Done {
@@ -140,6 +146,25 @@ func (s *Server) enqueueAndWait(ctx context.Context, req meta.LandRequest) (land
 		}
 	}
 	return decodeOutcome(item)
+}
+
+// warmLand reads the objects that the leader will read for the land, while the leader works on the lands before it.
+func (s *Server) warmLand(ctx context.Context, req meta.LandRequest) {
+	repo, err := store.ParseRepo(req.Repo)
+	if err != nil {
+		return
+	}
+	base, err := gitpack.ParseSHA(req.Base)
+	if err != nil {
+		return
+	}
+	head, err := gitpack.ParseSHA(req.Head)
+	if err != nil {
+		return
+	}
+	if rd, err := s.objects.Reader(ctx, repo); err == nil {
+		_ = land.Warm(ctx, landSource{rd}, base, head)
+	}
 }
 
 func decodeOutcome(item meta.LandItem) (landOutcome, error) {
