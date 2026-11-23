@@ -50,10 +50,15 @@ func (f *fetchHold) cost() int64 {
 	return fetchAhead + 3*f.largest + fetchPerObject*int64(f.objects)
 }
 
-// track grows the reservation to the objects of the sets. A fetch that passes fetchLarge takes a slot first, and holds
-// no reservation while it waits for it.
+// track grows the reservation to the objects of the sets.
 func (f *fetchHold) track(objects int) error {
 	f.objects = objects
+	return f.resize()
+}
+
+// resize grows the reservation to cost. A fetch that passes fetchLarge takes a slot first, and holds no reservation
+// while it waits for it.
+func (f *fetchHold) resize() error {
 	if !f.large && f.cost() > fetchLarge {
 		f.drop()
 		select {
@@ -78,7 +83,7 @@ func (f *fetchHold) object(size int64) error {
 		return nil
 	}
 	f.largest = size
-	return f.grow(f.cost())
+	return f.resize()
 }
 
 // pushCost is the reservation of a push whose body has n bytes and whose unpack holds inflated bytes: the body, the

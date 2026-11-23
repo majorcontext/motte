@@ -117,9 +117,16 @@ func (s *Server) enqueueAndWait(ctx context.Context, req meta.LandRequest) (land
 		return landOutcome{Code: api.CodeInvalidBody, Message: "the land id is used by another change"}, nil
 	}
 	if !item.Done {
-		warm, stop := context.WithCancel(ctx)
-		defer stop()
-		go s.warmLand(warm, req)
+		select {
+		case s.warmers <- struct{}{}:
+			warm, stop := context.WithCancel(ctx)
+			defer stop()
+			go func() {
+				defer func() { <-s.warmers }()
+				s.warmLand(warm, req)
+			}()
+		default:
+		}
 	}
 	timeout := clk.NewTimer(s.lands.Timeout)
 	defer timeout.Stop()

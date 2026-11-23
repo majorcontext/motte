@@ -584,6 +584,11 @@ func (v *view) get(ctx context.Context, sha gitpack.SHA) (gitpack.Type, []byte, 
 // before the object is inflated.
 func (v *view) getSized(ctx context.Context, sha gitpack.SHA, before func(size int64) error) (gitpack.Type, []byte, error) {
 	if t, d, ok := v.s.cached(v.prefix, sha); ok {
+		if before != nil {
+			if err := before(int64(len(d))); err != nil {
+				return 0, nil, err
+			}
+		}
 		return t, d, nil
 	}
 	p, err := v.find(ctx, sha)

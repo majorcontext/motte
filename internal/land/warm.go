@@ -7,7 +7,7 @@ import (
 )
 
 // warmBytes bounds the object bytes that Warm reads.
-const warmBytes = 16 << 20
+const warmBytes = 4 << 20
 
 // Warm reads the commits of base..head and the trees that each commit changes, which a land of the range reads again,
 // so that the leader finds them near. It reads at most warmBytes and returns the first error.

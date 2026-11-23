@@ -381,7 +381,17 @@ func parseHeader(buf []byte, off int64) (header, error) {
 }
 
 func (p *Pack) inflate(off int64, size int64) ([]byte, error) {
-	sr := io.NewSectionReader(p.pack, off, min(p.pack.Size()-off, deflateBound(size)))
+	out, err := p.inflateWithin(off, size, min(p.pack.Size()-off, deflateBound(size)))
+	if err != nil && off+deflateBound(size) < p.pack.Size() {
+		return p.inflateWithin(off, size, p.pack.Size()-off)
+	}
+	return out, err
+}
+
+// inflateWithin inflates the stream at off from the next limit bytes of the pack. A stream that a producer made larger
+// than deflateBound fails here, and inflate reads it again without the limit.
+func (p *Pack) inflateWithin(off, size, limit int64) ([]byte, error) {
+	sr := io.NewSectionReader(p.pack, off, limit)
 	zr, err := zlib.NewReader(bufioReader(sr, size))
 	if err != nil {
 		return nil, err

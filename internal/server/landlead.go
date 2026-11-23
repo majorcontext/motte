@@ -22,6 +22,8 @@ const (
 	landAttempts        = 8
 	landFailures        = 3
 	landResultRetention = 24 * time.Hour
+	// landWarmers bounds the lands that read their objects while they wait.
+	landWarmers = 8
 )
 
 var errLeaseLost = errors.New("server: land lease lost")

@@ -2,6 +2,7 @@ package gitpack
 
 import (
 	"bytes"
+	"compress/zlib"
 	"context"
 	"math/rand/v2"
 	"testing"
@@ -74,5 +75,31 @@ func TestEntryBoundCoversTheStoredEntry(t *testing.T) {
 	}
 	if _, ok := EntryBound(nil); ok {
 		t.Error("an empty buffer has a bound")
+	}
+}
+
+func TestAnEntryLongerThanItsBoundStillReads(t *testing.T) {
+	t.Parallel()
+	data := bytes.Repeat([]byte("a"), 200)
+	var z bytes.Buffer
+	zw := zlib.NewWriter(&z)
+	for i := range data {
+		_, _ = zw.Write(data[i : i+1])
+		_ = zw.Flush()
+	}
+	_ = zw.Close()
+	pack, idx, names := Build([]Object{{Blob, data}})
+	spans, err := Scan(pack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp := spans[0]
+	forged := append(append(append([]byte{}, pack[:sp.Off+int64(sp.HdrLen)]...), z.Bytes()...), pack[sp.End:]...)
+	p, err := NewPack(idx, bytes.NewReader(forged))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, got, err := p.Get(names[0]); err != nil || !bytes.Equal(got, data) {
+		t.Errorf("a stream of %d bytes for 200: %v", z.Len(), err)
 	}
 }
