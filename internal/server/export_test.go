@@ -33,3 +33,11 @@ func HoldBudget(t testing.TB, s *Server, n int64) {
 	}
 	t.Cleanup(release)
 }
+
+// LowerFetchSlots sets the reservation above which a fetch takes a slot, and the number of slots, until the test ends.
+func LowerFetchSlots(t testing.TB, large int64, slots int) {
+	t.Helper()
+	prevLarge, prevSlots := fetchLarge, fetchSlots
+	t.Cleanup(func() { fetchLarge, fetchSlots = prevLarge, prevSlots })
+	fetchLarge, fetchSlots = large, slots
+}

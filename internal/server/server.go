@@ -71,11 +71,13 @@ type Server struct {
 	registry *prometheus.Registry
 	mux      *http.ServeMux
 	readers  chan struct{}
+	// largeFetches holds a value for each fetch that passed fetchLarge.
+	largeFetches chan struct{}
 }
 
 // New returns a Server over the metadata of cfg.Meta and the object store cfg.Bucket.
 func New(cfg Config) *Server {
-	s := &Server{index: cfg.Meta, objects: store.New(cfg.Bucket, cfg.Meta, store.WithClock(clock.Or(cfg.Clock)), store.WithGrace(cfg.Compaction.withDefaults().Grace)), compaction: cfg.Compaction.withDefaults(), logger: cfg.Logger, now: cfg.Now, readers: make(chan struct{}, uploadReaders), wake: make(chan struct{}, 1), clock: clock.Or(cfg.Clock)}
+	s := &Server{index: cfg.Meta, objects: store.New(cfg.Bucket, cfg.Meta, store.WithClock(clock.Or(cfg.Clock)), store.WithGrace(cfg.Compaction.withDefaults().Grace)), compaction: cfg.Compaction.withDefaults(), logger: cfg.Logger, now: cfg.Now, readers: make(chan struct{}, uploadReaders), largeFetches: make(chan struct{}, fetchSlots), wake: make(chan struct{}, 1), clock: clock.Or(cfg.Clock)}
 	s.cold.Store(cfg.Warm)
 	if s.now == nil {
 		s.now = time.Now

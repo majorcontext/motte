@@ -14,12 +14,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/majorcontext/motte/api"
 	"github.com/majorcontext/motte/client"
 	"github.com/majorcontext/motte/internal/gitpack"
+	"github.com/majorcontext/motte/internal/pktline"
 	"github.com/majorcontext/motte/internal/server"
 	"github.com/majorcontext/motte/internal/store"
 	"github.com/majorcontext/motte/internal/testcount"
@@ -335,5 +337,40 @@ func TestGitOnTheLocalBackend(t *testing.T) {
 		"imported pack":    TestGitServesAnImportedPack,
 	} {
 		t.Run(name, fn)
+	}
+}
+
+func TestLargeFetchesTakeTurnsAndAllFinish(t *testing.T) {
+	server.LowerFetchSlots(t, 1, 1)
+	ts := testserver.StartLocal(t)
+	l := newLandEnv(t, &env{Server: ts, t: t, url: ts.URL, cp: ts.Operator, node: ts.Node})
+	var body bytes.Buffer
+	pw := pktline.NewWriter(&body)
+	pw.Linef("command=fetch\n")
+	pw.Delim()
+	pw.Linef("want %s\n", l.root)
+	pw.Linef("done\n")
+	pw.Flush()
+	token := l.ReadGrant(t, l.repo)
+	var wg sync.WaitGroup
+	status := make([]int, 6)
+	for i := range status {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, ts.URL+"/git/gh/acme/widgets.git/git-upload-pack", bytes.NewReader(body.Bytes()))
+			req.Header.Set("Git-Protocol", "version=2")
+			req.Header.Set("Authorization", "Bearer "+token)
+			if resp, err := http.DefaultClient.Do(req); err == nil {
+				status[i] = resp.StatusCode
+				_ = resp.Body.Close()
+			}
+		}()
+	}
+	wg.Wait()
+	for i, s := range status {
+		if s != http.StatusOK {
+			t.Errorf("fetch %d answered %d, want 200", i, s)
+		}
 	}
 }

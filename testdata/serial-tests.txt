@@ -12,3 +12,4 @@ internal/gitpack TestUnpackCountsWholeObjectsInTheResolvedTotal it writes the pa
 internal/land TestTheLimitCountsDistinctPaths it writes the package variable MaxChangedPaths that every land reads
 internal/land TestTheCacheOfBaseDiffsIsBounded it writes the package variable MaxChangedPaths that every land reads
 internal/land TestALandThatMakesAnObjectAboveTheLimitFailsAloneAndLeavesNoTrace it writes the package variable MaxObjectBytes that every land reads
+internal/server TestLargeFetchesTakeTurnsAndAllFinish LowerFetchSlots writes the package variables that every running server reads

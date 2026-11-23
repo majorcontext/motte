@@ -29,20 +29,48 @@ const (
 	fetchPerObject = 128
 )
 
+// fetchLarge is the reservation above which a fetch takes one of the fetchSlots slots of large fetches, which a clone of
+// a large repository needs. Without the slots, a few clones hold the whole memory budget for as long as they run.
+var (
+	fetchLarge int64 = 32 << 20
+	fetchSlots       = 4
+)
+
 // fetchHold is the reservation of a fetch.
 type fetchHold struct {
 	*reservation
 	objects int
 	largest int64
+	srv     *Server
+	ctx     context.Context
+	large   bool
 }
 
 func (f *fetchHold) cost() int64 {
 	return fetchAhead + 3*f.largest + fetchPerObject*int64(f.objects)
 }
 
+// track grows the reservation to the objects of the sets. A fetch that passes fetchLarge takes a slot first, and holds
+// no reservation while it waits for it.
 func (f *fetchHold) track(objects int) error {
 	f.objects = objects
+	if !f.large && f.cost() > fetchLarge {
+		f.drop()
+		select {
+		case f.srv.largeFetches <- struct{}{}:
+			f.large = true
+		case <-f.ctx.Done():
+			return f.ctx.Err()
+		}
+	}
 	return f.grow(f.cost())
+}
+
+func (f *fetchHold) done() {
+	f.drop()
+	if f.large {
+		<-f.srv.largeFetches
+	}
 }
 
 func (f *fetchHold) object(size int64) error {
@@ -258,13 +286,13 @@ func (s *Server) uploadPack(w http.ResponseWriter, r *http.Request, c call) erro
 	if protocolVersion(r) != "2" {
 		return errProtocolV2
 	}
-	fh := &fetchHold{largest: fetchObject}
+	fh := &fetchHold{largest: fetchObject, srv: s, ctx: r.Context()}
 	body, release, err := s.gitBody(w, r, fetchBodyMax, func(int64) int64 { return fh.cost() })
 	if err != nil {
 		return err
 	}
 	fh.reservation = s.holding(r, fh.cost(), release)
-	defer fh.drop()
+	defer fh.done()
 	refs, head, err := s.gitRefs(r.Context(), c.repo)
 	if err != nil {
 		return err
