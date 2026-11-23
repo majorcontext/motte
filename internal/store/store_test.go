@@ -787,3 +787,33 @@ func TestAReaderDoesNotSeeACommitWrittenAfterItsView(t *testing.T) {
 		t.Errorf("a reader made before a put reads the commit of the put: err = %v, want ErrNotFound", err)
 	}
 }
+
+func TestATreeReadFetchesOnlyTheHeadersOfItsBlobs(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	rng := rand.New(rand.NewPCG(7, 8))
+	var objs []gitpack.Object
+	var tree []byte
+	for i := range 100 {
+		data := make([]byte, 300<<10)
+		for j := range data {
+			data[j] = byte(rng.Uint32())
+		}
+		sha := gitpack.Hash(gitpack.Blob, data)
+		objs = append(objs, gitpack.Object{Type: gitpack.Blob, Data: data})
+		tree = append(tree, fmt.Sprintf("100644 f%03d\x00", i)...)
+		tree = append(tree, sha[:]...)
+	}
+	objs = append(objs, gitpack.Object{Type: gitpack.Tree, Data: tree})
+	names, err := w.svc.PutObjects(t.Context(), repo, objs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := w.cold()
+	if _, err := svc.TreeBulk(t.Context(), repo, names[len(names)-1], 1000, func(int64) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if got := svc.CacheStats().RangeBytes; got > 2<<20 {
+		t.Errorf("a tree of 100 blobs of 300 KiB cost %d bytes of range reads; it needs the headers only", got)
+	}
+}

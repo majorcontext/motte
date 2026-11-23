@@ -42,13 +42,14 @@ type fetchHold struct {
 	*reservation
 	objects int
 	largest int64
+	body    int64
 	srv     *Server
 	ctx     context.Context
 	large   bool
 }
 
 func (f *fetchHold) cost() int64 {
-	return fetchAhead + 3*f.largest + fetchPerObject*int64(f.objects)
+	return fetchAhead + 3*f.largest + fetchPerObject*int64(f.objects) + 3*f.body
 }
 
 // track grows the reservation to the objects of the sets.
@@ -303,7 +304,7 @@ func (s *Server) uploadPack(w http.ResponseWriter, r *http.Request, c call) erro
 		return errProtocolV2
 	}
 	fh := &fetchHold{largest: fetchObject, srv: s, ctx: r.Context()}
-	body, release, err := s.gitBody(w, r, fetchBodyMax, func(int64) int64 { return fh.cost() })
+	body, release, err := s.gitBody(w, r, fetchBodyMax, func(n int64) int64 { fh.body = n; return fh.cost() })
 	if err != nil {
 		return err
 	}

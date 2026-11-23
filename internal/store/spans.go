@@ -202,11 +202,11 @@ type prefetchRun struct {
 // maxEntry bounds the bytes that the read-ahead keeps for one object.
 const maxEntry = 256 << 10
 
-// fetchRun reads the run and keeps each object whole in a, from its header to the bound that the header gives, and not
+// fetchRun reads the run and keeps each object whole in a, or only its first bytes when whole is false, from its header to the bound that the header gives, and not
 // the gaps that the read closed. release frees the bytes that the run holds in flight once its read ends, and the tail
 // of an object that runs past the end of the run is read after that, from flight, and kept as a range of its own that
 // follows the head.
-func (b *packReader) fetchRun(ctx context.Context, a *aheadBuf, r prefetchRun, release func(), flight *semaphore.Weighted) error {
+func (b *packReader) fetchRun(ctx context.Context, a *aheadBuf, r prefetchRun, whole bool, release func(), flight *semaphore.Weighted) error {
 	d, err := b.read(ctx, r.start, r.end)
 	if err == nil && int64(len(d)) != r.end-r.start {
 		err = io.ErrUnexpectedEOF
@@ -218,7 +218,7 @@ func (b *packReader) fetchRun(ctx context.Context, a *aheadBuf, r prefetchRun, r
 	ends := make([]int64, len(r.offs))
 	for i, o := range r.offs {
 		need := int64(minRead)
-		if bound, ok := gitpack.EntryBound(d[o-r.start:]); ok {
+		if bound, ok := gitpack.EntryBound(d[o-r.start:]); ok && whole {
 			need = max(need, min(bound, maxEntry))
 		}
 		ends[i] = min(o+need, b.size)

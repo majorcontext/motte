@@ -708,7 +708,15 @@ func (r *Reader) GetSized(ctx context.Context, sha gitpack.SHA, before func(size
 
 // Prefetch reads the pack bytes that Get of shas will need, in few large ranges that it reads at most readWorkers at
 // a time. It skips what it cannot place, and a failed read is left to the Get that needs it.
-func (r *Reader) Prefetch(ctx context.Context, shas []gitpack.SHA) {
+func (r *Reader) Prefetch(ctx context.Context, shas []gitpack.SHA) { r.prefetch(ctx, shas, true) }
+
+// PrefetchHeaders is Prefetch for a caller that reads only the headers of the objects, as the sizes of the blobs of a
+// tree: it keeps the first bytes of each object, not the whole object.
+func (r *Reader) PrefetchHeaders(ctx context.Context, shas []gitpack.SHA) {
+	r.prefetch(ctx, shas, false)
+}
+
+func (r *Reader) prefetch(ctx context.Context, shas []gitpack.SHA, whole bool) {
 	sorted := slices.Clone(shas)
 	slices.SortFunc(sorted, func(a, b gitpack.SHA) int { return bytes.Compare(a[:], b[:]) })
 	sorted = slices.Compact(sorted)
@@ -724,7 +732,7 @@ func (r *Reader) Prefetch(ctx context.Context, shas []gitpack.SHA) {
 			release := sync.OnceFunc(func() { r.flight.Release(run.end - run.start) })
 			g.Go(func() error {
 				defer release()
-				_ = e.b.fetchRun(ctx, r.v.ahead, run, release, r.flight)
+				_ = e.b.fetchRun(ctx, r.v.ahead, run, whole, release, r.flight)
 				return nil
 			})
 		}
@@ -912,7 +920,7 @@ func (v *view) parseTree(ctx context.Context, sha gitpack.SHA, data []byte) (Tre
 			continue
 		}
 		if next%treeAhead == 0 {
-			rd.Prefetch(ctx, blobs[next:min(next+treeAhead, len(blobs))])
+			rd.PrefetchHeaders(ctx, blobs[next:min(next+treeAhead, len(blobs))])
 		}
 		next++
 		p, err := v.find(ctx, e.SHA)
