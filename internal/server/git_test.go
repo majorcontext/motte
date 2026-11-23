@@ -340,37 +340,58 @@ func TestGitOnTheLocalBackend(t *testing.T) {
 	}
 }
 
-func TestLargeFetchesTakeTurnsAndAllFinish(t *testing.T) {
+func TestTheMemoryBudgetAndTheFetchSlotsOnOneServer(t *testing.T) {
 	server.LowerFetchSlots(t, 1, 1)
 	ts := testserver.StartLocal(t)
-	l := newLandEnv(t, &env{Server: ts, t: t, url: ts.URL, cp: ts.Operator, node: ts.Node})
-	var body bytes.Buffer
-	pw := pktline.NewWriter(&body)
-	pw.Linef("command=fetch\n")
-	pw.Delim()
-	pw.Linef("want %s\n", l.root)
-	pw.Linef("done\n")
-	pw.Flush()
-	token := l.ReadGrant(t, l.repo)
-	var wg sync.WaitGroup
-	status := make([]int, 6)
-	for i := range status {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			req, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, ts.URL+"/git/gh/acme/widgets.git/git-upload-pack", bytes.NewReader(body.Bytes()))
-			req.Header.Set("Git-Protocol", "version=2")
-			req.Header.Set("Authorization", "Bearer "+token)
-			if resp, err := http.DefaultClient.Do(req); err == nil {
-				status[i] = resp.StatusCode
-				_ = resp.Body.Close()
-			}
-		}()
-	}
-	wg.Wait()
-	for i, s := range status {
-		if s != http.StatusOK {
-			t.Errorf("fetch %d answered %d, want 200", i, s)
+	srv := server.New(server.Config{Meta: ts.Meta, Bucket: ts.Bucket, Verifier: ts.Verifier})
+	web := httptest.NewServer(srv.Handler())
+	t.Cleanup(web.Close)
+	ts.URL = web.URL
+	l := newLandEnv(t, &env{Server: ts, t: t, url: web.URL, cp: ts.Operator, node: ts.Node})
+	t.Run("a land finishes while requests hold the memory budget", func(t *testing.T) {
+		var o objSet
+		c1 := o.commit(map[string]string{"f1": "1"}, "", "one", l.root)
+		c2 := o.commit(map[string]string{"f2": "2"}, "", "two", l.root)
+		o.upload(t, l.env, l.repo)
+		if _, err := l.land(l.merge, "main", l.root, c1); err != nil {
+			t.Fatal(err)
 		}
-	}
+		server.HoldBudget(t, srv, store.MemoryBudget)
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		if _, err := l.merge.Land(ctx, l.repo, api.LandRequest{Ref: "main", Base: l.root, Head: c2}); err != nil {
+			t.Errorf("a rebase while requests hold the whole memory budget: %v", err)
+		}
+	})
+	t.Run("large fetches take turns and all finish", func(t *testing.T) {
+		var body bytes.Buffer
+		pw := pktline.NewWriter(&body)
+		pw.Linef("command=fetch\n")
+		pw.Delim()
+		pw.Linef("want %s\n", l.root)
+		pw.Linef("done\n")
+		pw.Flush()
+		token := l.ReadGrant(t, l.repo)
+		var wg sync.WaitGroup
+		status := make([]int, 6)
+		for i := range status {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				req, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, ts.URL+"/git/gh/acme/widgets.git/git-upload-pack", bytes.NewReader(body.Bytes()))
+				req.Header.Set("Git-Protocol", "version=2")
+				req.Header.Set("Authorization", "Bearer "+token)
+				if resp, err := http.DefaultClient.Do(req); err == nil {
+					status[i] = resp.StatusCode
+					_ = resp.Body.Close()
+				}
+			}()
+		}
+		wg.Wait()
+		for i, s := range status {
+			if s != http.StatusOK {
+				t.Errorf("fetch %d answered %d, want 200", i, s)
+			}
+		}
+	})
 }
