@@ -1,8 +1,11 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"syscall"
 
@@ -72,8 +75,21 @@ var (
 	errProtected    = errors.New("server: ref protected")
 )
 
+// knownCauses are the sentinel errors whose names a log line may hold: each is a fixed string that carries no data.
+var knownCauses = []struct {
+	err  error
+	name string
+}{
+	{context.Canceled, "context canceled"},
+	{context.DeadlineExceeded, "deadline exceeded"},
+	{io.EOF, "EOF"},
+	{io.ErrUnexpectedEOF, "unexpected EOF"},
+	{net.ErrClosed, "connection closed"},
+}
+
 // logSafe names an error by its type chain and its innermost cause, which a log line may hold. The message of a
-// wrapper can carry a path or a URL, so it stays out.
+// wrapper can carry a path or a URL, so it stays out, and so does the text of a cause that code built from data. The
+// name of a known sentinel cause stays in.
 func logSafe(err error) string {
 	root := err
 	for u := errors.Unwrap(root); u != nil; u = errors.Unwrap(u) {
@@ -81,6 +97,11 @@ func logSafe(err error) string {
 	}
 	if _, ok := root.(syscall.Errno); ok {
 		return fmt.Sprintf("%T: %v", err, root)
+	}
+	for _, k := range knownCauses {
+		if errors.Is(err, k.err) {
+			return fmt.Sprintf("%T: %T: %s", err, root, k.name)
+		}
 	}
 	return fmt.Sprintf("%T: %T", err, root)
 }

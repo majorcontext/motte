@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -142,5 +143,23 @@ func TestLimitDefaultsAreTheSpecValues(t *testing.T) {
 	t.Parallel()
 	if objectLimit != 16<<20 || decodeWindow != 24<<20 || treeReserve != 8<<20 || treeSlack != 8<<20 || smallBodyMax != 1<<20 {
 		t.Errorf("limits = %d %d %d %d %d, want 16 MiB, 24 MiB, 8 MiB, 8 MiB, 1 MiB", objectLimit, decodeWindow, treeReserve, treeSlack, smallBodyMax)
+	}
+}
+
+func TestLogSafeNamesAKnownCauseAndHidesTextBuiltFromData(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+		deny string
+	}{
+		{"a known sentinel under a wrapper", fmt.Errorf("read /secret/path: %w", context.Canceled), "context canceled", "/secret/path"},
+		{"text built from data", fmt.Errorf("redirect to %s", "https://host/token"), "", "https://host/token"},
+	} {
+		got := logSafe(tc.err)
+		if !strings.Contains(got, tc.want) || strings.Contains(got, tc.deny) {
+			t.Errorf("%s: logSafe = %q, want %q and not %q", tc.name, got, tc.want, tc.deny)
+		}
 	}
 }
