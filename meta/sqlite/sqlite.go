@@ -372,10 +372,24 @@ func (s *Store) SwapManifest(ctx context.Context, repo string, expect int64, bod
 }
 
 func (s *Store) RetireFiles(ctx context.Context, repo string, keys []string, at time.Time) error {
-	for _, k := range keys {
-		if _, err := s.db.ExecContext(ctx, `INSERT INTO pack_retired (repo, key, retired_at) VALUES (?, ?, ?) ON CONFLICT (repo, key) DO UPDATE SET retired_at = excluded.retired_at WHERE deleting_at IS NULL`, repo, k, at.UnixMicro()); err != nil {
-			return fmt.Errorf("sqlite: retire files: %w", err)
+	if len(keys) == 0 {
+		return nil
+	}
+	err := inTx(ctx, s.db, func(tx *sql.Tx) error {
+		stmt, err := tx.PrepareContext(ctx, `INSERT INTO pack_retired (repo, key, retired_at) VALUES (?, ?, ?) ON CONFLICT (repo, key) DO UPDATE SET retired_at = excluded.retired_at WHERE deleting_at IS NULL`)
+		if err != nil {
+			return err
 		}
+		defer func() { _ = stmt.Close() }()
+		for _, k := range keys {
+			if _, err := stmt.ExecContext(ctx, repo, k, at.UnixMicro()); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("sqlite: retire files: %w", err)
 	}
 	return nil
 }
