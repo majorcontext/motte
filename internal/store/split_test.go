@@ -55,9 +55,7 @@ func TestAfterCompactionAWalkOfTheNewestTreesTouchesFewRanges(t *testing.T) {
 	}
 	for push := range 40 {
 		data := make([]byte, 200<<10)
-		for i := range data {
-			data[i] = byte(rng.Uint32())
-		}
+		fillRandom(rng, data)
 		blob := gitpack.Object{Type: gitpack.Blob, Data: data}
 		bsha := gitpack.Hash(gitpack.Blob, data)
 		d := push % dirs

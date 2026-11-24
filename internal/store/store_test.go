@@ -4,11 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
-	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
@@ -92,7 +92,7 @@ type world struct {
 
 func newWorld(t *testing.T) *world {
 	t.Helper()
-	m, err := sqlite.Open(t.Context(), filepath.Join(t.TempDir(), "meta.db"))
+	m, err := sqlite.Open(t.Context(), ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,9 +252,7 @@ func TestReadingSmallObjectsOfABigPackCostsFewSmallRanges(t *testing.T) {
 	objs := make([]gitpack.Object, 2000)
 	for i := range objs {
 		data := make([]byte, 400)
-		for j := range data {
-			data[j] = byte(rng.Uint32())
-		}
+		fillRandom(rng, data)
 		objs[i] = gitpack.Object{Type: gitpack.Blob, Data: data}
 	}
 	names, err := w.svc.PutObjects(t.Context(), repo, objs)
@@ -307,9 +305,7 @@ func TestPrefetchReadsFarApartRangesAtTheSameTime(t *testing.T) {
 	objs := make([]gitpack.Object, 200)
 	for i := range objs {
 		data := make([]byte, 20<<10)
-		for j := range data {
-			data[j] = byte(rng.Uint32())
-		}
+		fillRandom(rng, data)
 		objs[i] = gitpack.Object{Type: gitpack.Blob, Data: data}
 	}
 	names, err := w.svc.PutObjects(t.Context(), repo, objs)
@@ -358,9 +354,7 @@ func TestABulkTreeReadReadsTheBlobHeadersOfManyTreesTogether(t *testing.T) {
 	}
 	filler := func() {
 		data := make([]byte, 140<<10)
-		for j := range data {
-			data[j] = byte(rng.Uint32())
-		}
+		fillRandom(rng, data)
 		objs = append(objs, gitpack.Object{Type: gitpack.Blob, Data: data})
 	}
 	var root []byte
@@ -430,9 +424,7 @@ func TestSharedBucketReadsHoldAtMostTheReadBudget(t *testing.T) {
 	objs := make([]gitpack.Object, 24)
 	for i := range objs {
 		data := make([]byte, 240<<10)
-		for j := range data {
-			data[j] = byte(rng.Uint32())
-		}
+		fillRandom(rng, data)
 		objs[i] = gitpack.Object{Type: gitpack.Blob, Data: data}
 	}
 	names, err := w.svc.PutObjects(t.Context(), repo, objs)
@@ -484,9 +476,7 @@ func TestTheRangeCacheStaysWithinItsBudget(t *testing.T) {
 	objs := make([]gitpack.Object, 200)
 	for i := range objs {
 		data := make([]byte, 20<<10)
-		for j := range data {
-			data[j] = byte(rng.Uint32())
-		}
+		fillRandom(rng, data)
 		objs[i] = gitpack.Object{Type: gitpack.Blob, Data: data}
 	}
 	names, err := w.svc.PutObjects(t.Context(), repo, objs)
@@ -1140,6 +1130,15 @@ func TestOnePassOfMaintenanceClearsABacklogOfLayers(t *testing.T) {
 	w.reachable(w.cold())
 }
 
+// fillRandom fills data with bytes that do not compress, eight for each call of rng.
+func fillRandom(rng *rand.Rand, data []byte) {
+	for i := 0; i < len(data); i += 8 {
+		var w [8]byte
+		binary.LittleEndian.PutUint64(w[:], rng.Uint64())
+		copy(data[i:], w[:])
+	}
+}
+
 func sha256sum(b []byte) [32]byte { return sha256.Sum256(b) }
 
 func b64(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
@@ -1212,9 +1211,7 @@ func TestAnotherRequestCannotPushOutWhatAPrefetchKept(t *testing.T) {
 	objs := make([]gitpack.Object, 500)
 	for i := range objs {
 		data := make([]byte, 20<<10)
-		for j := range data {
-			data[j] = byte(rng.Uint32())
-		}
+		fillRandom(rng, data)
 		objs[i] = gitpack.Object{Type: gitpack.Blob, Data: data}
 	}
 	names, err := w.svc.PutObjects(t.Context(), repo, objs)
@@ -1294,9 +1291,7 @@ func TestATreeReadFetchesOnlyTheHeadersOfItsBlobs(t *testing.T) {
 	var tree []byte
 	for i := range 100 {
 		data := make([]byte, 300<<10)
-		for j := range data {
-			data[j] = byte(rng.Uint32())
-		}
+		fillRandom(rng, data)
 		sha := gitpack.Hash(gitpack.Blob, data)
 		objs = append(objs, gitpack.Object{Type: gitpack.Blob, Data: data})
 		tree = append(tree, fmt.Sprintf("100644 f%03d\x00", i)...)
