@@ -62,7 +62,7 @@ Write no comment by default. A comment states why: a constraint, a hazard, or a 
 
 ## Checks
 
-ward lands a branch onto `main` only after it runs the checks of `.ward/checks.json`; the file mirrors the commands below in two checks, because the runner runs the checks of a repository one after another: `static` (build, vet, lint, gofmt) and `budget`, which runs every test with `-race` and so covers a plain `go test`. Its check `budget` runs the `testtime` command with `-time-allowance 1.5`, because the land runners are slower than the CI reference: the counts of processes, servers and schemas stay strict, and the time limits grow by that factor beside the calibration factor. CI keeps the strict limits.
+ward lands a branch onto `main` only after it runs the checks of `.ward/checks.json`; the file mirrors the commands below in two checks, because the runner runs the checks of a repository one after another: `static` (build, vet, lint, gofmt) and `budget`, which runs every test with `-race` and so covers a plain `go test`. Its check `budget` runs the `testtime` command with `-time-allowance 1.15`, because the land runners are slower than the CI reference: the counts of processes, servers and schemas stay strict, and the time limits grow by that factor beside the calibration factor. CI keeps the strict limits.
 
 ```bash
 go build ./...
