@@ -19,6 +19,7 @@ func TestParseKeysRefusesAnUnknownScope(t *testing.T) {
 func TestLoadConfigChoosesBackendsAndRefusesUnknownOnes(t *testing.T) {
 	t.Parallel()
 	keys := `[{"kid":"k","key":"` + strings.Repeat("A", 43) + `=","scopes":["node"]}]`
+	rangeCacheMiB := map[string]int{"postgres by default": 256, "range cache set": 512}
 	for name, c := range map[string]struct {
 		env map[string]string
 		ok  bool
@@ -35,14 +36,18 @@ func TestLoadConfigChoosesBackendsAndRefusesUnknownOnes(t *testing.T) {
 		"oidc never merges":    {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_OIDC_ISSUER": "https://t.example", "MOTTE_OIDC_AUDIENCE": "a", "MOTTE_OIDC_RULES": `[{"principals":["a@b"],"repos":["native:r"],"scope":"merge"}]`}, false},
 		"oidc needs an issuer": {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_OIDC_AUDIENCE": "a"}, false},
 		"tls needs both":       {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_TLS_CERT": "c.pem"}, false},
+		"range cache set":      {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_RANGE_CACHE_MIB": "512"}, true},
 		"range cache off":      {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_RANGE_CACHE_MIB": "0"}, true},
 		"bad range cache size": {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_RANGE_CACHE_MIB": "-5"}, false},
 		"postgres needs a DSN": {map[string]string{"MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d"}, false},
 	} {
 		c.env["MOTTE_TRUSTED_KEYS"] = keys
-		_, err := loadConfig(func(k string) string { return c.env[k] })
+		cfg, err := loadConfig(func(k string) string { return c.env[k] })
 		if (err == nil) != c.ok {
 			t.Errorf("%s: error = %v, want ok = %v", name, err, c.ok)
+		}
+		if want, ok := rangeCacheMiB[name]; ok && cfg.rangeCacheMiB != want {
+			t.Errorf("%s: range cache = %d MiB, want %d", name, cfg.rangeCacheMiB, want)
 		}
 	}
 }

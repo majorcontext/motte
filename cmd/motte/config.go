@@ -80,7 +80,7 @@ type config struct {
 //	MOTTE_COMPACTION       false (default) or true; true runs pack compaction, layer merges and file deletion on this replica
 //	MOTTE_COMPACTION_INTERVAL  wait between maintenance passes, a Go duration, default 30s
 //	MOTTE_COMPACTION_GRACE     how long a retired file stays before deletion, a Go duration, default 1h
-//	MOTTE_RANGE_CACHE_MIB      memory of the cache of pack ranges that requests share, in MiB, default 64; 0 turns it off
+//	MOTTE_RANGE_CACHE_MIB      memory of the cache of pack ranges that requests share, in MiB, default 256; 0 turns it off
 //	OTEL_EXPORTER_OTLP_ENDPOINT  optional; enables trace export
 func loadConfig(getenv func(string) string) (config, error) {
 	c := config{

@@ -6,7 +6,7 @@ import (
 )
 
 // DefaultRangeCacheBytes is the memory of the range cache when the option and the configuration do not set it.
-const DefaultRangeCacheBytes = 64 << 20
+const DefaultRangeCacheBytes = 256 << 20
 
 // rangeEntryBytes is what an entry charges beyond its data and the length of its pack name: the entry, the boxed key,
 // the map node and the ring slot.
