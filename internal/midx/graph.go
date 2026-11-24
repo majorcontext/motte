@@ -2,6 +2,7 @@ package midx
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -42,7 +43,7 @@ type Commit struct {
 // once.
 func BuildGraph(commits []Commit) ([]byte, error) {
 	cs := slices.Clone(commits)
-	sort.SliceStable(cs, func(i, j int) bool { return bytes.Compare(cs[i].SHA[:], cs[j].SHA[:]) < 0 })
+	slices.SortStableFunc(cs, func(a, b Commit) int { return bytes.Compare(a.SHA[:], b.SHA[:]) })
 	cs = slices.CompactFunc(cs, func(a, b Commit) bool { return a.SHA == b.SHA })
 	if len(cs) > MaxGraphCommits {
 		return nil, ErrGraphTooLarge
@@ -191,11 +192,11 @@ func MergeGraphs(gs []*Graph) ([]byte, error) {
 	for _, g := range gs {
 		all = slices.AppendSeq(all, g.Commits())
 	}
-	sort.SliceStable(all, func(i, j int) bool {
-		if c := bytes.Compare(all[i].SHA[:], all[j].SHA[:]); c != 0 {
-			return c < 0
+	slices.SortStableFunc(all, func(a, b Commit) int {
+		if c := bytes.Compare(a.SHA[:], b.SHA[:]); c != 0 {
+			return c
 		}
-		return all[i].Gen > all[j].Gen
+		return cmp.Compare(b.Gen, a.Gen)
 	})
 	return BuildGraph(all)
 }
