@@ -23,6 +23,11 @@ type Entry struct {
 	// Class is ClassMeta or ClassBlob when every pack of the layer holds only that class of object, and empty when a
 	// pack may hold both.
 	Class string `json:"c,omitempty"`
+	// Graph is the key of the commit graph file of the layer, Commits the number of commits that it holds and GraphSize
+	// the length of the file. All three are empty for a layer that has no graph.
+	Graph     string `json:"g,omitempty"`
+	Commits   int    `json:"gn,omitempty"`
+	GraphSize int64  `json:"gs,omitempty"`
 }
 
 // The classes of a layer. Metadata is commits, trees and tags.

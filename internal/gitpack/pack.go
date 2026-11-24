@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"math"
 	"slices"
 	"sort"
@@ -262,6 +263,31 @@ func (p *Pack) Verify(ctx context.Context, idx, pack []byte) error {
 }
 
 func (p *Pack) Count() int { return p.n }
+
+// WholeType returns the type of the object s and its size when the pack stores it whole, and false for a delta or an
+// object that the pack lacks. It reads the header of the entry only.
+func (p *Pack) WholeType(s SHA) (Type, int64, bool) {
+	off, ok := p.find(s)
+	if !ok {
+		return 0, 0, false
+	}
+	h, err := p.readHeader(off)
+	if err != nil || h.delta != 0 {
+		return 0, 0, false
+	}
+	return h.t, h.size, true
+}
+
+// Names returns the names of the objects of the pack, in the order of the index.
+func (p *Pack) Names() iter.Seq[SHA] {
+	return func(yield func(SHA) bool) {
+		for i := range p.n {
+			if !yield(SHA(p.names[20*i : 20*i+20])) {
+				return
+			}
+		}
+	}
+}
 
 func (p *Pack) find(s SHA) (int64, bool) {
 	if p.lookup != nil {

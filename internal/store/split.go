@@ -92,7 +92,7 @@ func (f filterIter) Next() (midx.Record, bool, error) {
 // splitPacks rewrites the packs of r as a pack of metadata and a pack of blobs. The metadata objects are written whole,
 // in the order of orderMeta. The blob entries are copied unchanged, except that the distance of an offset delta
 // follows the move of its base.
-func (s *Service) splitPacks(ctx context.Context, prefix string, r *run) ([]packOut, error) {
+func (s *Service) splitPacks(ctx context.Context, repo Repo, prefix string, r *run) ([]packOut, error) {
 	names := make([]map[gitpack.SHA]int64, len(r.packs))
 	byOff := make([]map[int64]gitpack.SHA, len(r.packs))
 	for u := range r.packs {
@@ -206,7 +206,8 @@ func (s *Service) splitPacks(ctx context.Context, prefix string, r *run) ([]pack
 		dropped = r.objects()
 	}
 	if len(metaObjs) > 0 {
-		pack, idx, _ := gitpack.Build(orderMeta(metaObjs))
+		ordered := orderMeta(metaObjs)
+		pack, idx, names := gitpack.Build(ordered)
 		it := idxRecords{gitpack.NewIdxIter(ctx, len(metaObjs), func(_ context.Context, off, n int64) ([]byte, error) {
 			if n < 0 {
 				return idx[off:], nil
@@ -222,7 +223,7 @@ func (s *Service) splitPacks(ctx context.Context, prefix string, r *run) ([]pack
 		if n != len(metaObjs) {
 			return nil, fmt.Errorf("store: compaction wrote %d metadata records of %d", n, len(metaObjs))
 		}
-		outs = append(outs, packOut{id: id, pack: pack, idx: idx, layer: l, class: midx.ClassMeta, objects: len(metaObjs)})
+		outs = append(outs, packOut{id: id, pack: pack, idx: idx, layer: l, class: midx.ClassMeta, objects: len(metaObjs), graph: s.graphOf(ctx, repo, ordered, names)})
 	}
 	metaRecords := 0
 	for _, o := range outs {

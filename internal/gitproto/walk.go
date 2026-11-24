@@ -115,6 +115,9 @@ func (c *collector) commit(sha gitpack.SHA) (*commitNode, error) {
 	if n, ok := c.commits[sha]; ok {
 		return n, nil
 	}
+	if n, ok, err := c.fromGraph(sha); err != nil || ok {
+		return n, err
+	}
 	t, data, err := c.objs.Get(c.ctx, sha)
 	if err != nil {
 		return nil, err
@@ -130,11 +133,30 @@ var (
 	errMalformed = errors.New("gitproto: malformed object")
 )
 
+// fromGraph returns the commit sha from a commit graph, when the objects have one that holds it.
+func (c *collector) fromGraph(sha gitpack.SHA) (*commitNode, bool, error) {
+	cs, ok := c.objs.(CommitSource)
+	if !ok {
+		return nil, false, nil
+	}
+	tree, parents, when, found, err := cs.CommitInfo(c.ctx, sha)
+	if err != nil || !found {
+		return nil, false, err
+	}
+	n, err := c.adoptNode(&commitNode{sha: sha, tree: tree, parents: parents, when: when})
+	return n, true, err
+}
+
 func (c *collector) adopt(sha gitpack.SHA, data []byte) (*commitNode, error) {
 	n, ok := parseCommit(sha, data)
 	if !ok {
 		return nil, errNotCommit
 	}
+	return c.adoptNode(n)
+}
+
+func (c *collector) adoptNode(n *commitNode) (*commitNode, error) {
+	sha := n.sha
 	c.commits[sha] = n
 	if c.parentRefs += len(n.parents); c.tracked() {
 		return nil, c.limit()
@@ -247,6 +269,15 @@ func (c *collector) collect(wants, haves []gitpack.SHA) ([]gitpack.SHA, error) {
 func (c *collector) want(sha gitpack.SHA, depth int) error {
 	if depth > 16 {
 		return RequestError("tag chain too long")
+	}
+	if n, ok := c.commits[sha]; ok {
+		return c.mark(n, false)
+	}
+	if n, ok, err := c.fromGraph(sha); err != nil || ok {
+		if err != nil {
+			return err
+		}
+		return c.mark(n, false)
 	}
 	t, data, err := c.objs.Get(c.ctx, sha)
 	if err != nil {

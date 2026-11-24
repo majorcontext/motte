@@ -386,16 +386,29 @@ func (s *Service) updateManifest(ctx context.Context, repo Repo, f func(*midx.Ma
 }
 
 // appendPack adds the pack that putPack stored as the newest layer, and merges the small layers at the tail.
-func (s *Service) appendPack(ctx context.Context, repo Repo, id string, bytes int64, idx []byte) error {
+func (s *Service) appendPack(ctx context.Context, repo Repo, id string, bytes int64, idx []byte, graph []midx.Commit) error {
 	n, err := gitpack.IdxCount(idx[:min(len(idx), gitpack.IdxHeadBytes)])
 	if err != nil {
 		return err
 	}
 	e := indexEntry(id, bytes, n)
+	if len(graph) > 0 {
+		prefix, err := repoPrefix(repo)
+		if err != nil {
+			return err
+		}
+		if e, err = s.withGraph(ctx, repo, prefix, id, e, graph); err != nil {
+			return err
+		}
+	}
 	err = s.updateManifest(ctx, repo, func(m *midx.Manifest) (bool, error) {
-		for _, l := range m.Layers {
+		for i, l := range m.Layers {
 			if l.IsIndex() && l.Packs[0].ID == id {
-				return false, nil
+				if l.Graph != "" || e.Graph == "" {
+					return false, nil
+				}
+				m.Layers[i].Graph, m.Layers[i].Commits, m.Layers[i].GraphSize = e.Graph, e.Commits, e.GraphSize
+				return true, nil
 			}
 		}
 		m.Layers = append(m.Layers, e)

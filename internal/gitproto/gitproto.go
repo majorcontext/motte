@@ -38,6 +38,12 @@ type Prefetcher interface {
 	Prefetch(ctx context.Context, shas []gitpack.SHA)
 }
 
+// CommitSource is an optional method of Objects: it returns the tree, the parents and the commit time of a commit from a
+// commit graph, without reading the commit object, and false when no graph holds the commit.
+type CommitSource interface {
+	CommitInfo(ctx context.Context, sha gitpack.SHA) (tree gitpack.SHA, parents []gitpack.SHA, when int64, ok bool, err error)
+}
+
 // Ref is a ref under its git name.
 type Ref struct {
 	Name string

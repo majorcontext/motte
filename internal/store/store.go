@@ -221,7 +221,7 @@ func WithGrace(d time.Duration) Option {
 
 const (
 	// DefaultReadBudget is the bytes that the shared bucket reads of all requests may hold at once.
-	DefaultReadBudget = 16 << 20
+	DefaultReadBudget = 48 << 20
 	// MinReadBudget is the least budget: a range that a prefetch plans is at most 1 MiB, and a read reserves three times
 	// its length.
 	MinReadBudget = 4 << 20
@@ -322,7 +322,7 @@ func (s *Service) PutObjects(ctx context.Context, repo Repo, objs []gitpack.Obje
 	}
 	pack, idx, names := gitpack.Build(objs)
 	sum := sha256.Sum256(pack)
-	if err := s.putPack(ctx, repo, hex.EncodeToString(sum[:]), idx, pack); err != nil {
+	if err := s.putPack(ctx, repo, hex.EncodeToString(sum[:]), idx, pack, nil); err != nil {
 		return nil, err
 	}
 	s.keepObjects(repo, objs, names)
@@ -354,7 +354,7 @@ func (s *Service) ImportPack(ctx context.Context, repo Repo, id string, idx, pac
 		}
 		return err
 	}
-	return s.putPack(ctx, repo, id, idx, pack)
+	return s.putPack(ctx, repo, id, idx, pack, s.graphOfPack(ctx, repo, p))
 }
 
 // ReceivePack stores the objects of a pushed pack as one pack of the repo. The pack may be thin: the service
@@ -391,14 +391,14 @@ func (s *Service) ReceivePack(ctx context.Context, repo Repo, pack []byte, held 
 	}
 	built, idx, names := gitpack.Build(objs)
 	sum := sha256.Sum256(built)
-	if err := s.putPack(ctx, repo, hex.EncodeToString(sum[:]), idx, built); err != nil {
+	if err := s.putPack(ctx, repo, hex.EncodeToString(sum[:]), idx, built, nil); err != nil {
 		return err
 	}
 	s.keepObjects(repo, objs, names)
 	return nil
 }
 
-func (s *Service) putPack(ctx context.Context, repo Repo, id string, idx, pack []byte) error {
+func (s *Service) putPack(ctx context.Context, repo Repo, id string, idx, pack []byte, graph []midx.Commit) error {
 	prefix, err := repoPrefix(repo)
 	if err != nil {
 		return err
@@ -415,7 +415,7 @@ func (s *Service) putPack(ctx context.Context, repo Repo, id string, idx, pack [
 	if err := s.index.AddPack(ctx, repo.String(), id, int64(len(pack))); err != nil {
 		return err
 	}
-	return s.appendPack(ctx, repo, id, int64(len(pack)), idx)
+	return s.appendPack(ctx, repo, id, int64(len(pack)), idx, graph)
 }
 
 type bytesReader []byte
@@ -541,6 +541,11 @@ type view struct {
 	layers []midx.Entry
 	// handles holds weak pointers to the layers that the request has probed, so a probe takes no lock after the first.
 	handles []atomic.Pointer[weak.Pointer[layerH]]
+	// graphs holds weak pointers to the graphs that the request has probed, for the same reason.
+	graphs []atomic.Pointer[weak.Pointer[midx.Graph]]
+	// noGraph holds the keys of the graphs that this request found missing or corrupt, so a walk does not load one again
+	// for each commit.
+	noGraph sync.Map
 	// lerr is the last failed read of a delta base, which the pack reports as a missing name.
 	lerr atomic.Pointer[error]
 	// ahead holds what the prefetches of the request read.
@@ -568,7 +573,7 @@ func (s *Service) view(ctx context.Context, repo Repo) (*view, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &view{s: s, prefix: prefix, layers: m.Layers, handles: make([]atomic.Pointer[weak.Pointer[layerH]], len(m.Layers)), ahead: &aheadBuf{}, before: before, after: time.Now()}, nil
+	return &view{s: s, prefix: prefix, layers: m.Layers, handles: make([]atomic.Pointer[weak.Pointer[layerH]], len(m.Layers)), graphs: make([]atomic.Pointer[weak.Pointer[midx.Graph]], len(m.Layers)), ahead: &aheadBuf{}, before: before, after: time.Now()}, nil
 }
 
 // locate returns the pack that holds sha, probing the newest layer first, with the layer and the number of the pack in

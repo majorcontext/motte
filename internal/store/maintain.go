@@ -224,12 +224,27 @@ func (x idxRecords) Next() (midx.Record, bool, error) {
 
 // mergeOnce merges the newest run that the rule picks. A write calls it with try set, and it then reserves from
 // inlineBudget and does nothing when that lacks the bytes.
+// afterLastGraph returns the layers newer than the newest layer that has a graph. A tail merge stops there, so a write
+// reads and writes no graph.
+func afterLastGraph(layers []midx.Entry) []midx.Entry {
+	for i := len(layers) - 1; i >= 0; i-- {
+		if layers[i].Graph != "" {
+			return layers[i+1:]
+		}
+	}
+	return layers
+}
+
 func (s *Service) mergeOnce(ctx context.Context, repo Repo, maxObjects int, try bool) (bool, error) {
 	m, _, err := s.loadManifest(ctx, repo)
 	if err != nil {
 		return false, err
 	}
-	run, ok := planByClass(m.Layers, func(l []midx.Entry) (midx.Plan, bool) {
+	layers := m.Layers
+	if try {
+		layers = afterLastGraph(layers)
+	}
+	run, ok := planByClass(layers, func(l []midx.Entry) (midx.Plan, bool) {
 		return midx.PlanMerge(l, maxObjects, maxFanIn, CompactMaxBytes)
 	})
 	if !ok {
@@ -301,7 +316,7 @@ func (s *Service) mergeRun(ctx context.Context, repo Repo, layers []midx.Entry, 
 	if err != nil {
 		return err
 	}
-	need := 2*int64(midx.RecordSize)*int64(r.objects()) + 4<<20
+	need := 2*int64(midx.RecordSize)*int64(r.objects()) + 4<<20 + 3*graphBytes(layers)
 	var release func()
 	if try {
 		if release = s.tryReserveInline(need); release == nil {
@@ -332,10 +347,16 @@ func (s *Service) mergeRun(ctx context.Context, repo Repo, layers []midx.Entry, 
 	if err != nil {
 		return err
 	}
+	if entry, err = s.mergedGraph(ctx, repo, prefix, entry, layers); err != nil {
+		return err
+	}
 	retire := make([]string, 0, len(layers))
 	for _, e := range layers {
 		if !e.IsIndex() {
 			retire = append(retire, e.Key)
+		}
+		if e.Graph != "" {
+			retire = append(retire, e.Graph)
 		}
 	}
 	if err := s.replace(ctx, repo, layers, []midx.Entry{entry}, retire); err != nil {
@@ -377,6 +398,8 @@ type packOut struct {
 	layer   midx.Layer
 	class   string
 	objects int
+	// graph holds the commits of a metadata pack, for its commit graph.
+	graph []midx.Commit
 }
 
 func (s *Service) compactRun(ctx context.Context, repo Repo, layers []midx.Entry) error {
@@ -396,7 +419,7 @@ func (s *Service) compactRun(ctx context.Context, repo Repo, layers []midx.Entry
 	for _, p := range r.packs {
 		biggest = max(biggest, p.Bytes)
 	}
-	need := total + biggest + 3*int64(midx.RecordSize)*int64(r.objects()) + 4<<20
+	need := total + biggest + 3*int64(midx.RecordSize)*int64(r.objects()) + 4<<20 + 3*graphBytes(layers)
 	class := layers[0].Class
 	splitNeed := need + 2*total + splitEntryBytes*int64(r.objects()) + 2*gitpack.MaxObjectBytes
 	split := class != midx.ClassBlob && splitNeed <= MemoryBudget/2
@@ -410,7 +433,7 @@ func (s *Service) compactRun(ctx context.Context, repo Repo, layers []midx.Entry
 	defer release()
 	var outs []packOut
 	if split {
-		outs, err = s.splitPacks(ctx, prefix, r)
+		outs, err = s.splitPacks(ctx, repo, prefix, r)
 	}
 	if !split || errors.Is(err, errInflated) {
 		var o packOut
@@ -433,7 +456,17 @@ func (s *Service) compactRun(ctx context.Context, repo Repo, layers []midx.Entry
 				return err
 			}
 		}
-		entries = append(entries, midx.Entry{Key: o.layer.Key, Objects: o.layer.Objects, Bytes: int64(len(o.pack)), NPacks: 1, Size: int64(len(o.layer.Data)), Dir: o.layer.Dir, Class: o.class})
+		entry := midx.Entry{Key: o.layer.Key, Objects: o.layer.Objects, Bytes: int64(len(o.pack)), NPacks: 1, Size: int64(len(o.layer.Data)), Dir: o.layer.Dir, Class: o.class}
+		switch {
+		case o.graph != nil:
+			entry, err = s.withGraph(ctx, repo, prefix, "", entry, o.graph)
+		case o.class != midx.ClassBlob:
+			entry, err = s.mergedGraph(ctx, repo, prefix, entry, layers)
+		}
+		if err != nil {
+			return err
+		}
+		entries = append(entries, entry)
 		bytes += int64(len(o.pack))
 		objects += o.objects
 	}
@@ -548,6 +581,9 @@ func (s *Service) retiredByCompaction(ctx context.Context, repo Repo, prefix str
 		inRun[e.Key] = true
 		if !e.IsIndex() {
 			out = append(out, e.Key)
+		}
+		if e.Graph != "" {
+			out = append(out, e.Graph)
 		}
 	}
 	var rest []midx.Entry
@@ -666,6 +702,9 @@ func (s *Service) collect(ctx context.Context, repo Repo) error {
 	keys := map[string]bool{}
 	for _, e := range m.Layers {
 		keys[e.Key] = true
+		if e.Graph != "" {
+			keys[e.Graph] = true
+		}
 	}
 	done := make([]string, 0, len(taken))
 	for _, key := range taken {

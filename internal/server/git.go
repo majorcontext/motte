@@ -328,7 +328,9 @@ func (s *Server) uploadPack(w http.ResponseWriter, r *http.Request, c call) erro
 	return s.abortAfterHeaders(w, r, up.Serve(r.Context(), w, bytes.NewReader(body)))
 }
 
-// reader adapts the object reader of the store to gitproto.
+// reader adapts the object reader of the store to gitproto. It gives a fetch the commit graph through CommitSource.
+var _ gitproto.CommitSource = reader{}
+
 type reader struct {
 	r      *store.Reader
 	before func(size int64) error
@@ -340,6 +342,10 @@ func (o reader) Get(ctx context.Context, sha gitpack.SHA) (gitpack.Type, []byte,
 		err = gitproto.ErrNotFound
 	}
 	return t, data, err
+}
+
+func (o reader) CommitInfo(ctx context.Context, sha gitpack.SHA) (gitpack.SHA, []gitpack.SHA, int64, bool, error) {
+	return o.r.GraphCommit(ctx, sha)
 }
 
 func (o reader) Prefetch(ctx context.Context, shas []gitpack.SHA) { o.r.Prefetch(ctx, shas) }

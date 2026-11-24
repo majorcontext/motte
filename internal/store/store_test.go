@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -538,6 +539,284 @@ func TestADeletedPacksRangesLeaveTheRangeCache(t *testing.T) {
 	if n := w.svc.CacheStats().RangeCacheBytes; n != 0 {
 		t.Errorf("the range cache holds %d bytes of ranges of a pack that maintenance deleted", n)
 	}
+}
+
+// pushHistory stores a random history of n commits, with merges, parents first, in batches of 7 commits, and returns
+// the commits in push order with their parents.
+func (w *world) pushHistory(n int) (names []gitpack.SHA, parents map[gitpack.SHA][]gitpack.SHA, times map[gitpack.SHA]int64) {
+	w.t.Helper()
+	rng := rand.New(rand.NewPCG(11, 12))
+	tree := gitpack.Hash(gitpack.Tree, nil)
+	parents, times = map[gitpack.SHA][]gitpack.SHA{}, map[gitpack.SHA]int64{}
+	batch := []gitpack.Object{{Type: gitpack.Tree, Data: nil}}
+	flush := func() {
+		pack, idx, _ := gitpack.Build(batch)
+		sum := sha256sum(pack)
+		if err := w.svc.ImportPack(w.t.Context(), repo, fmt.Sprintf("%x", sum), idx, pack); err != nil {
+			w.t.Fatal(err)
+		}
+		batch = nil
+	}
+	for i := range n {
+		var ps []gitpack.SHA
+		for range min(i, 1+rng.IntN(3)) {
+			if p := names[rng.IntN(len(names))]; !slices.Contains(ps, p) {
+				ps = append(ps, p)
+			}
+		}
+		text := "tree " + tree.String() + "\n"
+		for _, p := range ps {
+			text += "parent " + p.String() + "\n"
+		}
+		when := int64(1700000000 + i)
+		text += fmt.Sprintf("author a <a@b> %d +0000\ncommitter a <a@b> %d +0000\n\ncommit %d\n", when, when, i)
+		sha := gitpack.Hash(gitpack.Commit, []byte(text))
+		names, parents[sha], times[sha] = append(names, sha), ps, when
+		batch = append(batch, gitpack.Object{Type: gitpack.Commit, Data: []byte(text)})
+		if len(batch) == 7 {
+			flush()
+		}
+	}
+	if len(batch) > 0 {
+		flush()
+	}
+	return names, parents, times
+}
+
+func (w *world) checkGraph(svc *store.Service, names []gitpack.SHA, parents map[gitpack.SHA][]gitpack.SHA, times map[gitpack.SHA]int64) {
+	w.t.Helper()
+	rd, err := svc.Reader(w.t.Context(), repo)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	gen := map[gitpack.SHA]uint32{}
+	before := svc.CacheStats().RangeReads
+	for _, sha := range names {
+		_, ps, when, ok, err := rd.GraphCommit(w.t.Context(), sha)
+		if err != nil || !ok || when != times[sha] || !slices.Equal(ps, parents[sha]) {
+			w.t.Fatalf("graph of %s = %v, %d, %v, %v; want parents %v at %d", sha, ps, when, ok, err, parents[sha], times[sha])
+		}
+		gen[sha] = 1
+		for _, p := range ps {
+			gen[sha] = max(gen[sha], gen[p]+1)
+		}
+	}
+	if got := svc.CacheStats().RangeReads - before; got != 0 {
+		w.t.Errorf("reading the commits from the graph made %d pack reads, want 0", got)
+	}
+}
+
+// checkGraphSizes checks that the manifest records the length of each graph file, with the overflow list of a commit
+// with more than two parents.
+func (w *world) checkGraphSizes() {
+	w.t.Helper()
+	row, err := w.meta.Manifest(w.t.Context(), repo.String())
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	m, err := midx.DecodeManifest(row.Body)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	for _, e := range m.Layers {
+		if e.Graph == "" {
+			continue
+		}
+		data, err := w.mem.Get(w.t.Context(), "repos/native/"+b64("repo_x")+"/"+e.Graph)
+		if err != nil || int64(len(data)) != e.GraphSize {
+			w.t.Errorf("graph %s holds %d bytes, manifest says %d (%v)", e.Graph, len(data), e.GraphSize, err)
+		}
+	}
+}
+
+func TestGraphLookupsOfOneRequestTakeTheLayerCacheOncePerGraph(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	names, _, _ := w.pushHistory(200)
+	if err := w.svc.Maintain(t.Context(), repo); err != nil {
+		t.Fatal(err)
+	}
+	svc := w.cold()
+	rd, err := svc.Reader(t.Context(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := svc.CacheStats()
+	for _, sha := range names {
+		if _, _, _, ok, err := rd.GraphCommit(t.Context(), sha); !ok || err != nil {
+			t.Fatalf("GraphCommit = %v, %v", ok, err)
+		}
+	}
+	after := svc.CacheStats()
+	if n := after.IndexHits + after.IndexMisses - before.IndexHits - before.IndexMisses; n > 8 {
+		t.Errorf("200 lookups took the layer cache %d times, want once for each graph of the request", n)
+	}
+}
+
+func TestAMissingGraphIsLoadedOncePerRequestNotOncePerCommit(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	names, _, _ := w.pushHistory(60)
+	row, err := w.meta.Manifest(t.Context(), repo.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := midx.DecodeManifest(row.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range m.Layers {
+		if e.Graph != "" {
+			key := "repos/native/" + b64("repo_x") + "/" + e.Graph
+			v, err := w.mem.Version(t.Context(), key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := w.mem.Delete(t.Context(), key, v); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	svc := store.New(w.spy, w.meta, store.WithGrace(grace))
+	rd, err := svc.Reader(t.Context(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := w.spy.reads.Load()
+	for _, sha := range names {
+		if _, _, _, ok, err := rd.GraphCommit(t.Context(), sha); ok || err != nil {
+			t.Fatalf("GraphCommit = %v, %v; want no graph and no error", ok, err)
+		}
+	}
+	if got := w.spy.reads.Load() - before; got > int64(len(m.Layers)) {
+		t.Errorf("60 lookups of a missing graph made %d bucket reads, want at most %d, one for each layer", got, len(m.Layers))
+	}
+}
+
+func TestAGraphFileLongerThanItsManifestLengthIsReadOnlyToThatLength(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	names, _, _ := w.pushHistory(6)
+	row, err := w.meta.Manifest(t.Context(), repo.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := midx.DecodeManifest(row.Body)
+	if err != nil || len(m.Layers) != 1 || m.Layers[0].Graph == "" {
+		t.Fatalf("manifest = %+v, %v; want one layer with a graph", m.Layers, err)
+	}
+	e := m.Layers[0]
+	key := "repos/native/" + b64("repo_x") + "/" + e.Graph
+	v, err := w.mem.Version(t.Context(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := w.mem.Get(t.Context(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.mem.Delete(t.Context(), key, v); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.mem.Create(t.Context(), key, append(old, make([]byte, 19*e.GraphSize)...)); err != nil {
+		t.Fatal(err)
+	}
+	svc := w.cold()
+	rd, err := svc.Reader(t.Context(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, ok, err := rd.GraphCommit(t.Context(), names[0]); ok || err != nil {
+		t.Fatalf("GraphCommit = %v, %v; want no graph and no error", ok, err)
+	}
+	if got := svc.CacheStats().IndexBytes; got > e.GraphSize+1 {
+		t.Errorf("a graph file of 20 times its length cost %d bytes of reads, want at most %d", got, e.GraphSize+1)
+	}
+}
+
+func TestTheGraphReadsACommitAsTheWalkOfTheObjectsDoes(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	tree := gitpack.Hash(gitpack.Tree, nil)
+	tab := []byte("tree " + tree.String() + "\ncommitter a <a@b> 100\t+0000\n\nm\n")
+	zero := []byte("tree " + gitpack.SHA{}.String() + "\ncommitter a <a@b> 1 +0000\n\nm\n")
+	pack, idx, _ := gitpack.Build([]gitpack.Object{{Type: gitpack.Tree}, {Type: gitpack.Commit, Data: tab}, {Type: gitpack.Commit, Data: zero}})
+	if err := w.svc.ImportPack(t.Context(), repo, fmt.Sprintf("%x", sha256sum(pack)), idx, pack); err != nil {
+		t.Fatal(err)
+	}
+	rd, err := w.cold().Reader(t.Context(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, when, ok, err := rd.GraphCommit(t.Context(), gitpack.Hash(gitpack.Commit, tab)); !ok || err != nil || when != 100 {
+		t.Errorf("GraphCommit of a commit time after a tab = %d, %v, %v; want time 100", when, ok, err)
+	}
+	if _, _, _, ok, err := rd.GraphCommit(t.Context(), gitpack.Hash(gitpack.Commit, zero)); ok || err != nil {
+		t.Errorf("GraphCommit of a commit with an all-zero tree = %v, %v; want a miss, as the objects walk refuses it", ok, err)
+	}
+}
+
+func TestAPushStoresNoGraphAndItsCommitsAreReadFromObjects(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	tree := gitpack.Hash(gitpack.Tree, nil)
+	commit := gitpack.Object{Type: gitpack.Commit, Data: []byte("tree " + tree.String() + "\ncommitter a <a@b> 1 +0000\n\nm\n")}
+	if _, err := w.svc.PutObjects(t.Context(), repo, []gitpack.Object{{Type: gitpack.Tree}, commit}); err != nil {
+		t.Fatal(err)
+	}
+	row, err := w.meta.Manifest(t.Context(), repo.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := midx.DecodeManifest(row.Body)
+	if err != nil || len(m.Layers) != 1 || m.Layers[0].Graph != "" || m.Layers[0].Commits != 0 {
+		t.Fatalf("manifest = %+v, %v; want one layer without a graph", m.Layers, err)
+	}
+	rd, err := w.cold().Reader(t.Context(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, ok, err := rd.GraphCommit(t.Context(), gitpack.Hash(gitpack.Commit, commit.Data)); ok || err != nil {
+		t.Fatalf("GraphCommit = %v, %v; want a miss", ok, err)
+	}
+}
+
+func TestATailMergeStopsAtTheNewestLayerThatHasAGraph(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	w.pushHistory(6)
+	row, err := w.meta.Manifest(t.Context(), repo.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := midx.DecodeManifest(row.Body)
+	if err != nil || len(m.Layers) != 1 || m.Layers[0].Graph == "" {
+		t.Fatalf("manifest = %+v, %v; want the one layer of the import with a graph", m.Layers, err)
+	}
+	imported := m.Layers[0]
+	for range 4 {
+		w.push(2)
+	}
+	row, err = w.meta.Manifest(t.Context(), repo.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err = midx.DecodeManifest(row.Body); err != nil || m.Layers[0].Key != imported.Key || m.Layers[0].Graph != imported.Graph {
+		t.Fatalf("manifest = %+v, %v; want the layer of the import kept as it was", m.Layers, err)
+	}
+}
+
+func TestACommitGraphAnswersWithoutReadingCommitObjectsAndSurvivesMaintenance(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	names, parents, times := w.pushHistory(60)
+	w.checkGraphSizes()
+	w.checkGraph(w.cold(), names, parents, times)
+	w.pastGrace()
+	if err := w.svc.Maintain(t.Context(), repo); err != nil {
+		t.Fatal(err)
+	}
+	w.checkGraph(w.cold(), names, parents, times)
 }
 
 func TestACrashDuringMaintenanceLosesNothing(t *testing.T) {
