@@ -115,6 +115,18 @@ func New(cfg Config) *Server {
 	s.requests = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "motte_http_requests_total", Help: "Requests by route and status."}, []string{"route", "status"})
 	s.latency = prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "motte_http_request_duration_seconds", Help: "Request time by route.", Buckets: prometheus.DefBuckets}, []string{"route"})
 	s.registry.MustRegister(s.requests, s.latency, readLatency, readErrors)
+	if h, ok := cfg.Bucket.(interface{ HedgeStats() bucket.HedgeStats }); ok {
+		for _, m := range []struct {
+			name, help string
+			get        func(bucket.HedgeStats) int64
+		}{
+			{"motte_bucket_hedges_total", "Duplicate reads started on a slow bucket read.", func(h bucket.HedgeStats) int64 { return h.Hedges }},
+			{"motte_bucket_hedge_wins_total", "Duplicate reads whose answer came before the first read's.", func(h bucket.HedgeStats) int64 { return h.Wins }},
+			{"motte_bucket_hedges_skipped_total", "Slow bucket reads that got no duplicate for lack of a token or budget.", func(h bucket.HedgeStats) int64 { return h.Skipped }},
+		} {
+			s.registry.MustRegister(prometheus.NewCounterFunc(prometheus.CounterOpts{Name: m.name, Help: m.help}, func() float64 { return float64(m.get(h.HedgeStats())) }))
+		}
+	}
 	s.registerCacheMetrics()
 
 	s.mux = http.NewServeMux()

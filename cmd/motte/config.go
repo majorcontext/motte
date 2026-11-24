@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/majorcontext/motte/bucket"
 	"github.com/majorcontext/motte/bucket/s3"
 	"github.com/majorcontext/motte/grant"
 	"github.com/majorcontext/motte/internal/identity"
@@ -57,6 +58,8 @@ type config struct {
 	compactGrace time.Duration
 	pprof        string
 	gcsClients   int
+	// hedge tunes the duplicate reads of the gcs backend; a zero Ratio turns them off.
+	hedge bucket.HedgeConfig
 	// rangeCacheMiB is the memory of the range cache in MiB; 0 turns it off.
 	rangeCacheMiB int
 }
@@ -89,6 +92,9 @@ type config struct {
 //	MOTTE_RANGE_CACHE_MIB      memory of the cache of pack ranges that requests share, in MiB, default 256; 0 turns it off
 //	MOTTE_PPROF                optional; address of a listener that serves /debug/pprof, apart from MOTTE_LISTEN; MOTTE_PPROF_CONTENTION=1 adds the mutex and block profiles
 //	MOTTE_GCS_CLIENTS          gcs only: how many Cloud Storage clients, each with its own HTTP/2 connections, read in turn, from 1 to 64, default 8
+//	MOTTE_GCS_HEDGE            gcs only: the most reads, in percent from 0 to 50, that may start a duplicate when they are slow, default 5; 0 turns hedging off
+//	MOTTE_GCS_HEDGE_MIN        gcs only: the least wait before a duplicate, a Go duration, default 20ms
+//	MOTTE_GCS_HEDGE_MAX        gcs only: the most wait before a duplicate, a Go duration, default 2s
 //	OTEL_EXPORTER_OTLP_ENDPOINT  optional; enables trace export
 func loadConfig(getenv func(string) string) (config, error) {
 	c := config{
@@ -167,6 +173,11 @@ func loadConfig(getenv func(string) string) (config, error) {
 		}
 		c.gcsClients = n
 	}
+	hedge, err := loadHedge(getenv, c.bucketKind == "gcs")
+	if err != nil {
+		return config{}, err
+	}
+	c.hedge = hedge
 	keys, err := parseKeys(getenv("MOTTE_TRUSTED_KEYS"))
 	if err != nil {
 		return config{}, err
@@ -180,6 +191,34 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, errors.New("MOTTE_TLS_CERT and MOTTE_TLS_KEY go together")
 	}
 	return c, nil
+}
+
+func loadHedge(getenv func(string) string, gcs bool) (bucket.HedgeConfig, error) {
+	h := bucket.HedgeConfig{Ratio: 0.05, Min: 20 * time.Millisecond, Max: 2 * time.Second}
+	bad := errors.New("MOTTE_GCS_HEDGE is a percent from 0 to 50, MOTTE_GCS_HEDGE_MIN and MOTTE_GCS_HEDGE_MAX are durations with MIN at most MAX, and all need MOTTE_BUCKET_KIND=gcs")
+	for _, v := range []struct {
+		name string
+		set  func(string) error
+	}{
+		{"MOTTE_GCS_HEDGE", func(t string) error {
+			n, err := strconv.Atoi(t)
+			h.Ratio = float64(n) / 100
+			if err == nil && (n < 0 || n > 50) {
+				err = bad
+			}
+			return err
+		}},
+		{"MOTTE_GCS_HEDGE_MIN", func(t string) (err error) { h.Min, err = time.ParseDuration(t); return }},
+		{"MOTTE_GCS_HEDGE_MAX", func(t string) (err error) { h.Max, err = time.ParseDuration(t); return }},
+	} {
+		if t := getenv(v.name); t != "" && (!gcs || v.set(t) != nil) {
+			return h, bad
+		}
+	}
+	if h.Min > h.Max {
+		return h, bad
+	}
+	return h, nil
 }
 
 func loadOIDC(getenv func(string) string) (*oidc.Config, error) {

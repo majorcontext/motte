@@ -21,6 +21,7 @@ func TestLoadConfigChoosesBackendsAndRefusesUnknownOnes(t *testing.T) {
 	keys := `[{"kid":"k","key":"` + strings.Repeat("A", 43) + `=","scopes":["node"]}]`
 	rangeCacheMiB := map[string]int{"postgres by default": 256, "range cache set": 512}
 	gcsClients := map[string]int{"postgres by default": 8, "gcs clients set": 3}
+	hedge := map[string]float64{"postgres by default": 0.05, "hedge set": 0.1, "hedge off": 0}
 	for name, c := range map[string]struct {
 		env map[string]string
 		ok  bool
@@ -43,6 +44,11 @@ func TestLoadConfigChoosesBackendsAndRefusesUnknownOnes(t *testing.T) {
 		"gcs clients set":      {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "gcs", "MOTTE_BUCKET": "b", "MOTTE_GCS_CLIENTS": "3"}, true},
 		"no gcs clients":       {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "gcs", "MOTTE_BUCKET": "b", "MOTTE_GCS_CLIENTS": "0"}, false},
 		"gcs clients need gcs": {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_GCS_CLIENTS": "2"}, false},
+		"hedge set":            {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "gcs", "MOTTE_BUCKET": "b", "MOTTE_GCS_HEDGE": "10", "MOTTE_GCS_HEDGE_MAX": "1s"}, true},
+		"hedge off":            {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "gcs", "MOTTE_BUCKET": "b", "MOTTE_GCS_HEDGE": "0"}, true},
+		"hedge too much":       {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "gcs", "MOTTE_BUCKET": "b", "MOTTE_GCS_HEDGE": "80"}, false},
+		"hedge min above max":  {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "gcs", "MOTTE_BUCKET": "b", "MOTTE_GCS_HEDGE_MIN": "5s"}, false},
+		"hedge needs gcs":      {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_GCS_HEDGE": "5"}, false},
 		"postgres needs a DSN": {map[string]string{"MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d"}, false},
 	} {
 		c.env["MOTTE_TRUSTED_KEYS"] = keys
@@ -55,6 +61,9 @@ func TestLoadConfigChoosesBackendsAndRefusesUnknownOnes(t *testing.T) {
 		}
 		if want, ok := gcsClients[name]; ok && cfg.gcsClients != want {
 			t.Errorf("%s: gcs clients = %d, want %d", name, cfg.gcsClients, want)
+		}
+		if want, ok := hedge[name]; ok && cfg.hedge.Ratio != want {
+			t.Errorf("%s: hedge ratio = %v, want %v", name, cfg.hedge.Ratio, want)
 		}
 	}
 }

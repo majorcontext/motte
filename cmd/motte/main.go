@@ -55,14 +55,21 @@ func openBucket(ctx context.Context, c config) (bucket.Store, error) {
 		}
 		return s3.New(client, c.bucket), nil
 	}
-	clients := make([]*storage.Client, c.gcsClients)
+	clients := make([]*storage.Client, c.gcsClients+1)
+	if c.hedge.Ratio == 0 {
+		clients = clients[:c.gcsClients]
+	}
 	for i := range clients {
 		var err error
 		if clients[i], err = storage.NewClient(ctx); err != nil {
 			return nil, err
 		}
 	}
-	return gcs.NewPool(clients, c.bucket)
+	primary, err := gcs.NewPool(clients[:c.gcsClients], c.bucket)
+	if err != nil || c.hedge.Ratio == 0 {
+		return primary, err
+	}
+	return bucket.Hedge(primary, gcs.New(clients[c.gcsClients], c.bucket), c.hedge), nil
 }
 
 func openMeta(ctx context.Context, c config) (meta.Store, func(), error) {
