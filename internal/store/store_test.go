@@ -395,6 +395,151 @@ func TestABulkTreeReadReadsTheBlobHeadersOfManyTreesTogether(t *testing.T) {
 	})
 }
 
+func TestRequestsThatAskForOneRangeTogetherMakeOneBucketRead(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	w.push(20)
+	synctest.Test(t, func(t *testing.T) {
+		svc := store.New(slowBucket{w.mem, func() { time.Sleep(20 * time.Millisecond) }}, w.meta, store.WithGrace(grace))
+		if _, err := svc.Has(t.Context(), repo, w.have[:1]); err != nil {
+			t.Fatal(err)
+		}
+		before := svc.CacheStats().RangeReads
+		var wg sync.WaitGroup
+		for range 32 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if _, _, err := svc.Get(t.Context(), repo, w.have[0]); err != nil {
+					t.Error(err)
+				}
+			}()
+		}
+		wg.Wait()
+		if got := svc.CacheStats().RangeReads - before; got > 3 {
+			t.Errorf("32 requests for one object made %d bucket reads of its pack, want at most 3", got)
+		}
+	})
+}
+
+func TestSharedBucketReadsHoldAtMostTheReadBudget(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	rng := rand.New(rand.NewPCG(9, 10))
+	objs := make([]gitpack.Object, 24)
+	for i := range objs {
+		data := make([]byte, 240<<10)
+		for j := range data {
+			data[j] = byte(rng.Uint32())
+		}
+		objs[i] = gitpack.Object{Type: gitpack.Blob, Data: data}
+	}
+	names, err := w.svc.PutObjects(t.Context(), repo, objs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	synctest.Test(t, func(t *testing.T) {
+		var inFlight, peak atomic.Int64
+		bk := slowBucket{w.mem, func() { time.Sleep(20 * time.Millisecond) }}
+		svc := store.New(countingBucket{bk, &inFlight, &peak}, w.meta, store.WithGrace(grace), store.WithReadBudget(1))
+		var wg sync.WaitGroup
+		for _, name := range names {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				rd, err := svc.Reader(t.Context(), repo)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				rd.Prefetch(t.Context(), []gitpack.SHA{name})
+			}()
+		}
+		wg.Wait()
+		if got := peak.Load(); got > store.MinReadBudget/3 || got == 0 {
+			t.Errorf("shared bucket reads held %d bytes at once, want some and at most a third of the least budget, %d, because a read reserves three times its length", got, store.MinReadBudget/3)
+		}
+	})
+}
+
+// countingBucket tracks the bytes of the pack reads that are in flight.
+type countingBucket struct {
+	slowBucket
+	inFlight, peak *atomic.Int64
+}
+
+func (b countingBucket) GetRange(ctx context.Context, key string, off, n int64) ([]byte, error) {
+	now := b.inFlight.Add(n)
+	for p := b.peak.Load(); now > p && !b.peak.CompareAndSwap(p, now); p = b.peak.Load() {
+	}
+	defer b.inFlight.Add(-n)
+	return b.slowBucket.GetRange(ctx, key, off, n)
+}
+
+func TestTheRangeCacheStaysWithinItsBudget(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	rng := rand.New(rand.NewPCG(7, 8))
+	objs := make([]gitpack.Object, 200)
+	for i := range objs {
+		data := make([]byte, 20<<10)
+		for j := range data {
+			data[j] = byte(rng.Uint32())
+		}
+		objs[i] = gitpack.Object{Type: gitpack.Blob, Data: data}
+	}
+	names, err := w.svc.PutObjects(t.Context(), repo, objs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const budget = 512 << 10
+	svc := store.New(w.mem, w.meta, store.WithGrace(grace), store.WithRangeCache(budget))
+	rd, err := svc.Reader(t.Context(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < len(names); i += 20 {
+		rd.Prefetch(t.Context(), names[i:i+20])
+	}
+	st := svc.CacheStats()
+	if st.RangeCacheBytes > budget || st.RangeCacheBytes == 0 || st.RangeCacheEvictions == 0 {
+		t.Errorf("range cache holds %d bytes with %d evictions for a budget of %d, want some bytes, some evictions and no more than the budget", st.RangeCacheBytes, st.RangeCacheEvictions, budget)
+	}
+}
+
+func TestADeletedPacksRangesLeaveTheRangeCache(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	for range 10 {
+		w.push(2)
+	}
+	ctx := t.Context()
+	rd, err := w.svc.Reader(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.svc.Maintain(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	objs, victim := w.retiredPack()
+	if _, _, err := rd.Get(ctx, gitpack.Hash(objs[0].Type, objs[0].Data)); err != nil {
+		t.Fatal(err)
+	}
+	if w.svc.CacheStats().RangeCacheBytes == 0 {
+		t.Fatal("the read of the retired pack left nothing in the range cache")
+	}
+	w.pastGrace()
+	if err := w.svc.Maintain(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.mem.Get(ctx, "repos/native/"+b64("repo_x")+"/"+victim); err == nil {
+		t.Fatal("maintenance did not delete the retired pack")
+	}
+	if n := w.svc.CacheStats().RangeCacheBytes; n != 0 {
+		t.Errorf("the range cache holds %d bytes of ranges of a pack that maintenance deleted", n)
+	}
+}
+
 func TestACrashDuringMaintenanceLosesNothing(t *testing.T) {
 	t.Parallel()
 	for _, after := range []bool{false, true} {

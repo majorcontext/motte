@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/majorcontext/motte/grant"
 	"github.com/majorcontext/motte/internal/identity"
 	"github.com/majorcontext/motte/internal/identity/oidc"
+	"github.com/majorcontext/motte/internal/store"
 )
 
 func loadS3(getenv func(string) string, c *config) error {
@@ -49,6 +51,8 @@ type config struct {
 	compaction   bool
 	compactEvery time.Duration
 	compactGrace time.Duration
+	// rangeCacheMiB is the memory of the range cache in MiB; 0 turns it off.
+	rangeCacheMiB int
 }
 
 // loadConfig reads the configuration from the environment.
@@ -76,6 +80,7 @@ type config struct {
 //	MOTTE_COMPACTION       false (default) or true; true runs pack compaction, layer merges and file deletion on this replica
 //	MOTTE_COMPACTION_INTERVAL  wait between maintenance passes, a Go duration, default 30s
 //	MOTTE_COMPACTION_GRACE     how long a retired file stays before deletion, a Go duration, default 1h
+//	MOTTE_RANGE_CACHE_MIB      memory of the cache of pack ranges that requests share, in MiB, default 64; 0 turns it off
 //	OTEL_EXPORTER_OTLP_ENDPOINT  optional; enables trace export
 func loadConfig(getenv func(string) string) (config, error) {
 	c := config{
@@ -134,6 +139,14 @@ func loadConfig(getenv func(string) string) (config, error) {
 			}
 			*v.to = d
 		}
+	}
+	c.rangeCacheMiB = store.DefaultRangeCacheBytes >> 20
+	if text := getenv("MOTTE_RANGE_CACHE_MIB"); text != "" {
+		n, err := strconv.Atoi(text)
+		if err != nil || n < 0 || n > 4096 {
+			return config{}, errors.New("MOTTE_RANGE_CACHE_MIB must be a number of MiB from 0 to 4096")
+		}
+		c.rangeCacheMiB = n
 	}
 	keys, err := parseKeys(getenv("MOTTE_TRUSTED_KEYS"))
 	if err != nil {

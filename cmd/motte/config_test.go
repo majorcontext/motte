@@ -35,6 +35,8 @@ func TestLoadConfigChoosesBackendsAndRefusesUnknownOnes(t *testing.T) {
 		"oidc never merges":    {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_OIDC_ISSUER": "https://t.example", "MOTTE_OIDC_AUDIENCE": "a", "MOTTE_OIDC_RULES": `[{"principals":["a@b"],"repos":["native:r"],"scope":"merge"}]`}, false},
 		"oidc needs an issuer": {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_OIDC_AUDIENCE": "a"}, false},
 		"tls needs both":       {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_TLS_CERT": "c.pem"}, false},
+		"range cache off":      {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_RANGE_CACHE_MIB": "0"}, true},
+		"bad range cache size": {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_RANGE_CACHE_MIB": "-5"}, false},
 		"postgres needs a DSN": {map[string]string{"MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d"}, false},
 	} {
 		c.env["MOTTE_TRUSTED_KEYS"] = keys

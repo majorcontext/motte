@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"slices"
 	"sync"
@@ -153,15 +154,62 @@ func (b *packReader) cover(start, end int64) []byte {
 	return nil
 }
 
-// read reads [off, end) of the pack from the object store.
+// read returns [off, end) of the pack, from the range cache when an earlier request read it. Requests that ask for one
+// range together make one bucket read, which no single request cancels. That read outlives the request that began it,
+// so it holds bytes of the service-owned read budget, not of a request, until it ends.
 func (b *packReader) read(ctx context.Context, off, end int64) ([]byte, error) {
+	k := rangeKey{b.key, off, end}
+	if d, ok := b.svc.rcache.get(k); ok {
+		return d, nil
+	}
+	svc, st := b.svc, b.st
+	ch := svc.loads.DoChan(fmt.Sprintf("range|%s|%d|%d", b.key, off, end), func() (any, error) { return svc.loadRange(ctx, st, k) })
+	select {
+	case r := <-ch:
+		if r.Err != nil {
+			return nil, r.Err
+		}
+		return r.Val.([]byte), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// readBudgetFactor is how many times its length a read holds of the read budget: the final buffer, the chunks that the
+// readers of the buckets keep while they grow it, and the unused capacity of both.
+const readBudgetFactor = 3
+
+// loadRange reads the range k of a pack from the bucket st, unless a flight that ended since the caller missed the
+// cache has stored it. It holds bytes of the read budget while it reads. It runs after the request that began it may
+// have gone, so it keeps only the service, the bucket and the key, not the reader of the pack.
+func (s *Service) loadRange(ctx context.Context, st bucket.Store, k rangeKey) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), blockTimeout)
+	defer cancel()
+	if d, ok := s.rcache.peek(k); ok {
+		return d, nil
+	}
+	n := min(readBudgetFactor*(k.end-k.off), s.readBudget)
+	if err := s.rflight.Acquire(ctx, n); err != nil {
+		return nil, err
+	}
+	defer s.rflight.Release(n)
+	v := s.rcache.version()
+	d, err := s.readRange(ctx, st, k)
+	if err == nil {
+		s.rcache.put(k, d, v)
+	}
+	return d, err
+}
+
+// readRange reads the range k of a pack from the bucket st.
+func (s *Service) readRange(ctx context.Context, st bucket.Store, k rangeKey) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, blockTimeout)
 	defer cancel()
-	ctx, sp := tracer.Start(ctx, "vcs.pack.read", trace.WithAttributes(attribute.Int64("offset", off), attribute.Int64("range_bytes", end-off)))
-	d, err := b.st.GetRange(ctx, b.key, off, end-off)
+	ctx, sp := tracer.Start(ctx, "vcs.pack.read", trace.WithAttributes(attribute.Int64("offset", k.off), attribute.Int64("range_bytes", k.end-k.off)))
+	d, err := st.GetRange(ctx, k.pack, k.off, k.end-k.off)
 	statsFrom(ctx).rangeRead(len(d))
-	b.svc.rangeReads.Add(1)
-	b.svc.rangeBytes.Add(int64(len(d)))
+	s.rangeReads.Add(1)
+	s.rangeBytes.Add(int64(len(d)))
 	sp.SetAttributes(attribute.Int("bytes", len(d)))
 	finishSpan(sp, err)
 	return d, err

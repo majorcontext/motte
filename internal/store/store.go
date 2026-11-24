@@ -134,9 +134,13 @@ type Service struct {
 
 	icache *lru
 	ocache *lru
-	loads  singleflight.Group
-	maint  sync.Map
-	stats  maintStats
+	rcache *rangeCache
+	// rflight bounds the bytes of the bucket reads that outlive the requests that began them.
+	rflight    *semaphore.Weighted
+	readBudget int64
+	loads      singleflight.Group
+	maint      sync.Map
+	stats      maintStats
 
 	mu        sync.Mutex
 	open      map[string]*openPack
@@ -158,6 +162,10 @@ type CacheStats struct {
 	IndexHits, IndexMisses  int64
 	IndexEvictions          int64
 	IndexResident           int64
+	RangeCacheHits          int64
+	RangeCacheMisses        int64
+	RangeCacheBytes         int64
+	RangeCacheEvictions     int64
 }
 
 // CacheStats returns the counters of the open-pack cache.
@@ -166,10 +174,12 @@ func (s *Service) CacheStats() CacheStats {
 	open, bytes, ev := len(s.open), s.openBytes, s.evicted
 	s.mu.Unlock()
 	resident, iev := s.icache.stats()
+	rhits, rmisses, rused, revicted := s.rcache.stats()
 	return CacheStats{
 		Hits: s.hits.Load(), Misses: s.misses.Load(), Evictions: int64(ev), OpenPacks: int64(open), OpenBytes: int64(bytes),
 		IndexBytes: s.idxBytes.Load(), RangeReads: s.rangeReads.Load(), RangeBytes: s.rangeBytes.Load(),
 		IndexHits: s.ihits.Load(), IndexMisses: s.imisses.Load(), IndexEvictions: int64(iev), IndexResident: int64(resident),
+		RangeCacheHits: rhits, RangeCacheMisses: rmisses, RangeCacheBytes: rused, RangeCacheEvictions: revicted,
 	}
 }
 
@@ -209,6 +219,27 @@ func WithGrace(d time.Duration) Option {
 	}
 }
 
+const (
+	// DefaultReadBudget is the bytes that the shared bucket reads of all requests may hold at once.
+	DefaultReadBudget = 16 << 20
+	// MinReadBudget is the least budget: a range that a prefetch plans is at most 1 MiB, and a read reserves three times
+	// its length.
+	MinReadBudget = 4 << 20
+)
+
+// WithReadBudget sets the bytes that the shared bucket reads of all requests may hold at once, at least MinReadBudget.
+// It defaults to DefaultReadBudget.
+func WithReadBudget(bytes int64) Option {
+	return func(s *Service) {
+		n := max(bytes, MinReadBudget)
+		s.rflight, s.readBudget = semaphore.NewWeighted(n), n
+	}
+}
+
+// WithRangeCache sets the memory of the cache of pack ranges that requests share. A value of zero or less turns the
+// cache off. It defaults to DefaultRangeCacheBytes.
+func WithRangeCache(bytes int64) Option { return func(s *Service) { s.rcache = newRangeCache(bytes) } }
+
 // tryReserveInline takes bytes of inlineBudget and returns nil at once when it lacks them.
 func (s *Service) tryReserveInline(bytes int64) (release func()) {
 	n := min(bytes, inlineBudget)
@@ -219,7 +250,7 @@ func (s *Service) tryReserveInline(bytes int64) (release func()) {
 }
 
 func New(st bucket.Store, index PackIndex, opts ...Option) *Service {
-	s := &Service{st: st, index: index, clk: clock.Real(), grace: DefaultGrace, open: map[string]*openPack{}, budget: semaphore.NewWeighted(MemoryBudget), inline: semaphore.NewWeighted(inlineBudget), landed: semaphore.NewWeighted(LandBudget), icache: newLRU(maxIndexBytes), ocache: newLRU(maxObjectCacheBytes)}
+	s := &Service{st: st, index: index, clk: clock.Real(), grace: DefaultGrace, open: map[string]*openPack{}, budget: semaphore.NewWeighted(MemoryBudget), inline: semaphore.NewWeighted(inlineBudget), landed: semaphore.NewWeighted(LandBudget), icache: newLRU(maxIndexBytes), ocache: newLRU(maxObjectCacheBytes), rcache: newRangeCache(DefaultRangeCacheBytes), rflight: semaphore.NewWeighted(DefaultReadBudget), readBudget: DefaultReadBudget}
 	for _, o := range opts {
 		o(s)
 	}

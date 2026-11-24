@@ -686,6 +686,7 @@ func (s *Service) collect(ctx context.Context, repo Repo) error {
 		}
 		done = append(done, key)
 		if isPack {
+			s.rcache.dropPack(prefix + "/" + key)
 			if err := s.index.RemovePack(ctx, repo.String(), id); err != nil {
 				return err
 			}

@@ -43,6 +43,9 @@ type Config struct {
 	Lands LandsConfig
 	// Compaction tunes Compact. Zero values take the defaults.
 	Compaction CompactionConfig
+	// RangeCacheBytes is the memory of the cache of pack ranges that requests share. Zero takes the default, and a
+	// negative value turns the cache off.
+	RangeCacheBytes int64
 	// Warm makes the server answer /ready with 503 until Warm has opened every pack index.
 	Warm bool
 	// Clock paces the retry of Warm. It defaults to the real clock.
@@ -79,7 +82,7 @@ type Server struct {
 
 // New returns a Server over the metadata of cfg.Meta and the object store cfg.Bucket.
 func New(cfg Config) *Server {
-	s := &Server{index: cfg.Meta, objects: store.New(cfg.Bucket, cfg.Meta, store.WithClock(clock.Or(cfg.Clock)), store.WithGrace(cfg.Compaction.withDefaults().Grace)), compaction: cfg.Compaction.withDefaults(), logger: cfg.Logger, now: cfg.Now, readers: make(chan struct{}, uploadReaders), largeFetches: make(chan struct{}, fetchSlots), warmers: make(chan struct{}, landWarmers), wake: make(chan struct{}, 1), clock: clock.Or(cfg.Clock)}
+	s := &Server{index: cfg.Meta, objects: store.New(cfg.Bucket, cfg.Meta, store.WithClock(clock.Or(cfg.Clock)), store.WithGrace(cfg.Compaction.withDefaults().Grace), rangeCacheOption(cfg.RangeCacheBytes)), compaction: cfg.Compaction.withDefaults(), logger: cfg.Logger, now: cfg.Now, readers: make(chan struct{}, uploadReaders), largeFetches: make(chan struct{}, fetchSlots), warmers: make(chan struct{}, landWarmers), wake: make(chan struct{}, 1), clock: clock.Or(cfg.Clock)}
 	s.cold.Store(cfg.Warm)
 	if s.now == nil {
 		s.now = time.Now
@@ -183,6 +186,10 @@ func (s *Server) registerCacheMetrics() {
 	counter("motte_bucket_index_read_bytes_total", "Bytes of index layers read from the bucket.", func(c store.CacheStats) int64 { return c.IndexBytes })
 	counter("motte_bucket_range_reads_total", "Range reads of packs from the bucket.", func(c store.CacheStats) int64 { return c.RangeReads })
 	counter("motte_bucket_range_read_bytes_total", "Bytes of range reads of packs from the bucket.", func(c store.CacheStats) int64 { return c.RangeBytes })
+	counter("motte_range_cache_hits_total", "Range reads served by the range cache.", func(c store.CacheStats) int64 { return c.RangeCacheHits })
+	counter("motte_range_cache_misses_total", "Range reads that the range cache did not hold.", func(c store.CacheStats) int64 { return c.RangeCacheMisses })
+	counter("motte_range_cache_evictions_total", "Ranges evicted for the byte budget of the range cache.", func(c store.CacheStats) int64 { return c.RangeCacheEvictions })
+	gauge("motte_range_cache_bytes", "Bytes charged to the range cache.", func(c store.CacheStats) int64 { return c.RangeCacheBytes })
 	counter("motte_index_cache_hits_total", "Lookups of a layer or a block of records served by the layer cache.", func(c store.CacheStats) int64 { return c.IndexHits })
 	counter("motte_index_cache_misses_total", "Lookups of a layer or a block of records that read the bucket.", func(c store.CacheStats) int64 { return c.IndexMisses })
 	counter("motte_index_cache_evictions_total", "Layers and blocks evicted for the byte budget of the layer cache.", func(c store.CacheStats) int64 { return c.IndexEvictions })
@@ -205,4 +212,12 @@ func (s *Server) registerCacheMetrics() {
 	mgauge("motte_manifest_layers_max", "Most layers of any repository that maintenance has seen.", func(m store.MaintStats) int64 { return m.LayersMax })
 	mgauge("motte_manifest_layers_sum", "Layers of all repositories that maintenance has seen.", func(m store.MaintStats) int64 { return m.LayersSum })
 	mgauge("motte_manifest_repos", "Repositories that maintenance has seen.", func(m store.MaintStats) int64 { return m.Repos })
+}
+
+// rangeCacheOption maps Config.RangeCacheBytes to the option of the store: zero keeps the default.
+func rangeCacheOption(n int64) store.Option {
+	if n == 0 {
+		return func(*store.Service) {}
+	}
+	return store.WithRangeCache(max(n, 0))
 }

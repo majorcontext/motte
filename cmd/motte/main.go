@@ -107,7 +107,7 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	scfg := server.Config{Meta: db, Bucket: bucket, Verifier: grant.NewVerifier(cfg.keys...), Logger: log, Events: server.EventsConfig{Retention: cfg.retention}, Compaction: server.CompactionConfig{Interval: cfg.compactEvery, Grace: cfg.compactGrace}, Warm: true}
+	scfg := server.Config{Meta: db, Bucket: bucket, Verifier: grant.NewVerifier(cfg.keys...), Logger: log, Events: server.EventsConfig{Retention: cfg.retention}, Compaction: server.CompactionConfig{Interval: cfg.compactEvery, Grace: cfg.compactGrace}, RangeCacheBytes: rangeCacheBytes(cfg.rangeCacheMiB), Warm: true}
 	if cfg.oidc != nil {
 		if scfg.Identity, err = oidc.New(*cfg.oidc); err != nil {
 			return err
@@ -143,4 +143,12 @@ func run(log *slog.Logger) error {
 		return err
 	}
 	return nil
+}
+
+// rangeCacheBytes maps the setting in MiB to Config.RangeCacheBytes: a negative value turns the cache off.
+func rangeCacheBytes(mib int) int64 {
+	if mib == 0 {
+		return -1
+	}
+	return int64(mib) << 20
 }
