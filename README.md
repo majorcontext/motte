@@ -15,7 +15,7 @@ The store service, the client, the workspace daemon and the jj backend exist. Ea
 - Metadata in PostgreSQL or SQLite, and objects in Cloud Storage, S3 or a directory, each behind an interface.
 - The service opens the pack indexes before it answers ready.
 - Per-user tokens and OIDC identities for a person (see Developing).
-- Releases: service and daemon images, and the `jj` binary for linux amd64 and arm64.
+- Releases: service and daemon images, and the `jj` binary for Linux amd64 and arm64.
 
 ## Run locally
 
