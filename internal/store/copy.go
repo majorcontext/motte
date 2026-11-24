@@ -9,6 +9,8 @@ import (
 
 	"golang.org/x/sync/semaphore"
 
+	"github.com/majorcontext/motte/internal/midx"
+
 	"github.com/majorcontext/motte/internal/gitpack"
 )
 
@@ -21,7 +23,8 @@ const prefetchBatch = 256
 
 // copyRun is one read of Copy: the range of a pack and the objects that start in it, in offset order.
 type copyRun struct {
-	e          *openPack
+	pk         midx.Pack
+	meta       bool
 	start, end int64
 	objs       []placed
 }
@@ -47,14 +50,14 @@ func (r *Reader) Copy(ctx context.Context, shas []gitpack.SHA, ahead int64, befo
 	var found []placed
 	var missing []gitpack.SHA
 	for batch := range slices.Chunk(cold, placeBatch) {
-		f, m, err := r.v.placeNamed(ctx, batch)
+		f, m, err := r.v.placeNamed(ctx, batch, false)
 		if err != nil {
 			return err
 		}
 		found, missing = append(found, f...), append(missing, m...)
 	}
 	slices.SortFunc(found, func(a, b placed) int {
-		if c := strings.Compare(a.e.b.key, b.e.b.key); c != 0 {
+		if c := strings.Compare(a.pk.ID, b.pk.ID); c != 0 {
 			return c
 		}
 		return int(a.off - b.off)
@@ -96,6 +99,7 @@ func (r *Reader) copyRest(ctx context.Context, shas []gitpack.SHA, fn func(gitpa
 
 type copied struct {
 	data []byte
+	e    *openPack
 	err  error
 }
 
@@ -118,11 +122,12 @@ func (r *Reader) copyRuns(ctx context.Context, runs []copyRun, ahead int64, befo
 			}
 			queue <- ch
 			go func() {
-				d, err := run.e.b.read(ctx, run.start, run.end)
+				e := r.v.s.openPack(r.v.prefix, run.pk, run.meta)
+				d, err := e.b.read(ctx, run.start, run.end)
 				if err == nil && int64(len(d)) != run.end-run.start {
 					err = errors.New("store: short read of a pack run")
 				}
-				ch <- copied{data: d, err: err}
+				ch <- copied{data: d, e: e, err: err}
 			}()
 		}
 	}()
@@ -136,7 +141,7 @@ func (r *Reader) copyRuns(ctx context.Context, runs []copyRun, ahead int64, befo
 	for _, run := range runs {
 		c := <-<-queue
 		if c.err == nil {
-			c.err = r.copyRun(ctx, run, c.data, before, fn, fallback)
+			c.err = r.copyRun(ctx, run, c.e, c.data, before, fn, fallback)
 		}
 		if c.err != nil {
 			return c.err
@@ -146,7 +151,7 @@ func (r *Reader) copyRuns(ctx context.Context, runs []copyRun, ahead int64, befo
 	return nil
 }
 
-func (r *Reader) copyRun(ctx context.Context, run copyRun, d []byte, before func(size int64) error, fn func(gitpack.SHA, *gitpack.Raw) error, fallback *[]gitpack.SHA) error {
+func (r *Reader) copyRun(ctx context.Context, run copyRun, e *openPack, d []byte, before func(size int64) error, fn func(gitpack.SHA, *gitpack.Raw) error, fallback *[]gitpack.SHA) error {
 	for _, o := range run.objs {
 		raw, _, need, err := gitpack.RawEntry(d[o.off-run.start:])
 		if need > 0 {
@@ -155,9 +160,9 @@ func (r *Reader) copyRun(ctx context.Context, run copyRun, d []byte, before func
 					return err
 				}
 			}
-			end := min(o.off+need, run.e.b.size)
+			end := min(o.off+need, e.b.size)
 			var whole []byte
-			if whole, err = run.e.b.read(ctx, o.off, end); err != nil {
+			if whole, err = e.b.read(ctx, o.off, end); err != nil {
 				return err
 			}
 			raw, _, _, err = gitpack.RawEntry(whole)
@@ -179,13 +184,13 @@ func (r *Reader) copyRun(ctx context.Context, run copyRun, d []byte, before func
 func planCopy(found []placed) []copyRun {
 	var runs []copyRun
 	for i := 0; i < len(found); {
-		e, start := found[i].e, found[i].off
-		end := min(start+minRead, e.b.size)
+		pk, start := found[i].pk, found[i].off
+		end := min(start+minRead, pk.Bytes)
 		j := i + 1
-		for ; j < len(found) && found[j].e == e && found[j].off <= end+spanGap && min(found[j].off+minRead, e.b.size)-start <= maxRun; j++ {
-			end = max(end, min(found[j].off+minRead, e.b.size))
+		for ; j < len(found) && found[j].pk.ID == pk.ID && found[j].off <= end+spanGap && min(found[j].off+minRead, pk.Bytes)-start <= maxRun; j++ {
+			end = max(end, min(found[j].off+minRead, pk.Bytes))
 		}
-		runs = append(runs, copyRun{e, start, end, found[i:j]})
+		runs = append(runs, copyRun{pk, found[i].meta, start, end, found[i:j]})
 		i = j
 	}
 	return runs

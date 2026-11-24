@@ -218,3 +218,18 @@ func abortAfterHeader(h *harness, w http.ResponseWriter, r *http.Request, err er
 	w.WriteHeader(http.StatusOK)
 	return h.abortAfterHeaders(w, r, fmt.Errorf("write of a pack: %w", err))
 }
+
+func TestThePackWriteReservationGrowsWithTheLargestObjectItFindsWhileWriting(t *testing.T) {
+	t.Parallel()
+	f := &fetchHold{largest: fetchObject, srv: &Server{largeFetches: make(chan struct{}, 1)}, ctx: t.Context(), reservation: &reservation{take: func(int64) (func(), error) { return func() {}, nil }}}
+	if _, err := f.writeFor(1_000_000); err != nil {
+		t.Fatal(err)
+	}
+	before := f.cost()
+	if err := f.object(10 * fetchObject); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := f.cost()-before, 3*9*int64(fetchObject); got != want {
+		t.Errorf("a larger object raised the reservation of the pack write by %d, want %d (3 times the growth)", got, want)
+	}
+}

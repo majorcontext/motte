@@ -53,12 +53,17 @@ type fetchHold struct {
 	srv     *Server
 	ctx     context.Context
 	large   bool
-	// write is the reservation of the pack write, which cost takes when it is larger.
+	// write is the fixed part of the reservation of the pack write: its runs and its bookkeeping. cost adds the part that
+	// follows the largest object and the body, and takes the pack write when that is larger than the walk.
 	write int64
 }
 
 func (f *fetchHold) cost() int64 {
-	return max(fetchAhead+3*f.largest+fetchPerObject*int64(f.objects)+3*f.body, f.write)
+	walk := fetchAhead + 3*f.largest + fetchPerObject*int64(f.objects) + 3*f.body
+	if f.write == 0 {
+		return walk
+	}
+	return max(walk, f.write+3*f.largest+3*f.body)
 }
 
 // track grows the reservation to the objects of the sets.
@@ -88,7 +93,7 @@ func (f *fetchHold) resize() error {
 // its own bytes and the fetch keeps the larger of the two.
 func (f *fetchHold) writeFor(n int) (int64, error) {
 	ahead := fetchAhead + min(copyAheadMax, int64(n)*copyAheadPerObject)
-	f.write = ahead + 3*f.largest + 3*f.body + copyPerObject*int64(n)
+	f.write = ahead + copyPerObject*int64(n)
 	return ahead, f.resize()
 }
 

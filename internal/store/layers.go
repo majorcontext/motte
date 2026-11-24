@@ -192,21 +192,32 @@ func (s *Service) lookup(ctx context.Context, h *layerH, sha gitpack.SHA, ord in
 // names in one pass and reads each block of records once, at most readWorkers at a time.
 func (v *view) place(ctx context.Context, shas []gitpack.SHA) (map[*openPack][]int64, error) {
 	out := map[*openPack][]int64{}
-	found, _, err := v.placeNamed(ctx, shas)
+	found, _, err := v.placeNamed(ctx, shas, true)
 	for _, p := range found {
 		out[p.e] = append(out[p.e], p.off)
 	}
 	return out, err
 }
 
+// placed is the place of one object: its pack and offset. e is the open pack when the caller asked for it. A caller that
+// keeps many places asks for none and opens a pack from pk when it reads, so the places hold no cache of a pack.
 type placed struct {
-	sha gitpack.SHA
-	e   *openPack
-	off int64
+	sha  gitpack.SHA
+	pk   midx.Pack
+	meta bool
+	e    *openPack
+	off  int64
 }
 
 // placeNamed is place that keeps the name of each object, and returns the names that no layer holds.
-func (v *view) placeNamed(ctx context.Context, shas []gitpack.SHA) ([]placed, []gitpack.SHA, error) {
+func (v *view) placeNamed(ctx context.Context, shas []gitpack.SHA, open bool) ([]placed, []gitpack.SHA, error) {
+	place := func(sha gitpack.SHA, pk midx.Pack, meta bool, off int64) placed {
+		p := placed{sha: sha, pk: pk, meta: meta, off: off}
+		if open {
+			p.e = v.s.openPack(v.prefix, pk, meta)
+		}
+		return p
+	}
 	var out []placed
 	pending := slices.Clone(shas)
 	for i := len(v.layers) - 1; i >= 0 && len(pending) > 0; i-- {
@@ -218,8 +229,7 @@ func (v *view) placeNamed(ctx context.Context, shas []gitpack.SHA) ([]placed, []
 		if h.idx != nil {
 			for _, sha := range pending {
 				if off, ok := h.idx.Lookup(sha); ok {
-					e := v.s.openPack(v.prefix, h.packs[0], h.entry.Class == midx.ClassMeta)
-					out = append(out, placed{sha, e, off})
+					out = append(out, place(sha, h.packs[0], h.entry.Class == midx.ClassMeta, off))
 				} else {
 					keep = append(keep, sha)
 				}
@@ -239,8 +249,7 @@ func (v *view) placeNamed(ctx context.Context, shas []gitpack.SHA) ([]placed, []
 		}
 		for j, sha := range pending {
 			if found[j] {
-				e := v.s.openPack(v.prefix, h.packs[recs[j].Ord], h.entry.Class == midx.ClassMeta)
-				out = append(out, placed{sha, e, int64(recs[j].Off)})
+				out = append(out, place(sha, h.packs[recs[j].Ord], h.entry.Class == midx.ClassMeta, int64(recs[j].Off)))
 			} else {
 				keep = append(keep, sha)
 			}
