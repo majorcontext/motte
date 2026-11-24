@@ -6,11 +6,13 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -28,6 +30,7 @@ type harness struct {
 	pool  *pgxpool.Pool
 	token string
 	logs  *bytes.Buffer
+	ts    *httptest.Server
 }
 
 func start(t *testing.T) *harness {
@@ -52,9 +55,9 @@ func start(t *testing.T) *harness {
 
 func (h *harness) serve(t *testing.T) {
 	t.Helper()
-	ts := httptest.NewServer(h.Handler())
-	t.Cleanup(ts.Close)
-	h.url = ts.URL
+	h.ts = httptest.NewServer(h.Handler())
+	t.Cleanup(h.ts.Close)
+	h.url = h.ts.URL
 }
 
 func (h *harness) call(t *testing.T, method, path string, body any) (int, string) {
@@ -162,4 +165,56 @@ func TestLogSafeNamesAKnownCauseAndHidesTextBuiltFromData(t *testing.T) {
 			t.Errorf("%s: logSafe = %q, want %q and not %q", tc.name, got, tc.want, tc.deny)
 		}
 	}
+}
+
+func TestARequestThatTheClientAbandonsIsRecordedAs499AndLoggedAsInfo(t *testing.T) {
+	t.Parallel()
+	h := start(t)
+	cases := map[string]func(http.ResponseWriter, *http.Request) error{
+		"/v1/cancel-early": func(http.ResponseWriter, *http.Request) error {
+			return fmt.Errorf("read of a pack: %w", context.Canceled)
+		},
+		"/v1/cancel-upload":    func(http.ResponseWriter, *http.Request) error { return errBody },
+		"/v1/cancel-streaming": func(w http.ResponseWriter, r *http.Request) error { return abortAfterHeader(h, w, r, context.Canceled) },
+		"/v1/cancel-pipe":      func(w http.ResponseWriter, r *http.Request) error { return abortAfterHeader(h, w, r, syscall.EPIPE) },
+		"/v1/cancel-http2": func(w http.ResponseWriter, r *http.Request) error {
+			return abortAfterHeader(h, w, r, errors.New("http2: stream closed"))
+		},
+	}
+	started := map[string]chan struct{}{}
+	for path, fn := range cases {
+		started[path] = make(chan struct{})
+		h.handle(h.mux, "GET "+path, func(w http.ResponseWriter, r *http.Request, _ call) error {
+			close(started[path])
+			<-r.Context().Done()
+			return fn(w, r)
+		}, grant.ScopeOperator)
+	}
+	h.serve(t)
+	for path, ch := range started {
+		ctx, cancel := context.WithCancel(t.Context())
+		req, _ := http.NewRequestWithContext(ctx, "GET", h.url+path, nil)
+		req.Header.Set("Authorization", "Bearer "+h.token)
+		go func() { <-ch; cancel() }()
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			_ = resp.Body.Close()
+		}
+	}
+	h.ts.Close()
+	rec := httptest.NewRecorder()
+	h.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	for path := range cases {
+		if want := `motte_http_requests_total{route="GET ` + path + `",status="499"} 1`; !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("metrics lack %s", want)
+		}
+	}
+	if strings.Contains(h.logs.String(), `"level":"ERROR"`) || strings.Count(h.logs.String(), `"msg":"request canceled by the client"`) != len(cases) {
+		t.Errorf("log = %s, want %d INFO lines and no ERROR line", h.logs, len(cases))
+	}
+}
+
+// abortAfterHeader sends the header, as a response that streams does, and then fails with err.
+func abortAfterHeader(h *harness, w http.ResponseWriter, r *http.Request, err error) error {
+	w.WriteHeader(http.StatusOK)
+	return h.abortAfterHeaders(w, r, fmt.Errorf("write of a pack: %w", err))
 }

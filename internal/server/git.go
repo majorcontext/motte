@@ -293,7 +293,12 @@ func (s *Server) gitService(w http.ResponseWriter, r *http.Request, c call) erro
 // clean end of a truncated pack.
 func (s *Server) abortAfterHeaders(w http.ResponseWriter, r *http.Request, err error) error {
 	if sw, ok := w.(*statusWriter); ok && sw.wrote && err != nil {
-		s.logger.ErrorContext(r.Context(), "git response failed", "route", r.Pattern, "error", logSafe(err))
+		if r.Context().Err() != nil {
+			sw.status = statusClientClosed
+			s.logger.InfoContext(r.Context(), "request canceled by the client", "route", r.Pattern)
+		} else {
+			s.logger.ErrorContext(r.Context(), "git response failed", "route", r.Pattern, "error", logSafe(err))
+		}
 		panic(http.ErrAbortHandler)
 	}
 	return err

@@ -27,6 +27,9 @@ func (s *Server) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 	var opConflict *meta.OpHeadsConflict
 	var badRequest gitproto.RequestError
 	switch {
+	case clientCanceled(r, err):
+		s.logger.InfoContext(r.Context(), "request canceled by the client", "route", r.Pattern)
+		w.WriteHeader(statusClientClosed)
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, meta.ErrNotFound):
 		s.writeError(w, api.CodeNotFound, "not found", nil)
 	case errors.Is(err, store.ErrInvalid):
@@ -65,6 +68,19 @@ func (s *Server) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 		s.logger.ErrorContext(r.Context(), "request failed", "route", r.Pattern, "error", logSafe(err))
 		s.writeError(w, api.CodeInternal, "internal error", nil)
 	}
+}
+
+// statusClientClosed is the status that a proxy records for a client that closed its request before the answer.
+const statusClientClosed = 499
+
+// clientCanceled reports whether err is the end of a request that its client abandoned: the request context is
+// canceled, and the error is the cancel itself or the write to the closed connection that follows it. An error of any
+// other context, or of a client that is still there, is a failure of the service.
+func clientCanceled(r *http.Request, err error) bool {
+	if r.Context().Err() == nil {
+		return false
+	}
+	return errors.Is(err, context.Canceled) || errors.Is(err, errBody) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, net.ErrClosed)
 }
 
 var (
