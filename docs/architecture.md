@@ -110,6 +110,10 @@ motte-loadtest gen -key motte.key -out lt -objects 400000 -files 20000
 motte-loadtest run -key motte.key -out lt -scenario agents -c 64 -d 3m
 ```
 
+### Benchmarks
+
+The hot paths have Go benchmarks in the `_test.go` files of their packages: `internal/gitpack` (hash, inflate, delta apply), `internal/gitproto` (commit walk with and without the commit graph, tree walk, pack write), `internal/midx` (decode of a graph and of a size file, graph lookup, layer merge) and `internal/store` (lookup of an object across layers, the range cache, and `TreeBulk` with and without size files). A benchmark builds its fixture once, with fixed seeds, and resets the timer after that. It reports allocations, and where it helps a custom metric such as `bucket-reads/op` or `commit-reads/op`. Each runs in under a second at `-benchtime=1x`. A benchmark is tooling and not a contract test: `go test ./...` does not run it, and the test budgets count tests only. To compare two builds, run `go test -run='^$' -bench=. -count=10 ./internal/... > old.txt` on one, the same command on the other as `new.txt`, and `benchstat old.txt new.txt`. The change in a function that benchstat shows is a hint. The verdict on an end-to-end change is a pair of runs on a host (see Load test).
+
 ### Limits and memory
 
 - An object has at most 16 MiB (`gitpack.MaxObjectBytes`). A put of a larger object, and a read of a larger object in an imported pack, answer 413 `vcs_object_too_large`. A caller must not store a file above 16 MiB.
