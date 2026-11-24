@@ -192,18 +192,34 @@ func (s *Service) lookup(ctx context.Context, h *layerH, sha gitpack.SHA, ord in
 // names in one pass and reads each block of records once, at most readWorkers at a time.
 func (v *view) place(ctx context.Context, shas []gitpack.SHA) (map[*openPack][]int64, error) {
 	out := map[*openPack][]int64{}
+	found, _, err := v.placeNamed(ctx, shas)
+	for _, p := range found {
+		out[p.e] = append(out[p.e], p.off)
+	}
+	return out, err
+}
+
+type placed struct {
+	sha gitpack.SHA
+	e   *openPack
+	off int64
+}
+
+// placeNamed is place that keeps the name of each object, and returns the names that no layer holds.
+func (v *view) placeNamed(ctx context.Context, shas []gitpack.SHA) ([]placed, []gitpack.SHA, error) {
+	var out []placed
 	pending := slices.Clone(shas)
 	for i := len(v.layers) - 1; i >= 0 && len(pending) > 0; i-- {
 		h, err := v.handle(ctx, i)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		keep := pending[:0]
 		if h.idx != nil {
 			for _, sha := range pending {
 				if off, ok := h.idx.Lookup(sha); ok {
 					e := v.s.openPack(v.prefix, h.packs[0], h.entry.Class == midx.ClassMeta)
-					out[e] = append(out[e], off)
+					out = append(out, placed{sha, e, off})
 				} else {
 					keep = append(keep, sha)
 				}
@@ -219,19 +235,19 @@ func (v *view) place(ctx context.Context, shas []gitpack.SHA) (map[*openPack][]i
 			return v.s.blocks(ctx, h, idx)
 		})
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for j, sha := range pending {
 			if found[j] {
 				e := v.s.openPack(v.prefix, h.packs[recs[j].Ord], h.entry.Class == midx.ClassMeta)
-				out[e] = append(out[e], int64(recs[j].Off))
+				out = append(out, placed{sha, e, int64(recs[j].Off)})
 			} else {
 				keep = append(keep, sha)
 			}
 		}
 		pending = keep
 	}
-	return out, nil
+	return out, pending, nil
 }
 
 func (s *Service) blocks(ctx context.Context, h *layerH, idx []int) ([][]byte, error) {

@@ -754,3 +754,49 @@ func hashObj(t string, data []byte) SHA {
 	copy(s[:], h.Sum(nil))
 	return s
 }
+
+// Raw is a stored pack entry of a whole object that a writer can copy as it is: the type, the inflated size that the
+// entry header names, and the zlib stream. A delta has Delta set and no stream.
+type Raw struct {
+	Type  Type
+	Size  int64
+	Delta bool
+	Zlib  []byte
+}
+
+// RawEntry parses the pack entry at the start of data. For a whole object it returns the entry, whose stream is a
+// slice of data, and the bytes that the entry takes. When data ends inside the entry, it returns the most that the
+// entry can take as need and the size from the header in r. An entry that is not a valid zlib stream of the size that
+// its header names is ErrCorrupt.
+func RawEntry(data []byte) (r Raw, n int, need int64, err error) {
+	h, err := parseHeader(data[:min(len(data), 64)], math.MaxInt64)
+	if err != nil {
+		return Raw{}, 0, 0, err
+	}
+	r.Size = h.size
+	if h.delta != 0 {
+		r.Delta = true
+		return r, 0, 0, nil
+	}
+	r.Type = h.t
+	rest := bytes.NewReader(data[h.hlen:])
+	zr, err := zlib.NewReader(rest)
+	if err == nil {
+		var got int64
+		got, err = io.Copy(io.Discard, zr)
+		_ = zr.Close()
+		if err == nil && got != h.size {
+			err = ErrCorrupt
+		}
+	}
+	bound := int64(h.hlen) + deflateBound(h.size)
+	switch {
+	case err == nil:
+		n = len(data) - rest.Len()
+		r.Zlib = data[h.hlen:n]
+		return r, n, 0, nil
+	case (errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF)) && int64(len(data)) < bound:
+		return r, 0, bound, nil
+	}
+	return Raw{}, 0, 0, ErrCorrupt
+}

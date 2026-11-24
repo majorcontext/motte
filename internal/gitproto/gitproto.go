@@ -44,6 +44,13 @@ type CommitSource interface {
 	CommitInfo(ctx context.Context, sha gitpack.SHA) (tree gitpack.SHA, parents []gitpack.SHA, when int64, ok bool, err error)
 }
 
+// Copier is an optional method of Objects. Copy calls fn once for each of shas, in an order of its own choice, with
+// the stored pack entry of the object when a pack can copy it as it is, and with nil when the caller must read the
+// object with Get. The entry is valid until fn returns.
+type Copier interface {
+	Copy(ctx context.Context, shas []gitpack.SHA, fn func(sha gitpack.SHA, raw *gitpack.Raw) error) error
+}
+
 // Ref is a ref under its git name.
 type Ref struct {
 	Name string

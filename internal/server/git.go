@@ -348,6 +348,10 @@ func (o reader) CommitInfo(ctx context.Context, sha gitpack.SHA) (gitpack.SHA, [
 	return o.r.GraphCommit(ctx, sha)
 }
 
+func (o reader) Copy(ctx context.Context, shas []gitpack.SHA, fn func(gitpack.SHA, *gitpack.Raw) error) error {
+	return o.r.Copy(ctx, shas, o.before, fn)
+}
+
 func (o reader) Prefetch(ctx context.Context, shas []gitpack.SHA) { o.r.Prefetch(ctx, shas) }
 
 func (o reader) Has(ctx context.Context, shas []gitpack.SHA) ([]bool, error) {

@@ -244,6 +244,7 @@ func (u *Upload) fetch(ctx context.Context, w io.Writer, args []string) error {
 	}
 	c := &collector{objs: u.Objects, ctx: ctx, blobNone: req.blobNone, track: u.Track, phase: phase}
 	shas, err := c.collect(req.wants, common)
+	c.release()
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return RequestError("an object of the fetch is missing")

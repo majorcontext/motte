@@ -203,6 +203,11 @@ func (c *collector) mark(n *commitNode, unint bool) error {
 	return nil
 }
 
+// release drops the sets of the walk, which the pack write does not need.
+func (c *collector) release() {
+	c.commits, c.queue, c.skip, c.sent = nil, nil, nil, nil
+}
+
 // collect returns the objects that the wants reach and the haves do not hold.
 func (c *collector) collect(wants, haves []gitpack.SHA) ([]gitpack.SHA, error) {
 	c.commits = map[gitpack.SHA]*commitNode{}
