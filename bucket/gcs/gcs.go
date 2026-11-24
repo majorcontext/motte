@@ -87,12 +87,20 @@ func (g gcsBucket) read(ctx context.Context, key string, off, n int64) ([]byte, 
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("bucket: read: %w", err)
+		return nil, readError(err)
 	}
 	defer func() { _ = r.Close() }()
 	data, err := io.ReadAll(r)
 	if err != nil {
-		return nil, fmt.Errorf("bucket: read: %w", err)
+		return nil, readError(err)
 	}
 	return data, nil
+}
+
+func readError(err error) error {
+	var gerr *googleapi.Error
+	if errors.As(err, &gerr) {
+		err = bucket.WithStatus(err, gerr.Code)
+	}
+	return fmt.Errorf("bucket: read: %w", err)
 }

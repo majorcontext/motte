@@ -158,7 +158,7 @@ func (b s3Bucket) read(ctx context.Context, key string, rng *string, n int64) ([
 	case status(err) == http.StatusRequestedRangeNotSatisfiable:
 		return nil, nil
 	case err != nil:
-		return nil, fmt.Errorf("bucket: read: %w", err)
+		return nil, fmt.Errorf("bucket: read: %w", bucket.WithStatus(err, status(err)))
 	}
 	defer func() { _ = out.Body.Close() }()
 	var r io.Reader = out.Body

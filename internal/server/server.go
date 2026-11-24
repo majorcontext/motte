@@ -82,7 +82,19 @@ type Server struct {
 
 // New returns a Server over the metadata of cfg.Meta and the object store cfg.Bucket.
 func New(cfg Config) *Server {
-	s := &Server{index: cfg.Meta, objects: store.New(cfg.Bucket, cfg.Meta, store.WithClock(clock.Or(cfg.Clock)), store.WithGrace(cfg.Compaction.withDefaults().Grace), rangeCacheOption(cfg.RangeCacheBytes)), compaction: cfg.Compaction.withDefaults(), logger: cfg.Logger, now: cfg.Now, readers: make(chan struct{}, uploadReaders), largeFetches: make(chan struct{}, fetchSlots), warmers: make(chan struct{}, landWarmers), wake: make(chan struct{}, 1), clock: clock.Or(cfg.Clock)}
+	readLatency := prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "motte_bucket_read_duration_seconds", Help: "Time of reads from the bucket, by read kind.", Buckets: prometheus.ExponentialBuckets(0.005, 2, 14)}, []string{"op"})
+	readErrors := prometheus.NewCounterVec(prometheus.CounterOpts{Name: "motte_bucket_read_errors_total", Help: "Failed reads from the bucket, by kind of failure."}, []string{"kind"})
+	for _, k := range []string{bucket.KindTimeout, bucket.Kind5xx, bucket.KindOther} {
+		readErrors.WithLabelValues(k)
+	}
+	metered := bucket.Observe(cfg.Bucket, func(op string, d time.Duration, err error) {
+		if kind, failed := bucket.ErrorKind(err); failed {
+			readErrors.WithLabelValues(kind).Inc()
+		} else if err == nil {
+			readLatency.WithLabelValues(op).Observe(d.Seconds())
+		}
+	})
+	s := &Server{index: cfg.Meta, objects: store.New(metered, cfg.Meta, store.WithClock(clock.Or(cfg.Clock)), store.WithGrace(cfg.Compaction.withDefaults().Grace), rangeCacheOption(cfg.RangeCacheBytes)), compaction: cfg.Compaction.withDefaults(), logger: cfg.Logger, now: cfg.Now, readers: make(chan struct{}, uploadReaders), largeFetches: make(chan struct{}, fetchSlots), warmers: make(chan struct{}, landWarmers), wake: make(chan struct{}, 1), clock: clock.Or(cfg.Clock)}
 	s.cold.Store(cfg.Warm)
 	if s.now == nil {
 		s.now = time.Now
@@ -102,7 +114,7 @@ func New(cfg Config) *Server {
 	s.registry = prometheus.NewRegistry()
 	s.requests = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "motte_http_requests_total", Help: "Requests by route and status."}, []string{"route", "status"})
 	s.latency = prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "motte_http_request_duration_seconds", Help: "Request time by route.", Buckets: prometheus.DefBuckets}, []string{"route"})
-	s.registry.MustRegister(s.requests, s.latency)
+	s.registry.MustRegister(s.requests, s.latency, readLatency, readErrors)
 	s.registerCacheMetrics()
 
 	s.mux = http.NewServeMux()

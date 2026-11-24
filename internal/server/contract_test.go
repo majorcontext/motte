@@ -201,6 +201,9 @@ func TestImportedPackServesObjects(t *testing.T) {
 			t.Errorf("metrics show no %s", name)
 		}
 	}
+	if !regexp.MustCompile(`motte_bucket_read_duration_seconds_count\{op="[a-z_]+"\} [1-9]`).Match(text) {
+		t.Error("metrics show no bucket read latency")
+	}
 }
 
 func TestDeletedWorkspaceRefusesReadsAndWrites(t *testing.T) {
