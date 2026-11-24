@@ -19,10 +19,11 @@ import (
 	"github.com/majorcontext/motte/grant"
 )
 
-const usage = `usage: motte-loadtest gen|run|serve [flags]
+const usage = `usage: motte-loadtest gen|run|serve|bench [flags]
   gen    build a repository of -objects objects and write its manifest and samples to -out
   run    drive the clients of -mix, or the agents of -scenario agents, against the repository of -out and print a report
-  serve  run a local service on a filesystem bucket and SQLite, with -latency added to each bucket read`
+  serve  run a local service on a filesystem bucket and SQLite, with -latency added to each bucket read
+  bench  run a service, PostgreSQL and the load client in containers of this host on a real bucket, alone or as A/B pairs`
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -39,6 +40,8 @@ func main() {
 		err = runLoad(ctx, os.Args[2:])
 	case "serve":
 		err = runServe(ctx, os.Args[2:])
+	case "bench":
+		err = runBench(ctx, os.Args[2:])
 	default:
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)

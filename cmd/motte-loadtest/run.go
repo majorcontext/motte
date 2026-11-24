@@ -33,7 +33,7 @@ type runFlags struct {
 	cluster, commits, editFiles    int
 	pushEvery, exploreReads        int
 	landRetries, editLines         int
-	editWhole                      bool
+	editWhole, firstCold           bool
 	think                          time.Duration
 }
 
@@ -102,6 +102,7 @@ func runLoad(ctx context.Context, args []string) error {
 	fs.IntVar(&f.editLines, "edit-lines", 20, "agents: most lines that one edit of a file replaces or inserts, at most a quarter of the file")
 	fs.BoolVar(&f.editWhole, "edit-whole", false, "agents: rewrite each edited file as a whole instead of changing a region of it")
 	fs.Float64Var(&f.coldRate, "cold-rate", 0.05, "agents: chance that a task starts from a cold partial clone")
+	fs.BoolVar(&f.firstCold, "first-cold", false, "agents: apply -cold-rate to the first task of an agent too")
 	fs.DurationVar(&f.think, "think", 50*time.Millisecond, "agents: mean pause between steps")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -169,6 +170,8 @@ func runLoad(ctx context.Context, args []string) error {
 	wg.Wait()
 	elapsed := time.Since(start)
 	rep := buildReport(f, e.m, elapsed, outs, before, scrape(f.url), ws.stop())
+	rep.Applied = map[string]string{}
+	fs.Visit(func(fl *flag.Flag) { rep.Applied[fl.Name] = fl.Value.String() })
 	if f.agentic() {
 		rep.Agents = e.agents.report(elapsed, rep.Server)
 	}
@@ -295,6 +298,7 @@ func (e *env) pickOps(mix string) (opSet, error) {
 
 type report struct {
 	Flags    runFlags               `json:"flags"`
+	Applied  map[string]string      `json:"applied_flags"`
 	Manifest Manifest               `json:"manifest"`
 	Seconds  float64                `json:"seconds"`
 	Ops      []opReport             `json:"ops"`

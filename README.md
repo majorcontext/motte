@@ -53,3 +53,16 @@ ward land REPO my-change
 A deployment that trusts an OIDC issuer (`MOTTE_OIDC_*`) lets you sign in without a token. `MOTTE_OIDC_ISSUER=ISSUER MOTTE_OIDC_CLIENT_ID=ID motte login` runs the OAuth device flow, which any issuer with device support offers, and saves the token in your configuration directory with mode 0600. `git -c http.extraHeader="Authorization: Bearer $(motte login --print)" clone ...` uses it. An identity-aware proxy that signs a JWT in its own header, such as Cloudflare Access, is one configuration of the same verifier: set `MOTTE_OIDC_HEADER`, `MOTTE_OIDC_ISSUER`, `MOTTE_OIDC_AUDIENCE` and `MOTTE_OIDC_KEYS_URL` to its values.
 
 License: MIT. The `jj/` crate is Apache-2.0, because it adapts code from jj-lib.
+
+## Benchmarking on a host
+
+`motte-loadtest bench` needs a Linux host with Docker, `gcloud` and a bucket. It makes none of them. One way to make them:
+
+```
+gcloud iam service-accounts create bench --project P
+gcloud storage buckets create gs://B --project P --location us-central1 --uniform-bucket-level-access --public-access-prevention
+gcloud storage buckets add-iam-policy-binding gs://B --member=serviceAccount:bench@P.iam.gserviceaccount.com --role=roles/storage.objectAdmin
+gcloud compute instances create bench-1 --project P --zone us-central1-a --machine-type n2-standard-16 --image-family debian-12 --image-project debian-cloud --boot-disk-size 200GB --boot-disk-type pd-ssd --service-account bench@P.iam.gserviceaccount.com --scopes storage-rw
+```
+
+Install Docker on the host, copy two builds of `motte` (static, Linux) and one of `motte-loadtest`, and run `motte-loadtest bench pairs -a motte-old -b motte-new -bucket B -key motte.key -c 64 -n 4 -docker "sudo docker"`. Delete the host, the bucket and the service account when the measurement ends.

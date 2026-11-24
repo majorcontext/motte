@@ -22,7 +22,7 @@ func scrape(base string) map[string]float64 {
 	sc := bufio.NewScanner(resp.Body)
 	for sc.Scan() {
 		l := sc.Text()
-		if !strings.HasPrefix(l, "motte_pack_cache") && !strings.HasPrefix(l, "motte_bucket") && !strings.HasPrefix(l, "motte_index_cache") && !strings.HasPrefix(l, "motte_manifest") && !strings.HasPrefix(l, "motte_compaction") && !strings.HasPrefix(l, "motte_layer_merge") {
+		if !strings.HasPrefix(l, "motte_pack_cache") && !strings.HasPrefix(l, "motte_bucket") && !strings.HasPrefix(l, "motte_index_cache") && !strings.HasPrefix(l, "motte_range_cache") && !strings.HasPrefix(l, "motte_manifest") && !strings.HasPrefix(l, "motte_compaction") && !strings.HasPrefix(l, "motte_layer_merge") {
 			continue
 		}
 		k, v, ok := strings.Cut(l, " ")

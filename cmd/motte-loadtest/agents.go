@@ -196,7 +196,7 @@ func (a *agent) start(ctx context.Context) (tip, root string, err error) {
 		root, err = a.mount(ctx, tip)
 		return
 	}
-	cold := a.seen == "" || a.started && a.rng.Float64() < a.e.f.coldRate
+	cold := a.seen == "" || (a.started || a.e.f.firstCold) && a.rng.Float64() < a.e.f.coldRate
 	a.started = true
 	switch {
 	case cold:
