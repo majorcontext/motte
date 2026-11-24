@@ -6,8 +6,13 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/majorcontext/motte/bucket"
 	"github.com/majorcontext/motte/internal/gitpack"
 	"github.com/majorcontext/motte/internal/gitproto"
 	"github.com/majorcontext/motte/internal/pktline"
@@ -19,7 +24,7 @@ type plainObjects struct{ *store.Reader }
 type copyObjects struct{ plainObjects }
 
 func (o copyObjects) Copy(ctx context.Context, shas []gitpack.SHA, fn func(gitpack.SHA, *gitpack.Raw) error) error {
-	return o.Reader.Copy(ctx, shas, nil, fn)
+	return o.Reader.Copy(ctx, shas, store.ReadAheadBytes, nil, fn)
 }
 
 type phaseWriter struct {
@@ -35,9 +40,10 @@ func (p *phaseWriter) Write(b []byte) (int, error) {
 	return p.Buffer.Write(b)
 }
 
-func TestAPackWriteReadsTheTreesInFewLargeRuns(t *testing.T) {
-	t.Parallel()
-	w := newWorld(t)
+// copyFixture stores 2000 trees of 2 KiB in one pack in an order unrelated to the walk, and returns the commit that
+// reaches them and the objects of its clone.
+func copyFixture(t *testing.T, w *world) (gitpack.SHA, map[gitpack.SHA]gitpack.Object) {
+	t.Helper()
 	rng := rand.New(rand.NewPCG(5, 6))
 	var trees []gitpack.Object
 	for range 2000 {
@@ -72,6 +78,13 @@ func TestAPackWriteReadsTheTreesInFewLargeRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	return gitpack.Hash(gitpack.Commit, commit), want
+}
+
+func TestAPackWriteReadsTheTreesInFewLargeRuns(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	tip, want := copyFixture(t, w)
 	svc := store.New(w.mem, w.meta, store.WithClock(w.clock), store.WithGrace(grace), store.WithRangeCache(1<<20))
 	rd, err := svc.Reader(t.Context(), repo)
 	if err != nil {
@@ -82,7 +95,7 @@ func TestAPackWriteReadsTheTreesInFewLargeRuns(t *testing.T) {
 	pw := pktline.NewWriter(&req)
 	pw.Linef("command=fetch\n")
 	pw.Delim()
-	pw.Linef("want %s\n", gitpack.Hash(gitpack.Commit, commit))
+	pw.Linef("want %s\n", tip)
 	pw.Linef("filter blob:none\n")
 	pw.Linef("done\n")
 	pw.Flush()
@@ -121,5 +134,65 @@ func TestAPackWriteReadsTheTreesInFewLargeRuns(t *testing.T) {
 	t.Logf("%d range reads while the pack is written", writeReads)
 	if writeReads > 8 {
 		t.Errorf("the pack write made %d range reads for 4 MiB of trees, want at most 8: it must read each pack in large runs", writeReads)
+	}
+}
+
+type gatedStore struct {
+	bucket.Store
+	armed   atomic.Bool
+	now     atomic.Int64
+	peak    atomic.Int64
+	arrived chan struct{}
+	release chan struct{}
+}
+
+func (g *gatedStore) GetRange(ctx context.Context, key string, off, n int64) ([]byte, error) {
+	if g.armed.Load() && strings.HasSuffix(key, ".pack") {
+		defer g.now.Add(-1)
+		if p := g.now.Add(1); p > g.peak.Load() {
+			g.peak.Store(p)
+		}
+		g.arrived <- struct{}{}
+		<-g.release
+	}
+	return g.Store.GetRange(ctx, key, off, n)
+}
+
+func TestACopyReadsTheRunsItIsAllowedAhead(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	_, want := copyFixture(t, w)
+	var shas []gitpack.SHA
+	for sha := range want {
+		shas = append(shas, sha)
+	}
+	g := &gatedStore{Store: w.mem, arrived: make(chan struct{}, 64), release: make(chan struct{})}
+	svc := store.New(g, w.meta, store.WithClock(w.clock), store.WithGrace(grace), store.WithRangeCache(1<<20))
+	rd, err := svc.Reader(t.Context(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.armed.Store(true)
+	release := sync.OnceFunc(func() { close(g.release) })
+	defer release()
+	done := make(chan error, 1)
+	go func() {
+		done <- rd.Copy(t.Context(), shas, 4<<20, nil, func(gitpack.SHA, *gitpack.Raw) error { return nil })
+	}()
+	for range 3 {
+		select {
+		case <-g.arrived:
+		case err := <-done:
+			t.Fatalf("Copy ended with %v before it had 3 runs in flight", err)
+		case <-time.After(5 * time.Second): //lint:allow wallclock a read held at the gate is outside any bubble
+			t.Fatal("Copy did not have 3 runs in flight")
+		}
+	}
+	release()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if g.peak.Load() < 3 {
+		t.Errorf("at most %d runs were in flight, want 3 or more", g.peak.Load())
 	}
 }

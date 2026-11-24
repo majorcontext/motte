@@ -28,6 +28,10 @@ const (
 	fetchAhead     = store.ReadAheadBytes
 	fetchObject    = 1 << 20
 	fetchPerObject = 128
+	// The pack write keeps copyPerObject bytes for each object of its list and may read up to copyAheadMax bytes
+	// of runs ahead beyond the read-ahead, in what the reservation for the sets leaves.
+	copyPerObject = 40
+	copyAheadMax  = 16 << 20
 )
 
 // fetchLarge is the reservation above which a fetch takes one of the fetchSlots slots of large fetches, which a clone of
@@ -71,6 +75,12 @@ func (f *fetchHold) resize() error {
 		}
 	}
 	return f.grow(f.cost())
+}
+
+// copyAhead is the bytes of pack runs that the pack write of the fetch may have in flight: the read-ahead, and the part
+// of the reservation for the sets that the list of the pack write does not use.
+func (f *fetchHold) copyAhead() int64 {
+	return fetchAhead + min(copyAheadMax, max(0, (fetchPerObject-copyPerObject)*int64(f.objects)))
 }
 
 func (f *fetchHold) done() {
@@ -324,7 +334,7 @@ func (s *Server) uploadPack(w http.ResponseWriter, r *http.Request, c call) erro
 		return err
 	}
 	gitHeaders(w, "application/x-git-upload-pack-result")
-	up := &gitproto.Upload{Objects: reader{rd, fh.object}, Refs: refs, Head: head, Track: fh.track, Phase: store.Phases(r.Context(), "vcs.fetch.")}
+	up := &gitproto.Upload{Objects: reader{rd, fh.object, fh.copyAhead}, Refs: refs, Head: head, Track: fh.track, Phase: store.Phases(r.Context(), "vcs.fetch.")}
 	return s.abortAfterHeaders(w, r, up.Serve(r.Context(), w, bytes.NewReader(body)))
 }
 
@@ -334,6 +344,7 @@ var _ gitproto.CommitSource = reader{}
 type reader struct {
 	r      *store.Reader
 	before func(size int64) error
+	ahead  func() int64
 }
 
 func (o reader) Get(ctx context.Context, sha gitpack.SHA) (gitpack.Type, []byte, error) {
@@ -349,7 +360,7 @@ func (o reader) CommitInfo(ctx context.Context, sha gitpack.SHA) (gitpack.SHA, [
 }
 
 func (o reader) Copy(ctx context.Context, shas []gitpack.SHA, fn func(gitpack.SHA, *gitpack.Raw) error) error {
-	return o.r.Copy(ctx, shas, o.before, fn)
+	return o.r.Copy(ctx, shas, o.ahead(), o.before, fn)
 }
 
 func (o reader) Prefetch(ctx context.Context, shas []gitpack.SHA) { o.r.Prefetch(ctx, shas) }

@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 
+	"golang.org/x/sync/semaphore"
+
 	"github.com/majorcontext/motte/internal/gitpack"
 )
 
@@ -20,10 +22,11 @@ type copyRun struct {
 // Copy calls fn once for each of shas, with the stored pack entry of the object when a writer can copy it as it is,
 // and with nil for an object that it cannot: a delta, an object that the commit and tree cache holds, and an object
 // that no pack of the reader holds. It calls fn for the copyable objects first, in the physical order of the packs,
-// and reads each pack once from front to back in runs of at most maxRun, the next while fn runs on the current one.
+// and reads each pack once from front to back in runs of at most maxRun, reading the next runs while fn runs on the
+// current one, with at most ahead bytes of runs read or being read.
 // before is called with the size of an entry before the entry is read on its own. The entry that fn gets is valid
 // until fn returns.
-func (r *Reader) Copy(ctx context.Context, shas []gitpack.SHA, before func(size int64) error, fn func(sha gitpack.SHA, raw *gitpack.Raw) error) error {
+func (r *Reader) Copy(ctx context.Context, shas []gitpack.SHA, ahead int64, before func(size int64) error, fn func(sha gitpack.SHA, raw *gitpack.Raw) error) error {
 	var cold, nils []gitpack.SHA
 	for _, sha := range shas {
 		if _, _, ok := r.v.s.cached(r.v.prefix, sha, r.v.before); ok {
@@ -44,47 +47,8 @@ func (r *Reader) Copy(ctx context.Context, shas []gitpack.SHA, before func(size 
 		return int(a.off - b.off)
 	})
 	runs := planCopy(found)
-	read := func(i int) chan copied {
-		ch := make(chan copied, 1)
-		go func() {
-			run := runs[i]
-			n := run.end - run.start
-			if err := r.flight.Acquire(ctx, n); err != nil {
-				ch <- copied{err: err}
-				return
-			}
-			d, err := run.e.b.read(ctx, run.start, run.end)
-			if err == nil && int64(len(d)) != n {
-				err = errors.New("store: short read of a pack run")
-			}
-			ch <- copied{data: d, held: true, err: err}
-		}()
-		return ch
-	}
-	var next chan copied
-	if len(runs) > 0 {
-		next = read(0)
-	}
-	for i, run := range runs {
-		c := <-next
-		next = nil
-		if i+1 < len(runs) && c.err == nil {
-			next = read(i + 1)
-		}
-		if c.err == nil {
-			c.err = r.copyRun(ctx, run, c.data, before, fn, &nils)
-		}
-		if c.held {
-			r.flight.Release(run.end - run.start)
-		}
-		if c.err != nil {
-			if next != nil {
-				if n := <-next; n.held {
-					r.flight.Release(runs[i+1].end - runs[i+1].start)
-				}
-			}
-			return c.err
-		}
+	if err := r.copyRuns(ctx, runs, max(ahead, maxRun), before, fn, &nils); err != nil {
+		return err
 	}
 	for _, sha := range append(nils, missing...) {
 		if err := fn(sha, nil); err != nil {
@@ -96,8 +60,54 @@ func (r *Reader) Copy(ctx context.Context, shas []gitpack.SHA, before func(size 
 
 type copied struct {
 	data []byte
-	held bool
 	err  error
+}
+
+// copyRuns reads runs in order, up to ahead bytes of them at once, and copies each in turn.
+func (r *Reader) copyRuns(ctx context.Context, runs []copyRun, ahead int64, before func(size int64) error, fn func(gitpack.SHA, *gitpack.Raw) error, fallback *[]gitpack.SHA) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	flight := semaphore.NewWeighted(ahead)
+	queue := make(chan chan copied, len(runs))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer close(queue)
+		for _, run := range runs {
+			ch := make(chan copied, 1)
+			if err := flight.Acquire(ctx, run.end-run.start); err != nil {
+				ch <- copied{err: err}
+				queue <- ch
+				return
+			}
+			queue <- ch
+			go func() {
+				d, err := run.e.b.read(ctx, run.start, run.end)
+				if err == nil && int64(len(d)) != run.end-run.start {
+					err = errors.New("store: short read of a pack run")
+				}
+				ch <- copied{data: d, err: err}
+			}()
+		}
+	}()
+	defer func() {
+		cancel()
+		for ch := range queue {
+			<-ch
+		}
+		<-done
+	}()
+	for _, run := range runs {
+		c := <-<-queue
+		if c.err == nil {
+			c.err = r.copyRun(ctx, run, c.data, before, fn, fallback)
+		}
+		if c.err != nil {
+			return c.err
+		}
+		flight.Release(run.end - run.start)
+	}
+	return nil
 }
 
 func (r *Reader) copyRun(ctx context.Context, run copyRun, d []byte, before func(size int64) error, fn func(gitpack.SHA, *gitpack.Raw) error, fallback *[]gitpack.SHA) error {
