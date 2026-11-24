@@ -222,8 +222,11 @@ func abortAfterHeader(h *harness, w http.ResponseWriter, r *http.Request, err er
 func TestThePackWriteReservationGrowsWithTheLargestObjectItFindsWhileWriting(t *testing.T) {
 	t.Parallel()
 	f := &fetchHold{largest: fetchObject, srv: &Server{largeFetches: make(chan struct{}, 1)}, ctx: t.Context(), reservation: &reservation{take: func(int64) (func(), error) { return func() {}, nil }}}
-	if _, err := f.writeFor(1_000_000); err != nil {
+	if _, err := f.writeFor(1_000_000, 10); err != nil {
 		t.Fatal(err)
+	}
+	if got, want := f.write, int64(fetchAhead+copyAheadMax+160*1_000_000+256*10); got != want {
+		t.Errorf("the pack write of 1000000 objects in 10 packs reserves %d, the spec says %d", got, want)
 	}
 	before := f.cost()
 	if err := f.object(10 * fetchObject); err != nil {

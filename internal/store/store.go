@@ -756,6 +756,15 @@ func (s *Service) Reader(ctx context.Context, repo Repo) (*Reader, error) {
 	return newReader(v), nil
 }
 
+// Packs is the number of packs that the layers of the reader list.
+func (r *Reader) Packs() int {
+	n := 0
+	for _, l := range r.v.layers {
+		n += l.NPacks
+	}
+	return n
+}
+
 func (r *Reader) Get(ctx context.Context, sha gitpack.SHA) (gitpack.Type, []byte, error) {
 	return r.v.get(ctx, sha)
 }

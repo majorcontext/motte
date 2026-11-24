@@ -28,13 +28,16 @@ const (
 	fetchAhead     = store.ReadAheadBytes
 	fetchObject    = 1 << 20
 	fetchPerObject = 128
-	// The pack write keeps copyPerObject bytes for each object of its list: the name in the list and in the sorted
-	// copy (40), the place of the object (40), its run (48), the slot of the run in the queue (8) and the name of an
-	// object that it cannot copy (20). It reads copyAheadPerObject more bytes of runs ahead for each object, at most
+	// The pack write keeps copyPerObject bytes for each object of its list: the name in the list (20) and in the sorted
+	// copy (20), the place of the object (32), its run (48), the slot of the run in the queue (8) and the name of an
+	// object that it cannot copy (20), which is 148 and rounds up to 160. It reads copyAheadPerObject more bytes of runs ahead for each object, at most
 	// copyAheadMax, beyond the read-ahead.
-	copyPerObject      = 156
+	copyPerObject      = 160
 	copyAheadPerObject = 32
 	copyAheadMax       = 16 << 20
+	// The plan also keeps copyPerPack bytes for each pack of the repository: the reference to the pack, its id and the
+	// entry of the map that numbers the packs, all allocated at their full size.
+	copyPerPack = 256
 )
 
 // fetchLarge is the reservation above which a fetch takes one of the fetchSlots slots of large fetches, which a clone of
@@ -91,9 +94,9 @@ func (f *fetchHold) resize() error {
 // The write holds copyPerObject bytes for each object, the runs that it reads ahead, 3 times the largest object and 3
 // times the body. The reservation for the sets is no longer live then, but it is not given back, so the write counts
 // its own bytes and the fetch keeps the larger of the two.
-func (f *fetchHold) writeFor(n int) (int64, error) {
+func (f *fetchHold) writeFor(n, packs int) (int64, error) {
 	ahead := fetchAhead + min(copyAheadMax, int64(n)*copyAheadPerObject)
-	f.write = ahead + copyPerObject*int64(n)
+	f.write = ahead + copyPerObject*int64(n) + copyPerPack*int64(packs)
 	return ahead, f.resize()
 }
 
@@ -358,7 +361,7 @@ var _ gitproto.CommitSource = reader{}
 type reader struct {
 	r      *store.Reader
 	before func(size int64) error
-	write  func(n int) (int64, error)
+	write  func(n, packs int) (int64, error)
 }
 
 func (o reader) Get(ctx context.Context, sha gitpack.SHA) (gitpack.Type, []byte, error) {
@@ -374,7 +377,7 @@ func (o reader) CommitInfo(ctx context.Context, sha gitpack.SHA) (gitpack.SHA, [
 }
 
 func (o reader) Copy(ctx context.Context, shas []gitpack.SHA, fn func(gitpack.SHA, *gitpack.Raw) error) error {
-	ahead, err := o.write(len(shas))
+	ahead, err := o.write(len(shas), o.r.Packs())
 	if err != nil {
 		return err
 	}
