@@ -28,10 +28,13 @@ const (
 	fetchAhead     = store.ReadAheadBytes
 	fetchObject    = 1 << 20
 	fetchPerObject = 128
-	// The pack write keeps copyPerObject bytes for each object of its list and may read up to copyAheadMax bytes
-	// of runs ahead beyond the read-ahead, in what the reservation for the sets leaves.
-	copyPerObject = 40
-	copyAheadMax  = 16 << 20
+	// The pack write keeps copyPerObject bytes for each object of its list: the name in the list and in the sorted
+	// copy (40), the place of the object (40), its run (48), the slot of the run in the queue (8) and the name of an
+	// object that it cannot copy (20). It reads copyAheadPerObject more bytes of runs ahead for each object, at most
+	// copyAheadMax, beyond the read-ahead.
+	copyPerObject      = 156
+	copyAheadPerObject = 32
+	copyAheadMax       = 16 << 20
 )
 
 // fetchLarge is the reservation above which a fetch takes one of the fetchSlots slots of large fetches, which a clone of
@@ -50,10 +53,12 @@ type fetchHold struct {
 	srv     *Server
 	ctx     context.Context
 	large   bool
+	// write is the reservation of the pack write, which cost takes when it is larger.
+	write int64
 }
 
 func (f *fetchHold) cost() int64 {
-	return fetchAhead + 3*f.largest + fetchPerObject*int64(f.objects) + 3*f.body
+	return max(fetchAhead+3*f.largest+fetchPerObject*int64(f.objects)+3*f.body, f.write)
 }
 
 // track grows the reservation to the objects of the sets.
@@ -77,10 +82,14 @@ func (f *fetchHold) resize() error {
 	return f.grow(f.cost())
 }
 
-// copyAhead is the bytes of pack runs that the pack write of the fetch may have in flight: the read-ahead, and the part
-// of the reservation for the sets that the list of the pack write does not use.
-func (f *fetchHold) copyAhead() int64 {
-	return fetchAhead + min(copyAheadMax, max(0, (fetchPerObject-copyPerObject)*int64(f.objects)))
+// writeFor reserves the pack write of a list of n objects and returns the bytes of pack runs that it may have in flight.
+// The write holds copyPerObject bytes for each object, the runs that it reads ahead, 3 times the largest object and 3
+// times the body. The reservation for the sets is no longer live then, but it is not given back, so the write counts
+// its own bytes and the fetch keeps the larger of the two.
+func (f *fetchHold) writeFor(n int) (int64, error) {
+	ahead := fetchAhead + min(copyAheadMax, int64(n)*copyAheadPerObject)
+	f.write = ahead + 3*f.largest + 3*f.body + copyPerObject*int64(n)
+	return ahead, f.resize()
 }
 
 func (f *fetchHold) done() {
@@ -334,7 +343,7 @@ func (s *Server) uploadPack(w http.ResponseWriter, r *http.Request, c call) erro
 		return err
 	}
 	gitHeaders(w, "application/x-git-upload-pack-result")
-	up := &gitproto.Upload{Objects: reader{rd, fh.object, fh.copyAhead}, Refs: refs, Head: head, Track: fh.track, Phase: store.Phases(r.Context(), "vcs.fetch.")}
+	up := &gitproto.Upload{Objects: reader{rd, fh.object, fh.writeFor}, Refs: refs, Head: head, Track: fh.track, Phase: store.Phases(r.Context(), "vcs.fetch.")}
 	return s.abortAfterHeaders(w, r, up.Serve(r.Context(), w, bytes.NewReader(body)))
 }
 
@@ -344,7 +353,7 @@ var _ gitproto.CommitSource = reader{}
 type reader struct {
 	r      *store.Reader
 	before func(size int64) error
-	ahead  func() int64
+	write  func(n int) (int64, error)
 }
 
 func (o reader) Get(ctx context.Context, sha gitpack.SHA) (gitpack.Type, []byte, error) {
@@ -360,7 +369,11 @@ func (o reader) CommitInfo(ctx context.Context, sha gitpack.SHA) (gitpack.SHA, [
 }
 
 func (o reader) Copy(ctx context.Context, shas []gitpack.SHA, fn func(gitpack.SHA, *gitpack.Raw) error) error {
-	return o.r.Copy(ctx, shas, o.ahead(), o.before, fn)
+	ahead, err := o.write(len(shas))
+	if err != nil {
+		return err
+	}
+	return o.r.Copy(ctx, shas, ahead, o.before, fn)
 }
 
 func (o reader) Prefetch(ctx context.Context, shas []gitpack.SHA) { o.r.Prefetch(ctx, shas) }

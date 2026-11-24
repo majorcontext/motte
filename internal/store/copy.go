@@ -12,6 +12,13 @@ import (
 	"github.com/majorcontext/motte/internal/gitpack"
 )
 
+// placeBatch is the number of names that Copy places at once, so the index blocks that one placement holds stay within
+// placeBatch blocks.
+const placeBatch = 2048
+
+// prefetchBatch is the number of objects that Copy reads in advance for the objects that it cannot copy.
+const prefetchBatch = 256
+
 // copyRun is one read of Copy: the range of a pack and the objects that start in it, in offset order.
 type copyRun struct {
 	e          *openPack
@@ -36,9 +43,15 @@ func (r *Reader) Copy(ctx context.Context, shas []gitpack.SHA, ahead int64, befo
 		}
 	}
 	slices.SortFunc(cold, func(a, b gitpack.SHA) int { return bytes.Compare(a[:], b[:]) })
-	found, missing, err := r.v.placeNamed(ctx, cold)
-	if err != nil {
-		return err
+	r.v.ahead.reset()
+	var found []placed
+	var missing []gitpack.SHA
+	for batch := range slices.Chunk(cold, placeBatch) {
+		f, m, err := r.v.placeNamed(ctx, batch)
+		if err != nil {
+			return err
+		}
+		found, missing = append(found, f...), append(missing, m...)
 	}
 	slices.SortFunc(found, func(a, b placed) int {
 		if c := strings.Compare(a.e.b.key, b.e.b.key); c != 0 {
@@ -50,10 +63,33 @@ func (r *Reader) Copy(ctx context.Context, shas []gitpack.SHA, ahead int64, befo
 	if err := r.copyRuns(ctx, runs, max(ahead, maxRun), before, fn, &nils); err != nil {
 		return err
 	}
-	for _, sha := range append(nils, missing...) {
-		if err := fn(sha, nil); err != nil {
-			return err
+	return r.copyRest(ctx, append(nils, missing...), fn)
+}
+
+// copyRest calls fn with nil for each of shas, reading the next prefetchBatch objects in advance while fn runs on the
+// current ones.
+func (r *Reader) copyRest(ctx context.Context, shas []gitpack.SHA, fn func(gitpack.SHA, *gitpack.Raw) error) error {
+	ahead := func(from int) chan struct{} {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			if from < len(shas) {
+				r.Prefetch(ctx, shas[from:min(from+prefetchBatch, len(shas))])
+			}
+		}()
+		return done
+	}
+	cur := ahead(0)
+	for i := 0; i < len(shas); i += prefetchBatch {
+		nxt := ahead(i + prefetchBatch)
+		<-cur
+		for _, sha := range shas[i:min(i+prefetchBatch, len(shas))] {
+			if err := fn(sha, nil); err != nil {
+				<-nxt
+				return err
+			}
 		}
+		cur = nxt
 	}
 	return nil
 }

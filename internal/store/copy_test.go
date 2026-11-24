@@ -149,8 +149,8 @@ type gatedStore struct {
 func (g *gatedStore) GetRange(ctx context.Context, key string, off, n int64) ([]byte, error) {
 	if g.armed.Load() && strings.HasSuffix(key, ".pack") {
 		defer g.now.Add(-1)
-		if p := g.now.Add(1); p > g.peak.Load() {
-			g.peak.Store(p)
+		p := g.now.Add(1)
+		for q := g.peak.Load(); p > q && !g.peak.CompareAndSwap(q, p); q = g.peak.Load() {
 		}
 		g.arrived <- struct{}{}
 		<-g.release

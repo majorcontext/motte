@@ -101,6 +101,14 @@ func (a *aheadBuf) cover(b *packReader, start, end int64) []byte {
 	return nil
 }
 
+// reset drops what the buffer holds.
+func (a *aheadBuf) reset() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	clear(a.spans)
+	a.spans, a.held = nil, 0
+}
+
 func (a *aheadBuf) keep(b *packReader, off int64, d []byte) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
