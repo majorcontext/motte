@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -328,7 +329,7 @@ func (s *Service) PutObjects(ctx context.Context, repo Repo, objs []gitpack.Obje
 	}
 	pack, idx, names := gitpack.Build(objs)
 	sum := sha256.Sum256(pack)
-	if err := s.putPack(ctx, repo, hex.EncodeToString(sum[:]), idx, pack, nil); err != nil {
+	if err := s.putPack(ctx, repo, hex.EncodeToString(sum[:]), idx, pack, nil, objectSizes(objs, names)); err != nil {
 		return nil, err
 	}
 	s.keepObjects(repo, objs, names)
@@ -360,7 +361,7 @@ func (s *Service) ImportPack(ctx context.Context, repo Repo, id string, idx, pac
 		}
 		return err
 	}
-	return s.putPack(ctx, repo, id, idx, pack, s.graphOfPack(ctx, repo, p))
+	return s.putPack(ctx, repo, id, idx, pack, s.graphOfPack(ctx, repo, p), packSizes(p))
 }
 
 // ReceivePack stores the objects of a pushed pack as one pack of the repo. The pack may be thin: the service
@@ -397,22 +398,31 @@ func (s *Service) ReceivePack(ctx context.Context, repo Repo, pack []byte, held 
 	}
 	built, idx, names := gitpack.Build(objs)
 	sum := sha256.Sum256(built)
-	if err := s.putPack(ctx, repo, hex.EncodeToString(sum[:]), idx, built, nil); err != nil {
+	if err := s.putPack(ctx, repo, hex.EncodeToString(sum[:]), idx, built, nil, objectSizes(objs, names)); err != nil {
 		return err
 	}
 	s.keepObjects(repo, objs, names)
 	return nil
 }
 
-func (s *Service) putPack(ctx context.Context, repo Repo, id string, idx, pack []byte, graph []midx.Commit) error {
+func (s *Service) putPack(ctx context.Context, repo Repo, id string, idx, pack []byte, graph []midx.Commit, sizes []uint32) error {
 	prefix, err := repoPrefix(repo)
 	if err != nil {
 		return err
 	}
-	if err := s.claim(ctx, repo, id+".pack", id+".idx"); err != nil {
+	zfile := midx.BuildSizes(sizes)
+	zkey := sizeKey(zfile)
+	claims := []string{id + ".pack", id + ".idx"}
+	if zkey != "" {
+		claims = append(claims, zkey)
+	}
+	if err := s.claim(ctx, repo, claims...); err != nil {
 		return err
 	}
 	var g errgroup.Group
+	if zkey != "" {
+		g.Go(func() error { return s.storeSizes(ctx, prefix, zkey, zfile, len(sizes)) })
+	}
 	g.Go(func() error { _, err := s.st.Create(ctx, prefix+"/"+id+".idx", idx); return err })
 	g.Go(func() error { _, err := s.st.Create(ctx, prefix+"/"+id+".pack", pack); return err })
 	if err := g.Wait(); err != nil {
@@ -421,7 +431,7 @@ func (s *Service) putPack(ctx context.Context, repo Repo, id string, idx, pack [
 	if err := s.index.AddPack(ctx, repo.String(), id, int64(len(pack))); err != nil {
 		return err
 	}
-	return s.appendPack(ctx, repo, id, int64(len(pack)), idx, graph)
+	return s.appendPack(ctx, repo, id, int64(len(pack)), idx, graph, zkey)
 }
 
 type bytesReader []byte
@@ -984,8 +994,8 @@ func parseEntries(ctx context.Context, sha gitpack.SHA, data []byte) (Tree, erro
 	return tree, nil
 }
 
-// fillSizes sets the size of each blob entry of trees. It reads the headers of the blobs sizeBatch at a time, with
-// sizeWorkers reads at once, so the headers of a group stay in the read-ahead buffer until they are used.
+// fillSizes sets the size of each blob entry of trees. It takes the sizes that the size files of the layers hold, and
+// reads the headers of the other blobs sizeBatch at a time, with sizeWorkers reads at once, so the headers of a group stay in the read-ahead buffer until they are used.
 func (v *view) fillSizes(ctx context.Context, trees []Tree) error {
 	var blobs []gitpack.SHA
 	for _, t := range trees {
@@ -995,7 +1005,14 @@ func (v *view) fillSizes(ctx context.Context, trees []Tree) error {
 			}
 		}
 	}
-	sizes := make(map[gitpack.SHA]int64, len(blobs))
+	sorted := slices.Clone(blobs)
+	slices.SortFunc(sorted, func(a, b gitpack.SHA) int { return bytes.Compare(a[:], b[:]) })
+	sorted = slices.Compact(sorted)
+	sizes := make(map[gitpack.SHA]int64, len(sorted))
+	for from := 0; from < len(sorted); from += sizeBatch {
+		maps.Copy(sizes, v.indexedSizes(ctx, sorted[from:min(from+sizeBatch, len(sorted))]))
+	}
+	blobs = slices.DeleteFunc(blobs, func(sha gitpack.SHA) bool { _, ok := sizes[sha]; return ok })
 	rd := newReader(v)
 	for from := 0; from < len(blobs); from += sizeBatch {
 		group := blobs[from:min(from+sizeBatch, len(blobs))]

@@ -204,3 +204,25 @@ func TestPlansFollowTheGeometricRule(t *testing.T) {
 		}
 	}
 }
+
+func TestASizeFileRefusesACorruptBlock(t *testing.T) {
+	t.Parallel()
+	vals := make([]uint32, 600)
+	for i := range vals {
+		vals[i] = EncodeSize(int64(i))
+	}
+	file := BuildSizes(vals)
+	z, err := ParseSizes(file, len(vals))
+	if err != nil || z.At(599) != vals[599] {
+		t.Fatalf("parse: %v", err)
+	}
+	off, n := SizesBlockRange(1, len(vals))
+	block := append([]byte{}, file[off:off+n]...)
+	if _, err := BlockValues(1, block); err != nil {
+		t.Fatalf("block 1: %v", err)
+	}
+	block[7] ^= 1
+	if _, err := BlockValues(1, block); err == nil {
+		t.Error("a block with a flipped bit passed its CRC")
+	}
+}

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/majorcontext/motte/bucket"
 	"github.com/majorcontext/motte/internal/clock"
@@ -327,7 +328,7 @@ func (s *Service) mergeRun(ctx context.Context, repo Repo, layers []midx.Entry, 
 	if err != nil {
 		return err
 	}
-	need := 2*int64(midx.RecordSize)*int64(r.objects()) + 4<<20 + 3*graphBytes(layers)
+	need, inputSizes := mergeNeed(layers, r.objects())
 	var release func()
 	if try {
 		if release = s.tryReserveInline(need); release == nil {
@@ -340,6 +341,19 @@ func (s *Service) mergeRun(ctx context.Context, repo Repo, layers []midx.Entry, 
 	ins, err := s.recordIters(ctx, r)
 	if err != nil {
 		return err
+	}
+	if inputSizes {
+		zs := make([]*midx.Sizes, len(layers))
+		var lg errgroup.Group
+		for i, e := range layers {
+			lg.Go(func() error { zs[i] = s.sizesWhole(ctx, prefix, e); return nil })
+		}
+		_ = lg.Wait()
+		for i, z := range zs {
+			if z != nil {
+				ins[i] = midx.WithSizes(ins[i], z)
+			}
+		}
 	}
 	l, seen, err := midx.Merge(ctx, ins, r.packs, r.objects(), func(in int, rec midx.Record) (midx.Record, error) {
 		if int(rec.Ord) >= len(r.ords[in]) {
@@ -354,15 +368,23 @@ func (s *Service) mergeRun(ctx context.Context, repo Repo, layers []midx.Entry, 
 	if seen != r.objects() {
 		return fmt.Errorf("store: merge read %d records of %d", seen, r.objects())
 	}
-	entry, err := s.putLayer(ctx, repo, prefix, l, r)
-	if err != nil {
+	var entry midx.Entry
+	var zkey string
+	var pg errgroup.Group
+	pg.Go(func() (err error) { entry, err = s.putLayer(ctx, repo, prefix, l, r); return })
+	pg.Go(func() (err error) { zkey, err = s.sizeObject(ctx, repo, prefix, l.Sizes, l.Objects); return })
+	if err := pg.Wait(); err != nil {
 		return err
 	}
 	if entry, err = s.mergedGraph(ctx, repo, prefix, entry, layers); err != nil {
 		return err
 	}
+	entry.Sizes = zkey
 	retire := make([]string, 0, len(layers))
 	for _, e := range layers {
+		if e.Sizes != "" {
+			retire = append(retire, e.Sizes)
+		}
 		if !e.IsIndex() {
 			retire = append(retire, e.Key)
 		}
@@ -431,7 +453,7 @@ func (s *Service) compactRun(ctx context.Context, repo Repo, layers []midx.Entry
 	for _, p := range r.packs {
 		biggest = max(biggest, p.Bytes)
 	}
-	need := total + biggest + 3*int64(midx.RecordSize)*int64(r.objects()) + 4<<20 + 3*graphBytes(layers)
+	need := total + biggest + (3*int64(midx.RecordSize)+2*sizeBytes)*int64(r.objects()) + 4<<20 + 3*graphBytes(layers)
 	class := layers[0].Class
 	splitNeed := need + 2*total + splitEntryBytes*int64(r.objects()) + 2*gitpack.MaxObjectBytes
 	split := class != midx.ClassBlob && splitNeed <= MemoryBudget/2
@@ -469,6 +491,11 @@ func (s *Service) compactRun(ctx context.Context, repo Repo, layers []midx.Entry
 			}
 		}
 		entry := midx.Entry{Key: o.layer.Key, Objects: o.layer.Objects, Bytes: int64(len(o.pack)), NPacks: 1, Size: int64(len(o.layer.Data)), Dir: o.layer.Dir, Class: o.class}
+		if vals, err := layerSizes(o.layer, o.pack); err == nil {
+			if entry.Sizes, err = s.sizeObject(ctx, repo, prefix, midx.BuildSizes(vals), len(vals)); err != nil {
+				return err
+			}
+		}
 		switch {
 		case o.graph != nil:
 			entry, err = s.withGraph(ctx, repo, prefix, "", entry, o.graph)
@@ -598,6 +625,9 @@ func (s *Service) retiredByCompaction(ctx context.Context, repo Repo, prefix str
 		if e.Graph != "" {
 			out = append(out, e.Graph)
 		}
+		if e.Sizes != "" {
+			out = append(out, e.Sizes)
+		}
 	}
 	var rest []midx.Entry
 	for _, e := range m.Layers {
@@ -720,6 +750,9 @@ func (s *Service) collect(ctx context.Context, repo Repo) (err error) {
 		keys[e.Key] = true
 		if e.Graph != "" {
 			keys[e.Graph] = true
+		}
+		if e.Sizes != "" {
+			keys[e.Sizes] = true
 		}
 	}
 	done := make([]string, 0, len(taken))

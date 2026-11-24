@@ -46,6 +46,8 @@ type Record struct {
 	SHA SHA
 	Ord uint32
 	Off uint32
+	// Size is the stored size of the object (see EncodeSize). The layer file does not hold it: the size file does.
+	Size uint32
 }
 
 func (r Record) compare(o Record) int {
@@ -76,11 +78,12 @@ type Builder struct {
 	bloom []byte
 	n     int
 	last  Record
+	sizes *sizeBuf
 }
 
 // NewBuilder returns a Builder for a layer over packs with at most maxObjects records.
 func NewBuilder(packs []Pack, maxObjects int) *Builder {
-	return &Builder{packs: packs, recs: make([]byte, 0, RecordSize*maxObjects), bloom: make([]byte, bloomSize(maxObjects))}
+	return &Builder{packs: packs, recs: make([]byte, 0, RecordSize*maxObjects), bloom: make([]byte, bloomSize(maxObjects)), sizes: newSizeBuf(maxObjects)}
 }
 
 func bloomSize(n int) int { return (n*bloomBits + 7) / 8 }
@@ -93,6 +96,9 @@ func (b *Builder) Add(r Record) error {
 	if b.n > 0 {
 		switch c := r.compare(b.last); {
 		case c == 0:
+			if b.sizes.get(b.n-1) == 0 {
+				b.sizes.set(b.n-1, r.Size)
+			}
 			return nil
 		case c < 0:
 			return ErrCorrupt
@@ -104,6 +110,7 @@ func (b *Builder) Add(r Record) error {
 	b.recs = b.recs[:len(b.recs)+RecordSize]
 	r.put(b.recs[len(b.recs)-RecordSize:])
 	b.last = r
+	b.sizes.set(b.n, r.Size)
 	b.n++
 	return nil
 }
@@ -115,6 +122,8 @@ type Layer struct {
 	// Dir is the length of the tail of Data that Parse reads.
 	Dir     int
 	Objects int
+	// Sizes is the size file of the layer, and is nil when the builder knew no size.
+	Sizes []byte
 }
 
 // Finish returns the layer file. Its key is the SHA-256 of its bytes, so equal layers have one key.
@@ -157,7 +166,7 @@ func (b *Builder) Finish() (Layer, error) {
 	out = append(out, bloomK, 0, 0, 0)
 	sum := sha256.Sum256(out)
 	out = append(out, sum[:]...)
-	return Layer{Key: "midx/" + hex.EncodeToString(sum[:]) + ".midx", Data: out, Dir: dir, Objects: b.n}, nil
+	return Layer{Key: "midx/" + hex.EncodeToString(sum[:]) + ".midx", Data: out, Dir: dir, Objects: b.n, Sizes: b.sizes.finish(b.n)}, nil
 }
 
 func bloomAdd(bloom []byte, s *SHA) {
@@ -286,7 +295,13 @@ type FetchMany func(ctx context.Context, idx []int) ([][]byte, error)
 // LookupMany is Lookup of every name of shas in any pack. shas are sorted and distinct. It tests the filter and walks
 // the block fences once for the whole list, and asks fetch for each needed block once.
 func (d *Dir) LookupMany(ctx context.Context, shas []SHA, fetch FetchMany) ([]Record, []bool, error) {
-	recs, found := make([]Record, len(shas)), make([]bool, len(shas))
+	recs, found, _, err := d.LookupManyPos(ctx, shas, fetch)
+	return recs, found, err
+}
+
+// LookupManyPos is LookupMany that also returns the position of each record in the layer.
+func (d *Dir) LookupManyPos(ctx context.Context, shas []SHA, fetch FetchMany) ([]Record, []bool, []int, error) {
+	recs, found, pos := make([]Record, len(shas)), make([]bool, len(shas)), make([]int, len(shas))
 	nb := d.Blocks()
 	var at, of, blocks []int
 	lo := 0
@@ -298,7 +313,7 @@ func (d *Dir) LookupMany(ctx context.Context, shas []SHA, fetch FetchMany) ([]Re
 		lo += sort.Search(nb-lo, func(j int) bool { return getRecord(d.fence[RecordSize*(lo+j):]).compare(want) >= 0 })
 		if lo < nb {
 			if r := getRecord(d.fence[RecordSize*lo:]); r.SHA == s {
-				recs[i], found[i] = r, true
+				recs[i], found[i], pos[i] = r, true, lo*BlockRecords
 				continue
 			}
 		}
@@ -311,11 +326,11 @@ func (d *Dir) LookupMany(ctx context.Context, shas []SHA, fetch FetchMany) ([]Re
 		}
 	}
 	if len(at) == 0 {
-		return recs, found, nil
+		return recs, found, pos, nil
 	}
 	data, err := fetch(ctx, blocks)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	b := 0
 	for k, i := range at {
@@ -325,15 +340,15 @@ func (d *Dir) LookupMany(ctx context.Context, shas []SHA, fetch FetchMany) ([]Re
 		}
 		blk := data[b]
 		if len(blk)%RecordSize != 0 {
-			return nil, nil, ErrCorrupt
+			return nil, nil, nil, ErrCorrupt
 		}
 		n := len(blk) / RecordSize
 		j := sort.Search(n, func(j int) bool { return getRecord(blk[RecordSize*j:]).compare(want) >= 0 })
 		if j < n {
 			if r := getRecord(blk[RecordSize*j:]); r.SHA == shas[i] {
-				recs[i], found[i] = r, true
+				recs[i], found[i], pos[i] = r, true, of[k]*BlockRecords+j
 			}
 		}
 	}
-	return recs, found, nil
+	return recs, found, pos, nil
 }

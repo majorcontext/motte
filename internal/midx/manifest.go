@@ -28,6 +28,9 @@ type Entry struct {
 	Graph     string `json:"g,omitempty"`
 	Commits   int    `json:"gn,omitempty"`
 	GraphSize int64  `json:"gs,omitempty"`
+	// Sizes is the key of the size file of the layer: the inflated size of each of its records. A layer that has none
+	// has no key, and a release that does not know the field ignores it.
+	Sizes string `json:"z,omitempty"`
 }
 
 // The classes of a layer. Metadata is commits, trees and tags.

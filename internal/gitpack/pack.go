@@ -293,6 +293,19 @@ func (p *Pack) find(s SHA) (int64, bool) {
 	if p.lookup != nil {
 		return p.lookup(s)
 	}
+	i, ok := p.Index(s)
+	if !ok {
+		return 0, false
+	}
+	off := binary.BigEndian.Uint32(p.offs[4*i:])
+	if off&0x80000000 != 0 {
+		return int64(binary.BigEndian.Uint64(p.big[8*int(off&0x7fffffff):])), true
+	}
+	return int64(off), true
+}
+
+// Index returns the position of the object s in the order of the index.
+func (p *Pack) Index(s SHA) (int, bool) {
 	lo, hi := 0, int(p.fanout[s[0]])
 	if s[0] > 0 {
 		lo = int(p.fanout[s[0]-1])
@@ -303,11 +316,7 @@ func (p *Pack) find(s SHA) (int64, bool) {
 	if i >= hi || !bytes.Equal(p.names[20*i:20*i+20], s[:]) {
 		return 0, false
 	}
-	off := binary.BigEndian.Uint32(p.offs[4*i:])
-	if off&0x80000000 != 0 {
-		return int64(binary.BigEndian.Uint64(p.big[8*int(off&0x7fffffff):])), true
-	}
-	return int64(off), true
+	return i, true
 }
 
 // Lookup returns the offset of the object s in the pack.
@@ -461,6 +470,36 @@ func (p *Pack) Footprint(s SHA) (int64, error) {
 	return h.size, nil
 }
 
+// SizeAt returns the inflated size of the entry at off, whole or delta, without resolving a base.
+func (p *Pack) SizeAt(off int64) (int64, error) {
+	h, err := p.readHeader(off)
+	if err != nil {
+		return 0, err
+	}
+	if h.delta == 0 {
+		return h.size, nil
+	}
+	return p.deltaSize(off, h)
+}
+
+func (p *Pack) deltaSize(off int64, h header) (int64, error) {
+	sr := io.NewSectionReader(p.pack, off+int64(h.hlen), 2048)
+	zr, err := zlib.NewReader(sr)
+	if err != nil {
+		return 0, err
+	}
+	var pre [32]byte
+	n, _ := io.ReadFull(zr, pre[:])
+	_ = zr.Close()
+	b := pre[:n]
+	_, k := uvarint(b)
+	sz, _ := uvarint(b[k:])
+	if sz > MaxObjectBytes {
+		return 0, ErrTooLarge
+	}
+	return int64(sz), nil
+}
+
 func (p *Pack) sizeAt(off int64, depth int) (int64, Type, error) {
 	if depth > maxDeltaDepth {
 		return 0, 0, ErrCorrupt
@@ -472,20 +511,9 @@ func (p *Pack) sizeAt(off int64, depth int) (int64, Type, error) {
 	if h.delta == 0 {
 		return h.size, h.t, nil
 	}
-	// result size is the second varint of the inflated delta prefix
-	sr := io.NewSectionReader(p.pack, off+int64(h.hlen), 2048)
-	zr, err := zlib.NewReader(sr)
+	sz, err := p.deltaSize(off, h)
 	if err != nil {
 		return 0, 0, err
-	}
-	var pre [32]byte
-	n, _ := io.ReadFull(zr, pre[:])
-	_ = zr.Close()
-	b := pre[:n]
-	_, k := uvarint(b)
-	sz, _ := uvarint(b[k:])
-	if sz > MaxObjectBytes {
-		return 0, 0, ErrTooLarge
 	}
 	var t Type
 	if h.delta == 6 {
@@ -497,7 +525,7 @@ func (p *Pack) sizeAt(off int64, depth int) (int64, Type, error) {
 		}
 		_, t, err = p.sizeAt(boff, depth+1)
 	}
-	return int64(sz), t, err
+	return sz, t, err
 }
 
 func uvarint(b []byte) (uint64, int) {

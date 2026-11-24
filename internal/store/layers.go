@@ -386,12 +386,13 @@ func (s *Service) updateManifest(ctx context.Context, repo Repo, f func(*midx.Ma
 }
 
 // appendPack adds the pack that putPack stored as the newest layer, and merges the small layers at the tail.
-func (s *Service) appendPack(ctx context.Context, repo Repo, id string, bytes int64, idx []byte, graph []midx.Commit) error {
+func (s *Service) appendPack(ctx context.Context, repo Repo, id string, bytes int64, idx []byte, graph []midx.Commit, sizes string) error {
 	n, err := gitpack.IdxCount(idx[:min(len(idx), gitpack.IdxHeadBytes)])
 	if err != nil {
 		return err
 	}
 	e := indexEntry(id, bytes, n)
+	e.Sizes = sizes
 	if len(graph) > 0 {
 		prefix, err := repoPrefix(repo)
 		if err != nil {
@@ -404,10 +405,16 @@ func (s *Service) appendPack(ctx context.Context, repo Repo, id string, bytes in
 	err = s.updateManifest(ctx, repo, func(m *midx.Manifest) (bool, error) {
 		for i, l := range m.Layers {
 			if l.IsIndex() && l.Packs[0].ID == id {
-				if l.Graph != "" || e.Graph == "" {
+				graph, size := l.Graph == "" && e.Graph != "", l.Sizes == "" && e.Sizes != ""
+				if !graph && !size {
 					return false, nil
 				}
-				m.Layers[i].Graph, m.Layers[i].Commits, m.Layers[i].GraphSize = e.Graph, e.Commits, e.GraphSize
+				if graph {
+					m.Layers[i].Graph, m.Layers[i].Commits, m.Layers[i].GraphSize = e.Graph, e.Commits, e.GraphSize
+				}
+				if size {
+					m.Layers[i].Sizes = e.Sizes
+				}
 				return true, nil
 			}
 		}
