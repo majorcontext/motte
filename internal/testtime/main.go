@@ -47,6 +47,7 @@ func main() {
 	summaryFile := flag.String("summary", os.Getenv("GITHUB_STEP_SUMMARY"), "file that receives a Markdown summary")
 	title := flag.String("title", "", "heading of the step summary")
 	job := flag.String("job", "", "job name; a package budget PATH@JOB beats PATH")
+	allowance := flag.Float64("time-allowance", 1, "factor of at least 1 that multiplies every time limit and no count, for a run on a sandbox slower than the reference")
 	flag.Parse()
 	budget, err := readBudget(*budgetFile)
 	if err != nil {
@@ -55,8 +56,12 @@ func main() {
 	}
 	rep := consume(os.Stdin, os.Stdout)
 	measured := calibrate()
-	budget.factor = factorFor(measured, budget.calibrate)
-	rep.note = fmt.Sprintf("Calibration: %.3f s here, %.3f s on the reference runner, factor %.2f.", measured, budget.calibrate, budget.factor)
+	if *allowance < 1 {
+		fmt.Fprintln(os.Stderr, "testtime: -time-allowance is at least 1")
+		os.Exit(2)
+	}
+	budget.factor = factorFor(measured, budget.calibrate, *allowance)
+	rep.note = fmt.Sprintf("Calibration: %.3f s here, %.3f s on the reference runner, allowance %.2f, factor %.2f.", measured, budget.calibrate, *allowance, budget.factor)
 	fmt.Println("\ntesttime:", rep.note)
 	over := rep.check(budget, *job)
 	text := summary(*title, rep, over)

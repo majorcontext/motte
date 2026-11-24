@@ -100,13 +100,14 @@ func (b *budget) scale() float64 {
 	return b.factor
 }
 
-// factorFor is the factor of a machine whose calibration took measured seconds. A faster machine does not
-// tighten the limits.
-func factorFor(measured, reference float64) float64 {
-	if reference <= 0 {
-		return 1
+// factorFor is the factor of a machine whose calibration took measured seconds, times allowance for a sandbox that
+// the calibration does not measure. A faster machine does not tighten the limits.
+func factorFor(measured, reference, allowance float64) float64 {
+	f := 1.0
+	if reference > 0 {
+		f = max(1, measured/reference)
 	}
-	return max(1, measured/reference)
+	return f * max(1, allowance)
 }
 
 // countLimit is the largest count of name in pkg.

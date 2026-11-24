@@ -89,9 +89,9 @@ func TestCountsOverTheLimitFailThePackage(t *testing.T) {
 
 func TestFactorNeverTightensAndScalesTimeLimits(t *testing.T) {
 	t.Parallel()
-	for _, c := range []struct{ measured, reference, want float64 }{{0.5, 0.25, 2}, {0.05, 0.1, 1}, {0.1, 0.1, 1}, {1, 0, 1}} {
-		if got := factorFor(c.measured, c.reference); got != c.want {
-			t.Errorf("factorFor(%v, %v) = %v, want %v", c.measured, c.reference, got, c.want)
+	for _, c := range []struct{ measured, reference, allowance, want float64 }{{0.5, 0.25, 1, 2}, {0.05, 0.1, 1, 1}, {0.1, 0.1, 1, 1}, {1, 0, 1, 1}, {0.5, 0.25, 1.5, 3}, {0.05, 0.1, 2, 2}} {
+		if got := factorFor(c.measured, c.reference, c.allowance); got != c.want {
+			t.Errorf("factorFor(%v, %v, %v) = %v, want %v", c.measured, c.reference, c.allowance, got, c.want)
 		}
 	}
 	b := &budget{leaf: 10, pkgBase: 10, pkgs: map[string]float64{"p": 20}, factor: 2}
