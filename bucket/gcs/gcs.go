@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 
 	"cloud.google.com/go/storage"
 	"google.golang.org/api/googleapi"
@@ -16,12 +17,38 @@ import (
 )
 
 type gcsBucket struct {
-	b *storage.BucketHandle
+	b    *storage.BucketHandle
+	pool []*storage.BucketHandle
+	next *atomic.Uint64
 }
 
-func New(client *storage.Client, name string) bucket.Store { return gcsBucket{client.Bucket(name)} }
+func New(client *storage.Client, name string) bucket.Store {
+	g, _ := NewPool([]*storage.Client{client}, name)
+	return g
+}
 
-func (g gcsBucket) Create(ctx context.Context, key string, data []byte) (bool, error) {
+// NewPool spreads reads over the clients in turn. Each client needs its own HTTP transport, so each holds its own
+// HTTP/2 connections; writes and metadata calls use the first client. It refuses an empty list and a nil client.
+func NewPool(clients []*storage.Client, name string) (bucket.Store, error) {
+	if len(clients) == 0 {
+		return nil, errors.New("gcs: a pool needs at least one client")
+	}
+	g := &gcsBucket{next: new(atomic.Uint64)}
+	for _, c := range clients {
+		if c == nil {
+			return nil, errors.New("gcs: a pool client is nil")
+		}
+		g.pool = append(g.pool, c.Bucket(name))
+	}
+	g.b = g.pool[0]
+	return g, nil
+}
+
+func (g *gcsBucket) reader() *storage.BucketHandle {
+	return g.pool[g.next.Add(1)%uint64(len(g.pool))]
+}
+
+func (g *gcsBucket) Create(ctx context.Context, key string, data []byte) (bool, error) {
 	w := g.b.Object(key).If(storage.Conditions{DoesNotExist: true}).NewWriter(ctx)
 	_, err := w.Write(data)
 	if cerr := w.Close(); err == nil {
@@ -37,7 +64,7 @@ func (g gcsBucket) Create(ctx context.Context, key string, data []byte) (bool, e
 	return true, nil
 }
 
-func (g gcsBucket) Version(ctx context.Context, key string) (string, error) {
+func (g *gcsBucket) Version(ctx context.Context, key string) (string, error) {
 	a, err := g.b.Object(key).Attrs(ctx)
 	if errors.Is(err, storage.ErrObjectNotExist) {
 		return "", bucket.ErrNotFound
@@ -50,7 +77,7 @@ func (g gcsBucket) Version(ctx context.Context, key string) (string, error) {
 
 // Delete sends the generation as ifGenerationMatch, and reads the object again on a 412 to tell a changed object from
 // a missing one.
-func (g gcsBucket) Delete(ctx context.Context, key, version string) error {
+func (g *gcsBucket) Delete(ctx context.Context, key, version string) error {
 	gen, err := strconv.ParseInt(version, 10, 64)
 	if err != nil || gen <= 0 {
 		return fmt.Errorf("bucket: delete: invalid version %q", version)
@@ -69,16 +96,16 @@ func (g gcsBucket) Delete(ctx context.Context, key, version string) error {
 	return fmt.Errorf("bucket: delete: %w", err)
 }
 
-func (g gcsBucket) Get(ctx context.Context, key string) ([]byte, error) {
+func (g *gcsBucket) Get(ctx context.Context, key string) ([]byte, error) {
 	return g.read(ctx, key, 0, -1)
 }
 
-func (g gcsBucket) GetRange(ctx context.Context, key string, off, n int64) ([]byte, error) {
+func (g *gcsBucket) GetRange(ctx context.Context, key string, off, n int64) ([]byte, error) {
 	return g.read(ctx, key, off, n)
 }
 
-func (g gcsBucket) read(ctx context.Context, key string, off, n int64) ([]byte, error) {
-	r, err := g.b.Object(key).NewRangeReader(ctx, off, n)
+func (g *gcsBucket) read(ctx context.Context, key string, off, n int64) ([]byte, error) {
+	r, err := g.reader().Object(key).NewRangeReader(ctx, off, n)
 	if errors.Is(err, storage.ErrObjectNotExist) {
 		return nil, bucket.ErrNotFound
 	}

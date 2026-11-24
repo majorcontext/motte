@@ -20,6 +20,7 @@ func TestLoadConfigChoosesBackendsAndRefusesUnknownOnes(t *testing.T) {
 	t.Parallel()
 	keys := `[{"kid":"k","key":"` + strings.Repeat("A", 43) + `=","scopes":["node"]}]`
 	rangeCacheMiB := map[string]int{"postgres by default": 256, "range cache set": 512}
+	gcsClients := map[string]int{"postgres by default": 8, "gcs clients set": 3}
 	for name, c := range map[string]struct {
 		env map[string]string
 		ok  bool
@@ -39,6 +40,9 @@ func TestLoadConfigChoosesBackendsAndRefusesUnknownOnes(t *testing.T) {
 		"range cache set":      {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_RANGE_CACHE_MIB": "512"}, true},
 		"range cache off":      {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_RANGE_CACHE_MIB": "0"}, true},
 		"bad range cache size": {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_RANGE_CACHE_MIB": "-5"}, false},
+		"gcs clients set":      {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "gcs", "MOTTE_BUCKET": "b", "MOTTE_GCS_CLIENTS": "3"}, true},
+		"no gcs clients":       {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "gcs", "MOTTE_BUCKET": "b", "MOTTE_GCS_CLIENTS": "0"}, false},
+		"gcs clients need gcs": {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_GCS_CLIENTS": "2"}, false},
 		"postgres needs a DSN": {map[string]string{"MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d"}, false},
 	} {
 		c.env["MOTTE_TRUSTED_KEYS"] = keys
@@ -48,6 +52,9 @@ func TestLoadConfigChoosesBackendsAndRefusesUnknownOnes(t *testing.T) {
 		}
 		if want, ok := rangeCacheMiB[name]; ok && cfg.rangeCacheMiB != want {
 			t.Errorf("%s: range cache = %d MiB, want %d", name, cfg.rangeCacheMiB, want)
+		}
+		if want, ok := gcsClients[name]; ok && cfg.gcsClients != want {
+			t.Errorf("%s: gcs clients = %d, want %d", name, cfg.gcsClients, want)
 		}
 	}
 }

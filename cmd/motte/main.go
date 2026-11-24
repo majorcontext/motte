@@ -55,11 +55,14 @@ func openBucket(ctx context.Context, c config) (bucket.Store, error) {
 		}
 		return s3.New(client, c.bucket), nil
 	}
-	client, err := storage.NewClient(ctx)
-	if err != nil {
-		return nil, err
+	clients := make([]*storage.Client, c.gcsClients)
+	for i := range clients {
+		var err error
+		if clients[i], err = storage.NewClient(ctx); err != nil {
+			return nil, err
+		}
 	}
-	return gcs.New(client, c.bucket), nil
+	return gcs.NewPool(clients, c.bucket)
 }
 
 func openMeta(ctx context.Context, c config) (meta.Store, func(), error) {

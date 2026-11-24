@@ -34,6 +34,10 @@ func loadS3(getenv func(string) string, c *config) error {
 	return nil
 }
 
+// defaultGCSClients is how many Cloud Storage clients share the reads. One client funnels every read through the
+// connections of one HTTP/2 transport, whose pool and stream locks then serialize the readers.
+const defaultGCSClients = 8
+
 type config struct {
 	listen       string
 	meta         string
@@ -52,6 +56,7 @@ type config struct {
 	compactEvery time.Duration
 	compactGrace time.Duration
 	pprof        string
+	gcsClients   int
 	// rangeCacheMiB is the memory of the range cache in MiB; 0 turns it off.
 	rangeCacheMiB int
 }
@@ -83,6 +88,7 @@ type config struct {
 //	MOTTE_COMPACTION_GRACE     how long a retired file stays before deletion, a Go duration, default 1h
 //	MOTTE_RANGE_CACHE_MIB      memory of the cache of pack ranges that requests share, in MiB, default 256; 0 turns it off
 //	MOTTE_PPROF                optional; address of a listener that serves /debug/pprof, apart from MOTTE_LISTEN; MOTTE_PPROF_CONTENTION=1 adds the mutex and block profiles
+//	MOTTE_GCS_CLIENTS          gcs only: how many Cloud Storage clients, each with its own HTTP/2 connections, read in turn, from 1 to 64, default 8
 //	OTEL_EXPORTER_OTLP_ENDPOINT  optional; enables trace export
 func loadConfig(getenv func(string) string) (config, error) {
 	c := config{
@@ -152,6 +158,14 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 	if c.pprof = getenv("MOTTE_PPROF"); c.pprof != "" && c.pprof == c.listen {
 		return config{}, errors.New("MOTTE_PPROF needs an address other than MOTTE_LISTEN")
+	}
+	c.gcsClients = defaultGCSClients
+	if text := getenv("MOTTE_GCS_CLIENTS"); text != "" {
+		n, err := strconv.Atoi(text)
+		if err != nil || n < 1 || n > 64 || c.bucketKind != "gcs" {
+			return config{}, errors.New("MOTTE_GCS_CLIENTS must be a number from 1 to 64 and needs MOTTE_BUCKET_KIND=gcs")
+		}
+		c.gcsClients = n
 	}
 	keys, err := parseKeys(getenv("MOTTE_TRUSTED_KEYS"))
 	if err != nil {
