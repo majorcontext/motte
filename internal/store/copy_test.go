@@ -50,9 +50,7 @@ func copyFixture(t *testing.T, w *world) (gitpack.SHA, map[gitpack.SHA]gitpack.O
 		var b []byte
 		for i := range 60 {
 			var sha gitpack.SHA
-			for j := range sha {
-				sha[j] = byte(rng.Uint32())
-			}
+			fillRandom(rng, sha[:])
 			b = append(append(b, fmt.Sprintf("100644 f%02d\x00", i)...), sha[:]...)
 		}
 		trees = append(trees, gitpack.Object{Type: gitpack.Tree, Data: b})
@@ -81,10 +79,21 @@ func copyFixture(t *testing.T, w *world) (gitpack.SHA, map[gitpack.SHA]gitpack.O
 	return gitpack.Hash(gitpack.Commit, commit), want
 }
 
-func TestAPackWriteReadsTheTreesInFewLargeRuns(t *testing.T) {
+func TestACopyOfTreesReadsLargeRunsAndTheRunsItIsAllowedAhead(t *testing.T) {
 	t.Parallel()
 	w := newWorld(t)
 	tip, want := copyFixture(t, w)
+	t.Run("a pack write reads the trees in few large runs", func(t *testing.T) {
+		t.Parallel()
+		packWriteReadsFewLargeRuns(t, w, tip, want)
+	})
+	t.Run("a copy reads the runs it is allowed ahead", func(t *testing.T) {
+		t.Parallel()
+		copyReadsAhead(t, w, want)
+	})
+}
+
+func packWriteReadsFewLargeRuns(t *testing.T, w *world, tip gitpack.SHA, want map[gitpack.SHA]gitpack.Object) {
 	svc := store.New(w.mem, w.meta, store.WithClock(w.clock), store.WithGrace(grace), store.WithRangeCache(1<<20))
 	rd, err := svc.Reader(t.Context(), repo)
 	if err != nil {
@@ -158,10 +167,7 @@ func (g *gatedStore) GetRange(ctx context.Context, key string, off, n int64) ([]
 	return g.Store.GetRange(ctx, key, off, n)
 }
 
-func TestACopyReadsTheRunsItIsAllowedAhead(t *testing.T) {
-	t.Parallel()
-	w := newWorld(t)
-	_, want := copyFixture(t, w)
+func copyReadsAhead(t *testing.T, w *world, want map[gitpack.SHA]gitpack.Object) {
 	var shas []gitpack.SHA
 	for sha := range want {
 		shas = append(shas, sha)
@@ -205,9 +211,7 @@ func TestACopyOfManySmallRunsReadsAtMost64AtOnceAndOpensNoPack(t *testing.T) {
 	shas := make([]gitpack.SHA, len(objs))
 	for i := range objs {
 		data := make([]byte, 140<<10)
-		for j := range data {
-			data[j] = byte(rng.Uint32())
-		}
+		fillRandom(rng, data)
 		objs[i] = gitpack.Object{Type: gitpack.Blob, Data: data}
 		shas[i] = gitpack.Hash(gitpack.Blob, objs[i].Data)
 	}
