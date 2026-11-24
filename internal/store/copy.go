@@ -14,6 +14,15 @@ import (
 	"github.com/majorcontext/motte/internal/gitpack"
 )
 
+// copyReaders bounds the runs that a copy reads or holds at once, whatever their sizes, so a fetch of many small runs
+// starts no more than copyReaders reads.
+const copyReaders = 64
+
+// CopyPlaceBytes is the most that the placement of a Copy of n objects holds in index blocks: placeBatch blocks.
+func CopyPlaceBytes(n int) int64 {
+	return int64(min(n, placeBatch)) * midx.BlockRecords * midx.RecordSize
+}
+
 // placeBatch is the number of names that Copy places at once, so the index blocks that one placement holds stay within
 // placeBatch blocks.
 const placeBatch = 2048
@@ -129,6 +138,7 @@ func (r *Reader) copyRuns(ctx context.Context, runs []copyRun, packs []packRef, 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	flight := semaphore.NewWeighted(ahead)
+	readers := make(chan struct{}, copyReaders)
 	queue := make(chan chan copied, len(runs))
 	done := make(chan struct{})
 	go func() {
@@ -136,14 +146,22 @@ func (r *Reader) copyRuns(ctx context.Context, runs []copyRun, packs []packRef, 
 		defer close(queue)
 		for _, run := range runs {
 			ch := make(chan copied, 1)
-			if err := flight.Acquire(ctx, run.end-run.start); err != nil {
+			err := flight.Acquire(ctx, run.end-run.start)
+			if err == nil {
+				select {
+				case readers <- struct{}{}:
+				case <-ctx.Done():
+					err = ctx.Err()
+				}
+			}
+			if err != nil {
 				ch <- copied{err: err}
 				queue <- ch
 				return
 			}
 			queue <- ch
 			go func() {
-				d, err := r.pack(packs[run.pack]).b.read(ctx, run.start, run.end)
+				d, err := r.packReader(packs[run.pack]).read(ctx, run.start, run.end)
 				if err == nil && int64(len(d)) != run.end-run.start {
 					err = errors.New("store: short read of a pack run")
 				}
@@ -167,12 +185,16 @@ func (r *Reader) copyRuns(ctx context.Context, runs []copyRun, packs []packRef, 
 			return c.err
 		}
 		flight.Release(run.end - run.start)
+		<-readers
 	}
 	return nil
 }
 
-// pack opens the pack of ref. A caller keeps it only while it reads.
-func (r *Reader) pack(ref packRef) *openPack { return r.v.s.openPack(r.v.prefix, ref.pk, ref.meta) }
+// packReader returns a reader of the pack of ref that the pack cache does not hold, so a copy adds no entry to that
+// cache. It reads through the range cache, which charges what it keeps.
+func (r *Reader) packReader(ref packRef) *packReader {
+	return &packReader{svc: r.v.s, st: r.v.s.st, key: r.v.prefix + "/" + ref.pk.ID + ".pack", size: ref.pk.Bytes}
+}
 
 func (r *Reader) copyRun(ctx context.Context, run copyRun, ref packRef, d []byte, before func(size int64) error, fn func(gitpack.SHA, *gitpack.Raw) error, fallback *[]gitpack.SHA) error {
 	for _, o := range run.objs {
@@ -185,7 +207,7 @@ func (r *Reader) copyRun(ctx context.Context, run copyRun, ref packRef, d []byte
 			}
 			end := min(o.off+need, ref.pk.Bytes)
 			var whole []byte
-			if whole, err = r.pack(ref).b.read(ctx, o.off, end); err != nil {
+			if whole, err = r.packReader(ref).read(ctx, o.off, end); err != nil {
 				return err
 			}
 			raw, _, _, err = gitpack.RawEntry(whole)

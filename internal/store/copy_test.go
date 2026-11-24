@@ -196,3 +196,54 @@ func TestACopyReadsTheRunsItIsAllowedAhead(t *testing.T) {
 		t.Errorf("at most %d runs were in flight, want 3 or more", g.peak.Load())
 	}
 }
+
+func TestACopyOfManySmallRunsReadsAtMost64AtOnceAndOpensNoPack(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	rng := rand.New(rand.NewPCG(8, 9))
+	objs := make([]gitpack.Object, 150)
+	shas := make([]gitpack.SHA, len(objs))
+	for i := range objs {
+		data := make([]byte, 140<<10)
+		for j := range data {
+			data[j] = byte(rng.Uint32())
+		}
+		objs[i] = gitpack.Object{Type: gitpack.Blob, Data: data}
+		shas[i] = gitpack.Hash(gitpack.Blob, objs[i].Data)
+	}
+	if _, err := w.svc.PutObjects(t.Context(), repo, objs); err != nil {
+		t.Fatal(err)
+	}
+	g := &gatedStore{Store: w.mem, arrived: make(chan struct{}, 512), release: make(chan struct{})}
+	svc := store.New(g, w.meta, store.WithClock(w.clock), store.WithGrace(grace))
+	rd, err := svc.Reader(t.Context(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.armed.Store(true)
+	release := sync.OnceFunc(func() { close(g.release) })
+	defer release()
+	done := make(chan error, 1)
+	go func() {
+		done <- rd.Copy(t.Context(), shas, 1<<30, nil, func(gitpack.SHA, *gitpack.Raw) error { return nil })
+	}()
+	for range 64 {
+		select {
+		case <-g.arrived:
+		case err := <-done:
+			t.Fatalf("Copy ended with %v before it had 64 reads in flight", err)
+		}
+	}
+	select {
+	case <-g.arrived:
+		t.Fatal("a 65th read started while 64 were held")
+	case <-time.After(300 * time.Millisecond): //lint:allow wallclock a read held at the gate is outside any bubble
+	}
+	release()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if n := svc.CacheStats().OpenPacks; n != 0 {
+		t.Errorf("the copy left %d packs in the pack cache, want none", n)
+	}
+}

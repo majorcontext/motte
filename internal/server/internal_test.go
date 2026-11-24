@@ -21,6 +21,7 @@ import (
 	"github.com/majorcontext/motte/bucket/fs"
 	"github.com/majorcontext/motte/grant"
 	"github.com/majorcontext/motte/internal/pgtest"
+	"github.com/majorcontext/motte/internal/store"
 	"github.com/majorcontext/motte/meta/postgres"
 )
 
@@ -225,7 +226,7 @@ func TestThePackWriteReservationGrowsWithTheLargestObjectItFindsWhileWriting(t *
 	if _, err := f.writeFor(1_000_000, 10); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := f.write, int64(fetchAhead+copyAheadMax+160*1_000_000+256*10); got != want {
+	if got, want := f.write, int64(fetchAhead+copyAheadMax+160*1_000_000+256*10)+store.CopyPlaceBytes(1_000_000); got != want {
 		t.Errorf("the pack write of 1000000 objects in 10 packs reserves %d, the spec says %d", got, want)
 	}
 	before := f.cost()

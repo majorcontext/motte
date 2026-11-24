@@ -96,7 +96,7 @@ func (f *fetchHold) resize() error {
 // its own bytes and the fetch keeps the larger of the two.
 func (f *fetchHold) writeFor(n, packs int) (int64, error) {
 	ahead := fetchAhead + min(copyAheadMax, int64(n)*copyAheadPerObject)
-	f.write = ahead + copyPerObject*int64(n) + copyPerPack*int64(packs)
+	f.write = ahead + copyPerObject*int64(n) + copyPerPack*int64(packs) + store.CopyPlaceBytes(n)
 	return ahead, f.resize()
 }
 
