@@ -346,6 +346,55 @@ func TestPrefetchReadsFarApartRangesAtTheSameTime(t *testing.T) {
 	})
 }
 
+func TestABulkTreeReadReadsTheBlobHeadersOfManyTreesTogether(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	rng := rand.New(rand.NewPCG(5, 6))
+	var objs []gitpack.Object
+	add := func(o gitpack.Object) gitpack.SHA {
+		objs = append(objs, o)
+		return gitpack.Hash(o.Type, o.Data)
+	}
+	filler := func() {
+		data := make([]byte, 140<<10)
+		for j := range data {
+			data[j] = byte(rng.Uint32())
+		}
+		objs = append(objs, gitpack.Object{Type: gitpack.Blob, Data: data})
+	}
+	var root []byte
+	for d := range 60 {
+		var dir []byte
+		for f := range 3 {
+			filler()
+			sha := add(gitpack.Object{Type: gitpack.Blob, Data: fmt.Appendf(nil, "file %d of dir %d", f, d)})
+			dir = append(append(dir, fmt.Sprintf("100644 f%d\x00", f)...), sha[:]...)
+		}
+		sha := add(gitpack.Object{Type: gitpack.Tree, Data: dir})
+		root = append(append(root, fmt.Sprintf("40000 d%02d\x00", d)...), sha[:]...)
+	}
+	rootSHA := add(gitpack.Object{Type: gitpack.Tree, Data: root})
+	if _, err := w.svc.PutObjects(t.Context(), repo, objs); err != nil {
+		t.Fatal(err)
+	}
+	synctest.Test(t, func(t *testing.T) {
+		svc := store.New(slowBucket{w.mem, func() { time.Sleep(20 * time.Millisecond) }}, w.meta, store.WithGrace(grace))
+		start := time.Now()
+		trees, err := svc.TreeBulk(t.Context(), repo, rootSHA, 100000, func(int64) error { return nil })
+		if err != nil || len(trees) != 61 {
+			t.Fatalf("trees = %d, %v", len(trees), err)
+		}
+		for _, e := range trees[1].Entries {
+			if e.Size == 0 {
+				t.Errorf("blob %s has no size", e.Name)
+			}
+		}
+		if d := time.Since(start); d > 400*time.Millisecond {
+			t.Errorf("a bulk read of 61 trees took %v of 20 ms reads: it must read their blob headers together, not one tree after another", d)
+		}
+	})
+}
+
 func TestACrashDuringMaintenanceLosesNothing(t *testing.T) {
 	t.Parallel()
 	for _, after := range []bool{false, true} {

@@ -71,6 +71,11 @@ const (
 	readWorkers = 16
 	// treeAhead is the trees of a bulk tree read that one prefetch reads in advance.
 	treeAhead = 256
+	// sizeBatch is the blobs whose headers a bulk tree read prefetches together, and sizeWorkers the concurrent reads
+	// of that prefetch. The headers of a batch must fit the read-ahead buffer of the request, aheadKeep, so the batch
+	// stays well under it.
+	sizeBatch   = 512
+	sizeWorkers = 64
 )
 
 // Repo names a repository as <prefix>:<path>.
@@ -711,22 +716,24 @@ func (r *Reader) GetSized(ctx context.Context, sha gitpack.SHA, before func(size
 
 // Prefetch reads the pack bytes that Get of shas will need, in few large ranges that it reads at most readWorkers at
 // a time. It skips what it cannot place, and a failed read is left to the Get that needs it.
-func (r *Reader) Prefetch(ctx context.Context, shas []gitpack.SHA) { r.prefetch(ctx, shas, true) }
+func (r *Reader) Prefetch(ctx context.Context, shas []gitpack.SHA) {
+	r.prefetch(ctx, shas, true, readWorkers)
+}
 
 // PrefetchHeaders is Prefetch for a caller that reads only the headers of the objects, as the sizes of the blobs of a
 // tree: it keeps the first bytes of each object, not the whole object.
 func (r *Reader) PrefetchHeaders(ctx context.Context, shas []gitpack.SHA) {
-	r.prefetch(ctx, shas, false)
+	r.prefetch(ctx, shas, false, readWorkers)
 }
 
-func (r *Reader) prefetch(ctx context.Context, shas []gitpack.SHA, whole bool) {
+func (r *Reader) prefetch(ctx context.Context, shas []gitpack.SHA, whole bool, workers int) {
 	sorted := slices.Clone(shas)
 	slices.SortFunc(sorted, func(a, b gitpack.SHA) int { return bytes.Compare(a[:], b[:]) })
 	sorted = slices.Compact(sorted)
 	sorted = slices.DeleteFunc(sorted, func(sha gitpack.SHA) bool { _, _, ok := r.v.s.cached(r.v.prefix, sha, r.v.before); return ok })
 	byPack, _ := r.v.place(ctx, sorted)
 	var g errgroup.Group
-	g.SetLimit(readWorkers)
+	g.SetLimit(workers)
 	for e, offs := range byPack {
 		for _, run := range e.b.plan(offs, r.v.ahead) {
 			if r.flight.Acquire(ctx, run.end-run.start) != nil {
@@ -841,7 +848,9 @@ type Tree struct {
 // TreeBulk returns a tree and its subtrees breadth first, until the entries
 // returned reach maxEntries. Blob entries carry their size. Before it reads a
 // tree, it calls grow with the tree bytes of the trees read so far and this
-// one, taken from the pack index.
+// one, taken from the pack index. It reads the trees of a batch together, and
+// then the headers of their blobs in groups, so a bulk read costs a few rounds
+// of reads, not one for each tree.
 func (s *Service) TreeBulk(ctx context.Context, repo Repo, sha gitpack.SHA, maxEntries int, grow func(treeBytes int64) error) ([]Tree, error) {
 	v, err := s.view(ctx, repo)
 	if err != nil {
@@ -851,49 +860,54 @@ func (s *Service) TreeBulk(ctx context.Context, repo Repo, sha gitpack.SHA, maxE
 	queue := []gitpack.SHA{sha}
 	total, held := 0, int64(0)
 	rd := newReader(v)
-	ahead := 0
-	for k := 0; k < len(queue) && (len(out) == 0 || total < maxEntries); k++ {
-		if k == ahead {
-			ahead = min(k+treeAhead, len(queue))
-			rd.Prefetch(ctx, queue[k:ahead])
-		}
-		cur := queue[k]
-		size, err := v.size(ctx, cur)
-		if err != nil {
-			return nil, err
-		}
-		held += size
-		if err := grow(held); err != nil {
-			return nil, err
-		}
-		t, d, err := v.get(ctx, cur)
-		if err != nil {
-			return nil, err
-		}
-		if t != gitpack.Tree {
-			return nil, ErrInvalid
-		}
-		if len(d) > maxTreeBytes {
-			return nil, ErrInvalid
-		}
-		tree, err := v.parseTree(ctx, cur, d)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, tree)
-		total += len(tree.Entries)
-		for _, e := range tree.Entries {
-			if e.Mode == 0o40000 {
-				queue = append(queue, e.SHA)
+	for k := 0; k < len(queue) && (len(out) == 0 || total < maxEntries); {
+		end := min(k+treeAhead, len(queue))
+		rd.Prefetch(ctx, queue[k:end])
+		first := len(out)
+		for ; k < end && (len(out) == 0 || total < maxEntries); k++ {
+			cur := queue[k]
+			size, err := v.size(ctx, cur)
+			if err != nil {
+				return nil, err
 			}
+			held += size
+			if err := grow(held); err != nil {
+				return nil, err
+			}
+			t, d, err := v.get(ctx, cur)
+			if err != nil {
+				return nil, err
+			}
+			if t != gitpack.Tree {
+				return nil, ErrInvalid
+			}
+			if len(d) > maxTreeBytes {
+				return nil, ErrInvalid
+			}
+			tree, err := parseEntries(ctx, cur, d)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, tree)
+			total += len(tree.Entries)
+			for _, e := range tree.Entries {
+				if e.Mode == 0o40000 {
+					queue = append(queue, e.SHA)
+				}
+			}
+		}
+		if err := v.fillSizes(ctx, out[first:]); err != nil {
+			return nil, err
 		}
 	}
 	return out, nil
 }
 
-func (v *view) parseTree(ctx context.Context, sha gitpack.SHA, data []byte) (Tree, error) {
+func isBlobEntry(e Entry) bool { return e.Mode != 0o40000 && e.Mode != 0o160000 }
+
+// parseEntries decodes the entries of a tree. It leaves the size of each blob entry at 0.
+func parseEntries(ctx context.Context, sha gitpack.SHA, data []byte) (Tree, error) {
 	tree := Tree{SHA: sha}
-	var blobs []gitpack.SHA
 	for len(data) > 0 {
 		if err := ctx.Err(); err != nil {
 			return Tree{}, err
@@ -909,30 +923,49 @@ func (v *view) parseTree(ctx context.Context, sha gitpack.SHA, data []byte) (Tre
 		}
 		e := Entry{Name: string(data[sp+1 : nul]), Mode: mode}
 		copy(e.SHA[:], data[nul+1:nul+21])
-		if mode != 0o40000 && mode != 0o160000 {
-			blobs = append(blobs, e.SHA)
-		}
 		tree.Entries = append(tree.Entries, e)
 		data = data[nul+21:]
 	}
-	rd := newReader(v)
-	next := 0
-	for i := range tree.Entries {
-		e := &tree.Entries[i]
-		if e.Mode == 0o40000 || e.Mode == 0o160000 {
-			continue
-		}
-		if next%treeAhead == 0 {
-			rd.PrefetchHeaders(ctx, blobs[next:min(next+treeAhead, len(blobs))])
-		}
-		next++
-		p, err := v.find(ctx, e.SHA)
-		if err != nil {
-			return Tree{}, err
-		}
-		if e.Size, _, err = p.Size(e.SHA); err != nil {
-			return Tree{}, ErrNotFound
+	return tree, nil
+}
+
+// fillSizes sets the size of each blob entry of trees. It reads the headers of the blobs sizeBatch at a time, with
+// sizeWorkers reads at once, so the headers of a group stay in the read-ahead buffer until they are used.
+func (v *view) fillSizes(ctx context.Context, trees []Tree) error {
+	var blobs []gitpack.SHA
+	for _, t := range trees {
+		for _, e := range t.Entries {
+			if isBlobEntry(e) {
+				blobs = append(blobs, e.SHA)
+			}
 		}
 	}
-	return tree, nil
+	sizes := make(map[gitpack.SHA]int64, len(blobs))
+	rd := newReader(v)
+	for from := 0; from < len(blobs); from += sizeBatch {
+		group := blobs[from:min(from+sizeBatch, len(blobs))]
+		rd.prefetch(ctx, group, false, sizeWorkers)
+		for _, sha := range group {
+			if _, ok := sizes[sha]; ok {
+				continue
+			}
+			p, err := v.find(ctx, sha)
+			if err != nil {
+				return err
+			}
+			n, _, err := p.Size(sha)
+			if err != nil {
+				return ErrNotFound
+			}
+			sizes[sha] = n
+		}
+	}
+	for _, t := range trees {
+		for i := range t.Entries {
+			if e := &t.Entries[i]; isBlobEntry(*e) {
+				e.Size = sizes[e.SHA]
+			}
+		}
+	}
+	return nil
 }
