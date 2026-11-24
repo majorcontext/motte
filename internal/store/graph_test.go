@@ -71,7 +71,9 @@ func TestACommitOrAPackBeyondTheGraphLimitsIsLeftOut(t *testing.T) {
 	if _, ok := commitRecord(gitpack.SHA{9}, []byte(text+"committer a <a@b> 1 +0000\n\nx\n")); ok {
 		t.Error("a commit with more parents than the graph holds was recorded")
 	}
-	objs := make([]gitpack.Object, midx.MaxGraphCommits+1)
+	svc := New(nil, nil)
+	svc.graphCap = 100
+	objs := make([]gitpack.Object, svc.graphCap+1)
 	for i := range objs {
 		objs[i] = gitpack.Object{Type: gitpack.Commit, Data: fmt.Appendf(nil, "tree %s\ncommitter a <a@b> %d +0000\n\n", gitpack.SHA{1}, i)}
 	}
@@ -80,7 +82,7 @@ func TestACommitOrAPackBeyondTheGraphLimitsIsLeftOut(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := New(nil, nil).graphOfPack(t.Context(), Repo{}, p); got != nil {
+	if got := svc.graphOfPack(t.Context(), Repo{}, p); got != nil {
 		t.Errorf("a pack of %d commits gave a graph of %d, want none and no lookup of generations", len(objs), len(got))
 	}
 }

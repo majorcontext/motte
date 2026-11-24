@@ -154,7 +154,9 @@ type Service struct {
 	ihits, imisses                                 atomic.Int64
 
 	slowAfter time.Duration
-	slowAt    atomic.Int64
+	// graphCap is the most commits that the graph of an imported pack holds.
+	graphCap int
+	slowAt   atomic.Int64
 }
 
 // CacheStats counts the open-pack cache, the layer cache and the bucket reads that fill them.
@@ -254,7 +256,7 @@ func (s *Service) tryReserveInline(bytes int64) (release func()) {
 }
 
 func New(st bucket.Store, index PackIndex, opts ...Option) *Service {
-	s := &Service{st: st, index: index, clk: clock.Real(), grace: DefaultGrace, open: map[string]*openPack{}, budget: semaphore.NewWeighted(MemoryBudget), inline: semaphore.NewWeighted(inlineBudget), landed: semaphore.NewWeighted(LandBudget), icache: newLRU(maxIndexBytes), ocache: newLRU(maxObjectCacheBytes), rcache: newRangeCache(DefaultRangeCacheBytes), rflight: semaphore.NewWeighted(DefaultReadBudget), readBudget: DefaultReadBudget, slowAfter: slowReadAfter}
+	s := &Service{st: st, index: index, clk: clock.Real(), grace: DefaultGrace, open: map[string]*openPack{}, budget: semaphore.NewWeighted(MemoryBudget), inline: semaphore.NewWeighted(inlineBudget), landed: semaphore.NewWeighted(LandBudget), icache: newLRU(maxIndexBytes), ocache: newLRU(maxObjectCacheBytes), rcache: newRangeCache(DefaultRangeCacheBytes), rflight: semaphore.NewWeighted(DefaultReadBudget), readBudget: DefaultReadBudget, slowAfter: slowReadAfter, graphCap: midx.MaxGraphCommits}
 	for _, o := range opts {
 		o(s)
 	}

@@ -341,7 +341,7 @@ func (s *Service) graphOfPack(ctx context.Context, repo Repo, p *gitpack.Pack) [
 		}
 		if _, data, err := p.Get(name); err == nil {
 			if c, ok := commitRecord(name, data); ok {
-				if commits = append(commits, c); len(commits) > midx.MaxGraphCommits {
+				if commits = append(commits, c); len(commits) > s.graphCap {
 					return nil
 				}
 			}
