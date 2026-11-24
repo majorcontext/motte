@@ -134,8 +134,8 @@ type Service struct {
 	inline *semaphore.Weighted
 	landed *semaphore.Weighted
 
-	icache *lru
-	ocache *lru
+	icache *clockCache
+	ocache *clockCache
 	rcache *rangeCache
 	// rflight bounds the bytes of the bucket reads that outlive the requests that began them.
 	rflight    *semaphore.Weighted
@@ -257,7 +257,7 @@ func (s *Service) tryReserveInline(bytes int64) (release func()) {
 }
 
 func New(st bucket.Store, index PackIndex, opts ...Option) *Service {
-	s := &Service{st: st, index: index, clk: clock.Real(), grace: DefaultGrace, open: map[string]*openPack{}, budget: semaphore.NewWeighted(MemoryBudget), inline: semaphore.NewWeighted(inlineBudget), landed: semaphore.NewWeighted(LandBudget), icache: newLRU(maxIndexBytes), ocache: newLRU(maxObjectCacheBytes), rcache: newRangeCache(DefaultRangeCacheBytes), rflight: semaphore.NewWeighted(DefaultReadBudget), readBudget: DefaultReadBudget, slowAfter: slowReadAfter, graphCap: midx.MaxGraphCommits}
+	s := &Service{st: st, index: index, clk: clock.Real(), grace: DefaultGrace, open: map[string]*openPack{}, budget: semaphore.NewWeighted(MemoryBudget), inline: semaphore.NewWeighted(inlineBudget), landed: semaphore.NewWeighted(LandBudget), icache: newClockCache(maxIndexBytes), ocache: newClockCache(maxObjectCacheBytes), rcache: newRangeCache(DefaultRangeCacheBytes), rflight: semaphore.NewWeighted(DefaultReadBudget), readBudget: DefaultReadBudget, slowAfter: slowReadAfter, graphCap: midx.MaxGraphCommits}
 	for _, o := range opts {
 		o(s)
 	}

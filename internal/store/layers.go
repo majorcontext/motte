@@ -1,12 +1,10 @@
 package store
 
 import (
-	"container/list"
 	"context"
 	"errors"
 	"fmt"
 	"slices"
-	"sync"
 	"time"
 	"weak"
 
@@ -16,64 +14,6 @@ import (
 	"github.com/majorcontext/motte/internal/midx"
 	"github.com/majorcontext/motte/meta"
 )
-
-// lru is a byte-bounded cache of immutable values: layers and blocks of records are named by content.
-type lru struct {
-	mu      sync.Mutex
-	max     int
-	used    int
-	evicted int
-	ll      *list.List
-	m       map[any]*list.Element
-}
-
-type lruEntry struct {
-	key, val any
-	size     int
-}
-
-func newLRU(max int) *lru { return &lru{max: max, ll: list.New(), m: map[any]*list.Element{}} }
-
-func (c *lru) get(k any) (any, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	e, ok := c.m[k]
-	if !ok {
-		return nil, false
-	}
-	c.ll.MoveToFront(e)
-	return e.Value.(*lruEntry).val, true
-}
-
-func (c *lru) put(k, v any, size int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if e, ok := c.m[k]; ok {
-		c.ll.MoveToFront(e)
-		return
-	}
-	c.m[k] = c.ll.PushFront(&lruEntry{k, v, size})
-	c.used += size
-	for c.used > c.max && c.ll.Len() > 1 {
-		old := c.ll.Back()
-		en := old.Value.(*lruEntry)
-		c.ll.Remove(old)
-		delete(c.m, en.key)
-		c.used -= en.size
-		c.evicted++
-	}
-}
-
-func (c *lru) stats() (used, evicted int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.used, c.evicted
-}
-
-func (c *lru) evictions() int {
-	_, e := c.stats()
-	return e
-}
 
 // layerLoadTimeout bounds a layer load that callers share, which no single caller cancels.
 const layerLoadTimeout = 2 * time.Minute
