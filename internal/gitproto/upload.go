@@ -27,6 +27,9 @@ type Upload struct {
 	// Track, when set, is called with the objects that a fetch holds in its sets, before it holds them, each time
 	// that count grows. An error of Track stops the fetch.
 	Track func(objects int) error
+	// Phase, when set, is called with the name of each phase of a fetch as it ends: has_wants, has_haves, commit_walk,
+	// edge_trees, tree_walk and pack_write.
+	Phase func(name string)
 }
 
 // AdvertiseUpload writes the protocol v2 capability advertisement.
@@ -207,10 +210,15 @@ func (u *Upload) fetch(ctx context.Context, w io.Writer, args []string) error {
 	if err != nil {
 		return err
 	}
+	phase := u.Phase
+	if phase == nil {
+		phase = func(string) {}
+	}
 	have, err := u.Objects.Has(ctx, req.wants)
 	if err != nil {
 		return err
 	}
+	phase("has_wants")
 	for i, ok := range have {
 		if !ok {
 			return RequestError("not our object " + req.wants[i].String())
@@ -220,6 +228,7 @@ func (u *Upload) fetch(ctx context.Context, w io.Writer, args []string) error {
 	if have, err = u.Objects.Has(ctx, req.haves); err != nil {
 		return err
 	}
+	phase("has_haves")
 	for i, ok := range have {
 		if ok {
 			common = append(common, req.haves[i])
@@ -233,7 +242,7 @@ func (u *Upload) fetch(ctx context.Context, w io.Writer, args []string) error {
 		pw.Flush()
 		return pw.Err()
 	}
-	c := &collector{objs: u.Objects, ctx: ctx, blobNone: req.blobNone, track: u.Track}
+	c := &collector{objs: u.Objects, ctx: ctx, blobNone: req.blobNone, track: u.Track, phase: phase}
 	shas, err := c.collect(req.wants, common)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -257,6 +266,7 @@ func (u *Upload) fetch(ctx context.Context, w io.Writer, args []string) error {
 	if err := bw.Flush(); err != nil {
 		return err
 	}
+	phase("pack_write")
 	pw.Flush()
 	return pw.Err()
 }

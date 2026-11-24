@@ -11,6 +11,8 @@ import (
 	"unicode"
 	"weak"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/majorcontext/motte/internal/gitpack"
 	"github.com/majorcontext/motte/internal/midx"
 )
@@ -140,10 +142,12 @@ func (s *Service) graphObject(ctx context.Context, repo Repo, prefix, name strin
 }
 
 // withGraph stores the graph of commits and returns e with the key and the count of commits of the graph.
-func (s *Service) withGraph(ctx context.Context, repo Repo, prefix, name string, e midx.Entry, commits []midx.Commit) (midx.Entry, error) {
+func (s *Service) withGraph(ctx context.Context, repo Repo, prefix, name string, e midx.Entry, commits []midx.Commit) (out midx.Entry, err error) {
 	if len(commits) == 0 {
 		return e, nil
 	}
+	ctx, end := StartRootSpan(ctx, "vcs.maintain.graph_build", attribute.Int("commits", len(commits)))
+	defer func() { end(err, attribute.Int64("graph_bytes", out.GraphSize)) }()
 	file, err := midx.BuildGraph(commits)
 	if errors.Is(err, midx.ErrGraphTooLarge) {
 		return e, nil
@@ -267,7 +271,9 @@ func (r *Reader) GraphCommit(ctx context.Context, sha gitpack.SHA) (tree gitpack
 
 // mergedGraph returns the entry e with the union of the graphs of the layers, stored as one file, or e as it is when no
 // layer has a graph. A graph that cannot be read is left out: its commits are read from the objects.
-func (s *Service) mergedGraph(ctx context.Context, repo Repo, prefix string, e midx.Entry, layers []midx.Entry) (midx.Entry, error) {
+func (s *Service) mergedGraph(ctx context.Context, repo Repo, prefix string, e midx.Entry, layers []midx.Entry) (out midx.Entry, err error) {
+	ctx, end := StartRootSpan(ctx, "vcs.maintain.graph_merge", attribute.Int("layers", len(layers)))
+	defer func() { end(err, attribute.Int("commits", out.Commits), attribute.Int64("graph_bytes", out.GraphSize)) }()
 	var commits int
 	for _, l := range layers {
 		commits += l.Commits

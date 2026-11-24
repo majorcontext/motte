@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/majorcontext/motte/bucket"
 	"github.com/majorcontext/motte/internal/clock"
 	"github.com/majorcontext/motte/internal/gitpack"
@@ -250,7 +252,10 @@ func (s *Service) mergeOnce(ctx context.Context, repo Repo, maxObjects int, try 
 	if !ok {
 		return false, nil
 	}
-	err = s.mergeRun(ctx, repo, run, try)
+	ctx, end := StartRootSpan(ctx, "vcs.maintain.merge", attribute.Int("layers", len(run)), attribute.String("class", run[0].Class), attribute.Bool("tail", try))
+	var did opCount
+	err = s.mergeRun(ctx, repo, run, try, &did)
+	end(err, attribute.Int64("objects", did.objects))
 	if errors.Is(err, errStale) {
 		return false, nil
 	}
@@ -268,7 +273,10 @@ func (s *Service) compactOnce(ctx context.Context, repo Repo) (bool, error) {
 	if !ok {
 		return false, nil
 	}
-	err = s.compactRun(ctx, repo, run)
+	ctx, end := StartRootSpan(ctx, "vcs.maintain.compact", attribute.Int("layers", len(run)), attribute.String("class", run[0].Class))
+	var did opCount
+	err = s.compactRun(ctx, repo, run, &did)
+	end(err, attribute.Int64("bytes_written", did.bytes), attribute.Int64("objects", did.objects))
 	if errors.Is(err, errStale) {
 		return false, nil
 	}
@@ -307,7 +315,10 @@ func (s *Service) replace(ctx context.Context, repo Repo, old []midx.Entry, add 
 
 var errStale = errors.New("store: the layers changed under a merge")
 
-func (s *Service) mergeRun(ctx context.Context, repo Repo, layers []midx.Entry, try bool) error {
+// opCount is what one maintenance run did, for its span.
+type opCount struct{ bytes, objects int64 }
+
+func (s *Service) mergeRun(ctx context.Context, repo Repo, layers []midx.Entry, try bool, did *opCount) error {
 	prefix, err := repoPrefix(repo)
 	if err != nil {
 		return err
@@ -362,8 +373,9 @@ func (s *Service) mergeRun(ctx context.Context, repo Repo, layers []midx.Entry, 
 	if err := s.replace(ctx, repo, layers, []midx.Entry{entry}, retire); err != nil {
 		return err
 	}
+	did.objects = int64(r.objects())
 	s.stats.mergeRuns.Add(1)
-	s.stats.mergeObjects.Add(int64(r.objects()))
+	s.stats.mergeObjects.Add(did.objects)
 	return nil
 }
 
@@ -402,7 +414,7 @@ type packOut struct {
 	graph []midx.Commit
 }
 
-func (s *Service) compactRun(ctx context.Context, repo Repo, layers []midx.Entry) error {
+func (s *Service) compactRun(ctx context.Context, repo Repo, layers []midx.Entry, did *opCount) error {
 	prefix, err := repoPrefix(repo)
 	if err != nil {
 		return err
@@ -480,6 +492,7 @@ func (s *Service) compactRun(ctx context.Context, repo Repo, layers []midx.Entry
 	for _, o := range outs {
 		_ = s.index.AddPack(ctx, repo.String(), o.id, int64(len(o.pack)))
 	}
+	did.bytes, did.objects = bytes, int64(objects)
 	s.stats.compactRuns.Add(1)
 	s.stats.compactBytes.Add(bytes)
 	s.stats.compactObjects.Add(int64(objects))
@@ -653,7 +666,7 @@ func (s *Service) claim(ctx context.Context, repo Repo, keys ...string) error {
 // read, so a file that a writer stored again after a stall is kept, and its record stays for a later pass. A writer that stores the file again claims it first, so a file
 // that the manifest will hold is never deleted. A file that a layer holds already, such as a file of a swap that was
 // lost, is forgotten and kept.
-func (s *Service) collect(ctx context.Context, repo Repo) error {
+func (s *Service) collect(ctx context.Context, repo Repo) (err error) {
 	prefix, err := repoPrefix(repo)
 	if err != nil {
 		return err
@@ -691,6 +704,9 @@ func (s *Service) collect(ctx context.Context, repo Repo) error {
 	if len(taken) == 0 {
 		return nil
 	}
+	ctx, end := StartRootSpan(ctx, "vcs.maintain.collect", attribute.Int("files", len(taken)))
+	var deleted int64
+	defer func() { end(err, attribute.Int64("deleted", deleted)) }()
 	m, _, err := s.loadManifest(ctx, repo)
 	if err != nil {
 		return err
@@ -731,6 +747,7 @@ func (s *Service) collect(ctx context.Context, repo Repo) error {
 			}
 		}
 		s.stats.deleted.Add(1)
+		deleted++
 	}
 	return s.index.ForgetRetired(ctx, repo.String(), done)
 }

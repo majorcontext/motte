@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/majorcontext/motte/api"
 	"github.com/majorcontext/motte/grant"
 	"github.com/majorcontext/motte/internal/gitpack"
@@ -103,13 +105,15 @@ func (s *Server) land(w http.ResponseWriter, r *http.Request, c call) error {
 
 // enqueueAndWait queues the land and waits for its result. The request that finds a free ref leads it, and else the
 // leader of another replica ends the item, and this request finds the result by its poll.
-func (s *Server) enqueueAndWait(ctx context.Context, req meta.LandRequest) (landOutcome, error) {
+func (s *Server) enqueueAndWait(ctx context.Context, req meta.LandRequest) (res landOutcome, waitErr error) {
 	key := meta.LandKey{Repo: req.Repo, Ref: req.Ref}
 	ch := make(chan landOutcome, 1)
 	unwatch := s.watchLand(landWaiter{req.Repo, req.ID}, ch)
 	defer unwatch()
 	clk := s.events.Clock
+	_, endEnqueue := store.StartSpan(ctx, "vcs.land.enqueue")
 	item, err := s.index.EnqueueLand(ctx, req, clk.Now())
+	endEnqueue(err)
 	if err != nil {
 		return landOutcome{}, err
 	}
@@ -130,6 +134,8 @@ func (s *Server) enqueueAndWait(ctx context.Context, req meta.LandRequest) (land
 	}
 	timeout := clk.NewTimer(s.lands.Timeout)
 	defer timeout.Stop()
+	_, endWait := store.StartSpan(ctx, "vcs.land.wait")
+	defer func() { endWait(waitErr, attribute.Bool("leader_here", s.leadingHere(key))) }()
 	for !item.Done {
 		s.kickLeader(key)
 		poll := clk.NewTimer(s.lands.Poll)
@@ -170,7 +176,8 @@ func (s *Server) warmLand(ctx context.Context, req meta.LandRequest) {
 		return
 	}
 	if rd, err := s.objects.Reader(ctx, repo); err == nil {
-		_ = land.Warm(ctx, landSource{rd}, base, head)
+		ctx, end := store.StartSpan(ctx, "vcs.land.warm")
+		end(land.Warm(ctx, landSource{rd}, base, head))
 	}
 }
 

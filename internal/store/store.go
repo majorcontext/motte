@@ -21,6 +21,7 @@ import (
 	"unicode/utf8"
 	"weak"
 
+	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 	"golang.org/x/sync/singleflight"
@@ -151,6 +152,9 @@ type Service struct {
 
 	hits, misses, idxBytes, rangeReads, rangeBytes atomic.Int64
 	ihits, imisses                                 atomic.Int64
+
+	slowAfter time.Duration
+	slowAt    atomic.Int64
 }
 
 // CacheStats counts the open-pack cache, the layer cache and the bucket reads that fill them.
@@ -250,7 +254,7 @@ func (s *Service) tryReserveInline(bytes int64) (release func()) {
 }
 
 func New(st bucket.Store, index PackIndex, opts ...Option) *Service {
-	s := &Service{st: st, index: index, clk: clock.Real(), grace: DefaultGrace, open: map[string]*openPack{}, budget: semaphore.NewWeighted(MemoryBudget), inline: semaphore.NewWeighted(inlineBudget), landed: semaphore.NewWeighted(LandBudget), icache: newLRU(maxIndexBytes), ocache: newLRU(maxObjectCacheBytes), rcache: newRangeCache(DefaultRangeCacheBytes), rflight: semaphore.NewWeighted(DefaultReadBudget), readBudget: DefaultReadBudget}
+	s := &Service{st: st, index: index, clk: clock.Real(), grace: DefaultGrace, open: map[string]*openPack{}, budget: semaphore.NewWeighted(MemoryBudget), inline: semaphore.NewWeighted(inlineBudget), landed: semaphore.NewWeighted(LandBudget), icache: newLRU(maxIndexBytes), ocache: newLRU(maxObjectCacheBytes), rcache: newRangeCache(DefaultRangeCacheBytes), rflight: semaphore.NewWeighted(DefaultReadBudget), readBudget: DefaultReadBudget, slowAfter: slowReadAfter}
 	for _, o := range opts {
 		o(s)
 	}
@@ -887,12 +891,21 @@ type Tree struct {
 // one, taken from the pack index. It reads the trees of a batch together, and
 // then the headers of their blobs in groups, so a bulk read costs a few rounds
 // of reads, not one for each tree.
-func (s *Service) TreeBulk(ctx context.Context, repo Repo, sha gitpack.SHA, maxEntries int, grow func(treeBytes int64) error) ([]Tree, error) {
+func (s *Service) TreeBulk(ctx context.Context, repo Repo, sha gitpack.SHA, maxEntries int, grow func(treeBytes int64) error) (out []Tree, err error) {
+	ctx, end := StartSpan(ctx, "vcs.treebulk", attribute.Int("max_entries", maxEntries))
+	var batches int
+	var fill time.Duration
+	defer func() {
+		entries := 0
+		for _, t := range out {
+			entries += len(t.Entries)
+		}
+		end(err, attribute.Int("trees", len(out)), attribute.Int("entries", entries), attribute.Int("batches", batches), attribute.Float64("fill_sizes_ms", float64(fill)/1e6))
+	}()
 	v, err := s.view(ctx, repo)
 	if err != nil {
 		return nil, err
 	}
-	var out []Tree
 	queue := []gitpack.SHA{sha}
 	total, held := 0, int64(0)
 	rd := newReader(v)
@@ -932,7 +945,11 @@ func (s *Service) TreeBulk(ctx context.Context, repo Repo, sha gitpack.SHA, maxE
 				}
 			}
 		}
-		if err := v.fillSizes(ctx, out[first:]); err != nil {
+		t0 := s.clk.Now()
+		err := v.fillSizes(ctx, out[first:])
+		fill += s.clk.Now().Sub(t0)
+		batches++
+		if err != nil {
 			return nil, err
 		}
 	}

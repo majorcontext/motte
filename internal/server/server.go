@@ -173,6 +173,9 @@ func (s *Server) writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// Registry returns the metrics that /metrics serves, so an exporter can read the same values.
+func (s *Server) Registry() prometheus.Gatherer { return s.registry }
+
 func (s *Server) registerCacheMetrics() {
 	counter := func(name, help string, f func(store.CacheStats) int64) {
 		s.registry.MustRegister(prometheus.NewCounterFunc(prometheus.CounterOpts{Name: name, Help: help}, func() float64 { return float64(f(s.objects.CacheStats())) }))

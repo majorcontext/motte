@@ -13,9 +13,7 @@ import (
 
 	"cloud.google.com/go/storage"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
 	"github.com/majorcontext/motte/bucket"
 	"github.com/majorcontext/motte/bucket/fs"
@@ -88,15 +86,16 @@ func run(log *slog.Logger) error {
 	defer stop()
 
 	if cfg.otlp {
-		exp, err := otlptracehttp.New(ctx)
+		shutdown, err := startTraces(ctx)
 		if err != nil {
 			return err
 		}
-		tp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exp))
-		otel.SetTracerProvider(tp)
-		defer func() { _ = tp.Shutdown(context.WithoutCancel(ctx)) }()
+		defer shutdown()
 	}
 	otel.SetTextMapPropagator(propagation.TraceContext{})
+	if cfg.pprof != "" {
+		go servePprof(log, cfg.pprof)
+	}
 
 	db, closeMeta, err := openMeta(ctx, cfg)
 	if err != nil {
@@ -114,6 +113,13 @@ func run(log *slog.Logger) error {
 		}
 	}
 	srv := server.New(scfg)
+	if cfg.otlp {
+		shutdown, err := startMetrics(ctx, srv.Registry())
+		if err != nil {
+			return err
+		}
+		defer shutdown()
+	}
 	workCtx, stopWork := context.WithCancel(ctx)
 	workers := make(chan struct{})
 	go func() { _ = srv.Run(workCtx); close(workers) }()

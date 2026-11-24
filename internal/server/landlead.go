@@ -6,6 +6,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/majorcontext/motte/api"
 	"github.com/majorcontext/motte/grant"
 	"github.com/majorcontext/motte/internal/gitpack"
@@ -170,7 +173,10 @@ func (l landSource) Get(ctx context.Context, sha gitpack.SHA, before func(int64)
 	return l.r.GetSized(ctx, sha, before)
 }
 
-func (s *Server) landBatch(ctx context.Context, key meta.LandKey, owner string, items []meta.LandItem) error {
+func (s *Server) landBatch(ctx context.Context, key meta.LandKey, owner string, items []meta.LandItem) (err error) {
+	ctx, _ = store.WithStats(ctx)
+	ctx, end := store.StartRootSpan(ctx, "vcs.land.batch", attribute.Int("items", len(items)))
+	defer func() { end(err) }()
 	repo, err := store.ParseRepo(key.Repo)
 	if err != nil {
 		return err
@@ -182,6 +188,7 @@ func (s *Server) landBatch(ctx context.Context, key meta.LandKey, owner string, 
 		if !retry {
 			return err
 		}
+		trace.SpanFromContext(ctx).AddEvent("ref_moved")
 	}
 	return errors.New("server: the ref moved on every attempt of a land batch")
 }
@@ -255,14 +262,24 @@ func (b *batchRun) attempt(ctx context.Context) (retry bool, err error) {
 		if err := b.res.growLand(int64(batch.Bytes())); err != nil {
 			return false, err
 		}
+		_, endWrite := store.StartSpan(ctx, "vcs.land.write", attribute.Int("objects", len(objs)), attribute.Int("batch_bytes", batch.Bytes()))
 		for _, part := range splitObjects(objs, store.MaxBatch/2, store.MaxPackBytes/2) {
 			if _, err := s.objects.PutObjects(ctx, b.repo, part); err != nil {
+				endWrite(err)
 				return false, err
 			}
 		}
+		endWrite(nil)
 	}
+	_, endSwap := store.StartSpan(ctx, "vcs.land.swap", attribute.Int("rows", len(b.rows)))
 	moved, err := s.index.LandRef(ctx, meta.LandMove{Repo: b.key.Repo, Ref: b.key.Ref, Old: ref.Commit, New: batch.Tip().String(), Kind: b.kind, Rows: b.rows, Results: b.results}, b.owner, s.events.Clock.Now())
 	var conflict *meta.RefConflict
+	isConflict := errors.As(err, &conflict)
+	if isConflict {
+		endSwap(nil, attribute.Bool("conflict", true))
+	} else {
+		endSwap(err, attribute.Bool("conflict", false))
+	}
 	switch {
 	case errors.As(err, &conflict):
 		return true, nil
@@ -293,15 +310,19 @@ func (b *batchRun) land(ctx context.Context, batch *land.Batch, it meta.LandItem
 		}
 		expect = &tree
 	}
+	_, endMerge := store.StartSpan(ctx, "vcs.land.merge", attribute.Bool("expect_tree", expect != nil))
 	l, err := batch.LandExpecting(ctx, base, head, when, expect)
 	if err != nil {
 		out, ok := outcomeOf(err)
 		if !ok {
+			endMerge(err)
 			return err
 		}
+		endMerge(nil, attribute.String("outcome", string(out.Code)))
 		b.end(it, out, false)
 		return nil
 	}
+	endMerge(nil, attribute.String("outcome", landKind(l)), attribute.Int("commits", len(l.Commits)))
 	resp := &api.LandResponse{ID: it.ID, Ref: b.key.Ref, Tip: l.New.String(), FastForward: l.FastForward, Commits: []api.LandedCommit{}}
 	for _, c := range l.Commits {
 		resp.Commits = append(resp.Commits, api.LandedCommit{Old: c.Old.String(), New: c.New.String()})
@@ -322,6 +343,16 @@ func (b *batchRun) land(ctx context.Context, batch *land.Batch, it meta.LandItem
 	}
 	b.end(it, landOutcome{Land: resp}, true)
 	return nil
+}
+
+func landKind(l land.Landed) string {
+	switch {
+	case l.Noop:
+		return "noop"
+	case l.FastForward:
+		return "fast_forward"
+	}
+	return "rebase"
 }
 
 func (b *batchRun) finish(ctx context.Context) error {

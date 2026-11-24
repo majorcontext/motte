@@ -21,6 +21,7 @@ import (
 const signature = "gpgsig -----BEGIN SIGNATURE-----\n sig\n -----END SIGNATURE-----\n"
 
 func TestLandFastForwardsThenRebasesAndMapsTheCommits(t *testing.T) {
+	traceInMemory()
 	eachBackend(t, func(t *testing.T, l *landEnv) {
 		var o objSet
 		c1 := o.commit(map[string]string{"f1": "1"}, "change-id kkkk\n"+signature, "one", l.root)
@@ -72,6 +73,7 @@ func TestLandFastForwardsThenRebasesAndMapsTheCommits(t *testing.T) {
 		if !slices.Equal(news, []string{l.root, c1, r2.Tip}) {
 			t.Errorf("merge events of main end at %v, want the root, %s and %s", news, c1, r2.Tip)
 		}
+		checkLandSpans(t)
 	})
 }
 

@@ -7,8 +7,10 @@ import (
 	"io"
 	"slices"
 	"sync"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/semaphore"
 
@@ -159,7 +161,9 @@ func (b *packReader) cover(start, end int64) []byte {
 // so it holds bytes of the service-owned read budget, not of a request, until it ends.
 func (b *packReader) read(ctx context.Context, off, end int64) ([]byte, error) {
 	k := rangeKey{b.key, off, end}
-	if d, ok := b.svc.rcache.get(k); ok {
+	d, hit := b.svc.rcache.get(k)
+	statsFrom(ctx).rangeCache(hit)
+	if hit {
 		return d, nil
 	}
 	svc, st := b.svc, b.st
@@ -205,14 +209,42 @@ func (s *Service) loadRange(ctx context.Context, st bucket.Store, k rangeKey) ([
 func (s *Service) readRange(ctx context.Context, st bucket.Store, k rangeKey) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, blockTimeout)
 	defer cancel()
-	ctx, sp := tracer.Start(ctx, "vcs.pack.read", trace.WithAttributes(attribute.Int64("offset", k.off), attribute.Int64("range_bytes", k.end-k.off)))
+	start := s.clk.Now()
 	d, err := st.GetRange(ctx, k.pack, k.off, k.end-k.off)
 	statsFrom(ctx).rangeRead(len(d))
 	s.rangeReads.Add(1)
 	s.rangeBytes.Add(int64(len(d)))
-	sp.SetAttributes(attribute.Int("bytes", len(d)))
-	finishSpan(sp, err)
+	s.slowRead(ctx, k, start, len(d), err)
 	return d, err
+}
+
+// slowReadAfter is the time that a bucket read takes to count as slow, and slowReadEvery is the least time between two
+// spans of slow reads.
+const (
+	slowReadAfter = 500 * time.Millisecond
+	slowReadEvery = time.Second
+)
+
+// slowRead records a span for a read that took slowReadAfter or longer, and at most one in each slowReadEvery. Other
+// reads have no span of their own: their counts are on the span of the request.
+func (s *Service) slowRead(ctx context.Context, k rangeKey, start time.Time, n int, err error) {
+	end := s.clk.Now()
+	if end.Sub(start) < s.slowAfter {
+		return
+	}
+	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() && !sc.IsSampled() {
+		return
+	}
+	last := s.slowAt.Load()
+	if end.UnixNano()-last < int64(slowReadEvery) || !s.slowAt.CompareAndSwap(last, end.UnixNano()) {
+		return
+	}
+	_, sp := tracer.Start(ctx, "vcs.pack.read.slow", trace.WithTimestamp(start), trace.WithAttributes(attribute.Int64("offset", k.off), attribute.Int64("range_bytes", k.end-k.off), attribute.Int("bytes", n)))
+	if err != nil {
+		sp.AddEvent("exception", trace.WithAttributes(attribute.String("exception.type", fmt.Sprintf("%T", err))))
+		sp.SetStatus(codes.Error, "error")
+	}
+	sp.End(trace.WithTimestamp(end))
 }
 
 // keep adds the range that starts at off, and drops the oldest ranges while the reader holds too much.

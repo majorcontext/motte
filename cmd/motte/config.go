@@ -51,6 +51,7 @@ type config struct {
 	compaction   bool
 	compactEvery time.Duration
 	compactGrace time.Duration
+	pprof        string
 	// rangeCacheMiB is the memory of the range cache in MiB; 0 turns it off.
 	rangeCacheMiB int
 }
@@ -81,6 +82,7 @@ type config struct {
 //	MOTTE_COMPACTION_INTERVAL  wait between maintenance passes, a Go duration, default 30s
 //	MOTTE_COMPACTION_GRACE     how long a retired file stays before deletion, a Go duration, default 1h
 //	MOTTE_RANGE_CACHE_MIB      memory of the cache of pack ranges that requests share, in MiB, default 256; 0 turns it off
+//	MOTTE_PPROF                optional; address of a listener that serves /debug/pprof, apart from MOTTE_LISTEN; MOTTE_PPROF_CONTENTION=1 adds the mutex and block profiles
 //	OTEL_EXPORTER_OTLP_ENDPOINT  optional; enables trace export
 func loadConfig(getenv func(string) string) (config, error) {
 	c := config{
@@ -147,6 +149,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 			return config{}, errors.New("MOTTE_RANGE_CACHE_MIB must be a number of MiB from 0 to 4096")
 		}
 		c.rangeCacheMiB = n
+	}
+	if c.pprof = getenv("MOTTE_PPROF"); c.pprof != "" && c.pprof == c.listen {
+		return config{}, errors.New("MOTTE_PPROF needs an address other than MOTTE_LISTEN")
 	}
 	keys, err := parseKeys(getenv("MOTTE_TRUSTED_KEYS"))
 	if err != nil {

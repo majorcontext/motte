@@ -115,7 +115,7 @@ func bigText(n int, tail string) string {
 func TestGitCloneFetchAndPush(t *testing.T) {
 	g := newGitEnv(t)
 	read, write := g.readGrant(g.text), g.WriteGrant(t, g.text)
-	reader, writer := g.clone(read), g.clone(write)
+	reader, writer := g.tracedClone(read), g.clone(write)
 	g.commit(writer, "big.txt", bigText(2000, "one\n"))
 	g.git(writer, true, "push", "-q", "origin", "HEAD:main")
 	g.commit(writer, "big.txt", bigText(2000, "two\n"))
@@ -124,6 +124,7 @@ func TestGitCloneFetchAndPush(t *testing.T) {
 	if got := g.git(reader, true, "show", "origin/feature/x:big.txt"); !strings.HasSuffix(got, "two") {
 		t.Errorf("fetched branch content ends %q", got[len(got)-10:])
 	}
+	checkFetchSpans(t)
 }
 
 func TestSmallRequestsNeedLittleMemory(t *testing.T) {

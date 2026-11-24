@@ -324,7 +324,7 @@ func (s *Server) uploadPack(w http.ResponseWriter, r *http.Request, c call) erro
 		return err
 	}
 	gitHeaders(w, "application/x-git-upload-pack-result")
-	up := &gitproto.Upload{Objects: reader{rd, fh.object}, Refs: refs, Head: head, Track: fh.track}
+	up := &gitproto.Upload{Objects: reader{rd, fh.object}, Refs: refs, Head: head, Track: fh.track, Phase: store.Phases(r.Context(), "vcs.fetch.")}
 	return s.abortAfterHeaders(w, r, up.Serve(r.Context(), w, bytes.NewReader(body)))
 }
 

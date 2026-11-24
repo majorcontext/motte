@@ -13,3 +13,4 @@ internal/land TestTheLimitCountsDistinctPaths it writes the package variable Max
 internal/land TestTheCacheOfBaseDiffsIsBounded it writes the package variable MaxChangedPaths that every land reads
 internal/land TestALandThatMakesAnObjectAboveTheLimitFailsAloneAndLeavesNoTrace it writes the package variable MaxObjectBytes that every land reads
 internal/server TestTheMemoryBudgetAndTheFetchSlotsOnOneServer LowerFetchSlots writes the package variables that every running server reads
+internal/store TestSlowReadsGetASpanAtMostOnceASecond sets the global tracer provider

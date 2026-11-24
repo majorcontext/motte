@@ -86,10 +86,8 @@ func (s *Server) register(mux *http.ServeMux, pattern string, fn handlerFunc, sc
 		r = r.WithContext(ctx)
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		defer func() {
-			span.SetAttributes(attribute.Int("http.response.status_code", sw.status),
-				attribute.Int64("objects", stats.Objects.Load()), attribute.Int64("bytes", stats.Bytes.Load()),
-				attribute.Int64("layers_probed", stats.Layers.Load()), attribute.Int64("range_reads", stats.RangeReads.Load()),
-				attribute.Float64("slot_wait_ms", float64(stats.SlotWaitNanos.Load())/1e6))
+			span.SetAttributes(attribute.Int("http.response.status_code", sw.status), attribute.Float64("slot_wait_ms", float64(stats.SlotWaitNanos.Load())/1e6))
+			span.SetAttributes(stats.Attrs()...)
 			span.End()
 			s.requests.WithLabelValues(pattern, strconv.Itoa(sw.status)).Inc()
 			s.latency.WithLabelValues(pattern).Observe(time.Since(start).Seconds())

@@ -52,6 +52,7 @@ type collector struct {
 	out        []gitpack.SHA
 
 	track    func(objects int) error
+	phase    func(name string)
 	reported int
 	err      error
 }
@@ -207,6 +208,10 @@ func (c *collector) collect(wants, haves []gitpack.SHA) ([]gitpack.SHA, error) {
 	c.commits = map[gitpack.SHA]*commitNode{}
 	c.skip = map[gitpack.SHA]struct{}{}
 	c.sent = map[gitpack.SHA]struct{}{}
+	phase := c.phase
+	if phase == nil {
+		phase = func(string) {}
+	}
 	for _, h := range haves {
 		n, err := c.commit(h)
 		if errors.Is(err, errNotCommit) {
@@ -242,6 +247,7 @@ func (c *collector) collect(wants, haves []gitpack.SHA) ([]gitpack.SHA, error) {
 			}
 		}
 	}
+	phase("commit_walk")
 	var trees []gitpack.SHA
 	var edges []gitpack.SHA
 	for _, n := range picked {
@@ -259,9 +265,11 @@ func (c *collector) collect(wants, haves []gitpack.SHA) ([]gitpack.SHA, error) {
 	if err := c.walkTrees(edges, c.skip, nil); err != nil {
 		return nil, err
 	}
+	phase("edge_trees")
 	if err := c.walkTrees(trees, c.sent, c.add); err != nil {
 		return nil, err
 	}
+	phase("tree_walk")
 	return c.out, nil
 }
 
