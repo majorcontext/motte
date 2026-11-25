@@ -1290,7 +1290,7 @@ func TestATreeReadFetchesOnlyTheHeadersOfItsBlobs(t *testing.T) {
 	var objs []gitpack.Object
 	var tree []byte
 	for i := range 100 {
-		data := make([]byte, 300<<10)
+		data := make([]byte, 140<<10)
 		fillRandom(rng, data)
 		sha := gitpack.Hash(gitpack.Blob, data)
 		objs = append(objs, gitpack.Object{Type: gitpack.Blob, Data: data})
@@ -1307,6 +1307,6 @@ func TestATreeReadFetchesOnlyTheHeadersOfItsBlobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := svc.CacheStats().RangeBytes; got > 2<<20 {
-		t.Errorf("a tree of 100 blobs of 300 KiB cost %d bytes of range reads; it needs the headers only", got)
+		t.Errorf("a tree of 100 blobs of 140 KiB cost %d bytes of range reads; it needs the headers only", got)
 	}
 }

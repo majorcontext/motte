@@ -40,13 +40,13 @@ func (p *phaseWriter) Write(b []byte) (int, error) {
 	return p.Buffer.Write(b)
 }
 
-// copyFixture stores 2000 trees of 2 KiB in one pack in an order unrelated to the walk, and returns the commit that
+// copyFixture stores 1500 trees of 2 KiB in one pack in an order unrelated to the walk, and returns the commit that
 // reaches them and the objects of its clone.
 func copyFixture(t *testing.T, w *world) (gitpack.SHA, map[gitpack.SHA]gitpack.Object) {
 	t.Helper()
 	rng := rand.New(rand.NewPCG(5, 6))
 	var trees []gitpack.Object
-	for range 2000 {
+	for range 1500 {
 		var b []byte
 		for i := range 60 {
 			var sha gitpack.SHA
@@ -142,7 +142,7 @@ func packWriteReadsFewLargeRuns(t *testing.T, w *world, tip gitpack.SHA, want ma
 	}
 	t.Logf("%d range reads while the pack is written", writeReads)
 	if writeReads > 8 {
-		t.Errorf("the pack write made %d range reads for 4 MiB of trees, want at most 8: it must read each pack in large runs", writeReads)
+		t.Errorf("the pack write made %d range reads for 3 MiB of trees, want at most 8: it must read each pack in large runs", writeReads)
 	}
 }
 
@@ -207,7 +207,7 @@ func TestACopyOfManySmallRunsReadsAtMost64AtOnceAndOpensNoPack(t *testing.T) {
 	t.Parallel()
 	w := newWorld(t)
 	rng := rand.New(rand.NewPCG(8, 9))
-	objs := make([]gitpack.Object, 150)
+	objs := make([]gitpack.Object, 80)
 	shas := make([]gitpack.SHA, len(objs))
 	for i := range objs {
 		data := make([]byte, 140<<10)

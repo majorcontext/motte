@@ -54,10 +54,27 @@ func (w *world) sizedLayers() (sized, total int) {
 
 func TestBlobSizesComeFromTheIndexAndMatchTheHeaders(t *testing.T) {
 	t.Parallel()
+	rng := rand.New(rand.NewPCG(9, 10))
+	var pushes [3][]gitpack.Object
+	var dirs []byte
+	for d := range pushes {
+		var dir []byte
+		for f := range 40 {
+			data := make([]byte, 100<<10+rng.IntN(1000))
+			if f == 0 {
+				data = nil
+			}
+			fillRandom(rng, data)
+			pushes[d] = append(pushes[d], gitpack.Object{Type: gitpack.Blob, Data: data})
+			sha := gitpack.Hash(gitpack.Blob, data)
+			dir = append(append(dir, fmt.Sprintf("100644 f%d\x00", f)...), sha[:]...)
+		}
+		pushes[d] = append(pushes[d], gitpack.Object{Type: gitpack.Tree, Data: dir})
+		sha := gitpack.Hash(gitpack.Tree, dir)
+		dirs = append(append(dirs, fmt.Sprintf("40000 d%d\x00", d)...), sha[:]...)
+	}
 	bulk := func(w *world, strip ...int) ([]store.Tree, int64) {
 		puts := 0
-		rng := rand.New(rand.NewPCG(9, 10))
-		var dirs []byte
 		put := func(objs []gitpack.Object) {
 			if _, err := w.svc.PutObjects(t.Context(), repo, objs); err != nil {
 				t.Fatal(err)
@@ -67,29 +84,9 @@ func TestBlobSizesComeFromTheIndexAndMatchTheHeaders(t *testing.T) {
 			}
 			puts++
 		}
-		push := func(d int) {
-			var objs []gitpack.Object
-			var dir []byte
-			for f := range 40 {
-				data := make([]byte, 100<<10+rng.IntN(1000))
-				if f == 0 {
-					data = nil
-				}
-				for j := range data {
-					data[j] = byte(rng.Uint32())
-				}
-				objs = append(objs, gitpack.Object{Type: gitpack.Blob, Data: data})
-				sha := gitpack.Hash(gitpack.Blob, data)
-				dir = append(append(dir, fmt.Sprintf("100644 f%d\x00", f)...), sha[:]...)
-			}
-			objs = append(objs, gitpack.Object{Type: gitpack.Tree, Data: dir})
-			sha := gitpack.Hash(gitpack.Tree, dir)
-			dirs = append(append(dirs, fmt.Sprintf("40000 d%d\x00", d)...), sha[:]...)
+		for _, objs := range pushes {
 			put(objs)
 		}
-		push(0)
-		push(1)
-		push(2)
 		put([]gitpack.Object{{Type: gitpack.Tree, Data: dirs}})
 		svc := w.cold()
 		trees, err := svc.TreeBulk(t.Context(), repo, gitpack.Hash(gitpack.Tree, dirs), 100000, func(int64) error { return nil })
