@@ -301,7 +301,7 @@ func (s *Store) SwapManifest(ctx context.Context, repo string, expect int64, bod
 }
 
 func (s *Store) RetireFiles(ctx context.Context, repo string, keys []string, at time.Time) error {
-	if _, err := s.Pool.Exec(ctx, `INSERT INTO pack_retired (repo, key, retired_at) SELECT $1, k, $3 FROM unnest($2::text[]) AS k ON CONFLICT (repo, key) DO UPDATE SET retired_at = EXCLUDED.retired_at WHERE pack_retired.deleting_at IS NULL`, repo, keys, at); err != nil {
+	if _, err := s.Pool.Exec(ctx, `INSERT INTO pack_retired (repo, key, retired_at) SELECT $1, k, $3 FROM (SELECT DISTINCT k FROM unnest($2::text[]) AS k) AS d ON CONFLICT (repo, key) DO UPDATE SET retired_at = EXCLUDED.retired_at WHERE pack_retired.deleting_at IS NULL`, repo, keys, at); err != nil {
 		return fmt.Errorf("postgres: retire files: %w", err)
 	}
 	return nil
