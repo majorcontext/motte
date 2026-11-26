@@ -11,7 +11,7 @@ import (
 
 	"github.com/majorcontext/motte/api"
 	"github.com/majorcontext/motte/client"
-	"github.com/majorcontext/motte/internal/devicelogin"
+	"github.com/majorcontext/motte/devicelogin"
 )
 
 // runCLI runs the command line subcommands and reports ok false for a name that is not one.

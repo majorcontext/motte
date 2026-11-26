@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/majorcontext/motte/internal/devicelogin"
+	"github.com/majorcontext/motte/devicelogin"
 )
 
 func TestLoginPollsThroughPendingAndSlowDownAndKeepsTheTokenPrivate(t *testing.T) {
