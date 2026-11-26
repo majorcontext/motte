@@ -39,7 +39,7 @@ func sizeKey(file []byte) string {
 		return ""
 	}
 	sum := sha256.Sum256(file)
-	return "midx/" + hex.EncodeToString(sum[:]) + ".sz"
+	return uniqueKey("midx/"+hex.EncodeToString(sum[:])+".sz", writeID())
 }
 
 // storeSizes stores the size file of a layer of n records under key, and keeps it in the layer cache: the tail merge of
@@ -59,9 +59,6 @@ func (s *Service) sizeObject(ctx context.Context, repo Repo, prefix string, file
 	key := sizeKey(file)
 	if key == "" {
 		return "", nil
-	}
-	if err := s.claim(ctx, repo, key); err != nil {
-		return "", err
 	}
 	return key, s.storeSizes(ctx, prefix, key, file, n)
 }

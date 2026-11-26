@@ -322,15 +322,16 @@ func (s *Service) indexLayers(ctx context.Context, repo Repo, packs []meta.Pack)
 			if err != nil {
 				return err
 			}
-			out[i] = indexEntry(p.ID, p.Bytes, n)
+			out[i] = indexEntry(midx.Pack{ID: p.ID, Bytes: p.Bytes}, n)
 			return nil
 		})
 	}
 	return out, g.Wait()
 }
 
-func indexEntry(id string, bytes int64, objects int) midx.Entry {
-	return midx.Entry{Key: id + ".idx", Objects: objects, Bytes: bytes, NPacks: 1, Packs: []midx.Pack{midx.Pack{ID: id, Bytes: bytes}.Keyed()}}
+func indexEntry(p midx.Pack, objects int) midx.Entry {
+	p = p.Keyed()
+	return midx.Entry{Key: p.Idx, Objects: objects, Bytes: p.Bytes, NPacks: 1, Packs: []midx.Pack{p}}
 }
 
 const manifestRetries = 64
@@ -359,25 +360,25 @@ func (s *Service) updateManifest(ctx context.Context, repo Repo, f func(*midx.Ma
 }
 
 // appendPack adds the pack that putPack stored as the newest layer, and merges the small layers at the tail.
-func (s *Service) appendPack(ctx context.Context, repo Repo, id string, bytes int64, idx []byte, graph []midx.Commit, sizes string) error {
+func (s *Service) appendPack(ctx context.Context, repo Repo, pk midx.Pack, idx []byte, graph []midx.Commit, sizes string) error {
 	n, err := gitpack.IdxCount(idx[:min(len(idx), gitpack.IdxHeadBytes)])
 	if err != nil {
 		return err
 	}
-	e := indexEntry(id, bytes, n)
+	e := indexEntry(pk, n)
 	e.Sizes = sizes
 	if len(graph) > 0 {
 		prefix, err := repoPrefix(repo)
 		if err != nil {
 			return err
 		}
-		if e, err = s.withGraph(ctx, repo, prefix, id, e, graph); err != nil {
+		if e, err = s.withGraph(ctx, repo, prefix, pk.ID, e, graph); err != nil {
 			return err
 		}
 	}
 	err = s.updateManifest(ctx, repo, func(m *midx.Manifest) (bool, error) {
 		for i, l := range m.Layers {
-			if l.IsIndex() && l.Packs[0].ID == id {
+			if l.IsIndex() && l.Packs[0].ID == pk.ID {
 				graph, size := l.Graph == "" && e.Graph != "", l.Sizes == "" && e.Sizes != ""
 				if !graph && !size {
 					return false, nil

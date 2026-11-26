@@ -132,9 +132,7 @@ func (s *Service) graphObject(ctx context.Context, repo Repo, prefix, name strin
 		sum := sha256.Sum256(file)
 		key = "midx/" + hex.EncodeToString(sum[:]) + ".cg"
 	}
-	if err := s.claim(ctx, repo, key); err != nil {
-		return "", err
-	}
+	key = uniqueKey(key, writeID())
 	if _, err := s.st.Create(ctx, prefix+"/"+key, file); err != nil {
 		return "", err
 	}

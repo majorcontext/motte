@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,7 +17,6 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/majorcontext/motte/bucket"
-	"github.com/majorcontext/motte/internal/clock"
 	"github.com/majorcontext/motte/internal/gitpack"
 	"github.com/majorcontext/motte/internal/midx"
 	"github.com/majorcontext/motte/meta"
@@ -38,16 +36,14 @@ const (
 	splitEntryBytes = 400
 	// maintainBudget bounds the time that one pass spends on the compactions and merges of a repository.
 	maintainBudget = 20 * time.Second
-	claimPoll      = 100 * time.Millisecond
-	// deleteLease is how long a collector owns the files it marked. On a bucket without a conditional Delete, a
-	// collector that stops for longer between its mark and its delete can delete a file that a writer stored again.
+	// deleteLease is how long a collector owns the files it marked.
 	deleteLease = 10 * time.Minute
 )
 
 type maintStats struct {
 	compactRuns, compactBytes, compactObjects atomic.Int64
 	mergeRuns, mergeObjects                   atomic.Int64
-	deleted, deleteSkipped, failures          atomic.Int64
+	deleted, failures                         atomic.Int64
 	mu                                        sync.Mutex
 	layers                                    map[string]int
 }
@@ -56,7 +52,7 @@ type maintStats struct {
 type MaintStats struct {
 	CompactRuns, CompactBytes, CompactObjects int64
 	MergeRuns, MergeObjects                   int64
-	Deleted, DeleteSkipped, Failures          int64
+	Deleted, Failures                         int64
 	Repos, LayersMax, LayersSum               int64
 }
 
@@ -65,7 +61,7 @@ func (s *Service) MaintStats() MaintStats {
 	st := &s.stats
 	out := MaintStats{
 		CompactRuns: st.compactRuns.Load(), CompactBytes: st.compactBytes.Load(), CompactObjects: st.compactObjects.Load(),
-		MergeRuns: st.mergeRuns.Load(), MergeObjects: st.mergeObjects.Load(), Deleted: st.deleted.Load(), DeleteSkipped: st.deleteSkipped.Load(), Failures: st.failures.Load(),
+		MergeRuns: st.mergeRuns.Load(), MergeObjects: st.mergeObjects.Load(), Deleted: st.deleted.Load(), Failures: st.failures.Load(),
 	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -403,13 +399,11 @@ func (s *Service) mergeRun(ctx context.Context, repo Repo, layers []midx.Entry, 
 }
 
 func (s *Service) putLayer(ctx context.Context, repo Repo, prefix string, l midx.Layer, r *run) (midx.Entry, error) {
-	if err := s.claim(ctx, repo, l.Key); err != nil {
+	key := uniqueKey(l.Key, writeID())
+	if _, err := s.st.Create(ctx, prefix+"/"+key, l.Data); err != nil {
 		return midx.Entry{}, err
 	}
-	if _, err := s.st.Create(ctx, prefix+"/"+l.Key, l.Data); err != nil {
-		return midx.Entry{}, err
-	}
-	return midx.Entry{Key: l.Key, Objects: l.Objects, Bytes: r.bytes(), NPacks: len(r.packs), Packs: r.packs, Size: int64(len(l.Data)), Dir: l.Dir, Class: r.layers[0].Class}, nil
+	return midx.Entry{Key: key, Objects: l.Objects, Bytes: r.bytes(), NPacks: len(r.packs), Packs: r.packs, Size: int64(len(l.Data)), Dir: l.Dir, Class: r.layers[0].Class}, nil
 }
 
 // recordIters opens the record streams of the layers of a run, from the index of a pack or from a layer file.
@@ -483,15 +477,15 @@ func (s *Service) compactRun(ctx context.Context, repo Repo, layers []midx.Entry
 	var bytes int64
 	objects := 0
 	for _, o := range outs {
-		if err := s.claim(ctx, repo, o.id+".pack", o.id+".idx", o.layer.Key); err != nil {
-			return err
-		}
-		for key, data := range map[string][]byte{o.id + ".pack": o.pack, o.id + ".idx": o.idx, o.layer.Key: o.layer.Data} {
+		wid := writeID()
+		pk := midx.Pack{ID: o.id, Bytes: int64(len(o.pack)), Key: uniqueKey(o.id+".pack", wid), Idx: uniqueKey(o.id+".idx", wid)}
+		layerKey := uniqueKey(o.layer.Key, wid)
+		for key, data := range map[string][]byte{pk.Key: o.pack, pk.Idx: o.idx, layerKey: o.layer.Data} {
 			if _, err := s.st.Create(ctx, prefix+"/"+key, data); err != nil {
 				return err
 			}
 		}
-		entry := midx.Entry{Key: o.layer.Key, Objects: o.layer.Objects, Bytes: int64(len(o.pack)), NPacks: 1, Packs: []midx.Pack{midx.Pack{ID: o.id, Bytes: int64(len(o.pack))}.Keyed()}, Size: int64(len(o.layer.Data)), Dir: o.layer.Dir, Class: o.class}
+		entry := midx.Entry{Key: layerKey, Objects: o.layer.Objects, Bytes: int64(len(o.pack)), NPacks: 1, Packs: []midx.Pack{pk}, Size: int64(len(o.layer.Data)), Dir: o.layer.Dir, Class: o.class}
 		if vals, err := layerSizes(o.layer, o.pack); err == nil {
 			if entry.Sizes, err = s.sizeObject(ctx, repo, prefix, midx.BuildSizes(vals), len(vals)); err != nil {
 				return err
@@ -678,21 +672,6 @@ func packEntries(data []byte, size int64) (int, error) {
 	return int(binary.BigEndian.Uint32(data[8:12])), nil
 }
 
-// claim takes keys out of the retired files before the caller stores them again, so that no collector deletes a file
-// that a new layer will hold. A key that a collector already deleted is stored anew: claim waits until the collector
-// forgets it. The collector and the writer meet in the metadata store, so the rule holds across replicas.
-func (s *Service) claim(ctx context.Context, repo Repo, keys ...string) error {
-	for {
-		deleting, err := s.index.ClaimRetired(ctx, repo.String(), keys)
-		if err != nil || !deleting {
-			return err
-		}
-		if err := clock.Wait(ctx, s.clk, claimPoll); err != nil {
-			return err
-		}
-	}
-}
-
 // collect deletes the retired files whose grace has passed, and forgets them. It reads the version of each due file,
 // then marks it as deleting in the metadata store, and then checks the manifest. It deletes only the version that it
 // read, so a file that a writer stored again after a stall is kept, and its record stays for a later pass. A writer that stores the file again claims it first, so a file
@@ -716,11 +695,6 @@ func (s *Service) collect(ctx context.Context, repo Repo) (err error) {
 		}
 	}
 	if len(due) == 0 {
-		return nil
-	}
-	if !bucket.DeletesConditionally(s.st) {
-		s.stats.deleteSkipped.Add(int64(len(due)))
-		slog.WarnContext(ctx, "maintenance kept retired files: the bucket does not delete conditionally", "repo", repo.String(), "files", len(due))
 		return nil
 	}
 	versions := make(map[string]string, len(due))
@@ -753,8 +727,10 @@ func (s *Service) collect(ctx context.Context, repo Repo) (err error) {
 		return err
 	}
 	keys := map[string]bool{}
+	liveIDs := map[string]bool{}
 	for _, p := range held {
 		keys[p.FileKey()], keys[p.IdxKey()] = true, true
+		liveIDs[p.ID] = true
 	}
 	for _, e := range m.Layers {
 		keys[e.Key] = true
@@ -767,10 +743,7 @@ func (s *Service) collect(ctx context.Context, repo Repo) (err error) {
 	}
 	done := make([]string, 0, len(taken))
 	for _, key := range taken {
-		id, isPack := strings.CutSuffix(key, ".pack")
-		if !isPack {
-			id, _ = strings.CutSuffix(key, ".idx")
-		}
+		id, isPack := packIDOfKey(key), strings.HasSuffix(key, ".pack")
 		if keys[key] {
 			done = append(done, key)
 			continue
@@ -785,6 +758,8 @@ func (s *Service) collect(ctx context.Context, repo Repo) (err error) {
 		done = append(done, key)
 		if isPack {
 			s.rcache.dropPack(prefix + "/" + key)
+		}
+		if isPack && !liveIDs[id] {
 			if err := s.index.RemovePack(ctx, repo.String(), id); err != nil {
 				return err
 			}
@@ -832,8 +807,8 @@ func (s *Service) reconcile(ctx context.Context, repo Repo) error {
 		}
 	}
 	for _, r := range retired {
-		if id, ok := strings.CutSuffix(r.Key, ".pack"); ok {
-			knownIDs[id] = true
+		if strings.HasSuffix(r.Key, ".pack") {
+			knownIDs[packIDOfKey(r.Key)] = true
 		}
 	}
 	var missing []meta.Pack

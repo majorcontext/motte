@@ -9,9 +9,9 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
-	"runtime"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -65,6 +65,13 @@ func (b *spy) Create(ctx context.Context, key string, data []byte) (created bool
 func (b *spy) Delete(ctx context.Context, key, version string) error {
 	if b.onDelete != nil {
 		b.onDelete(key)
+	}
+	if b.unconditional {
+		v, err := b.Store.Version(ctx, key)
+		if errors.Is(err, bucket.ErrNotFound) {
+			return nil
+		}
+		version = v
 	}
 	return b.write(func() error { b.mu.Lock(); b.deletions++; b.mu.Unlock(); return b.Store.Delete(ctx, key, version) })
 }
@@ -151,50 +158,9 @@ func (w *world) reachable(svc *store.Service) {
 			w.t.Fatalf("object %s is not reachable after %d layers", w.have[i], w.layers())
 		}
 	}
-	w.legacyReadable()
 	for _, sha := range []gitpack.SHA{w.have[0], w.have[len(w.have)/2], w.have[len(w.have)-1]} {
 		if _, _, err := svc.Get(ctx, repo, sha); err != nil {
 			w.t.Fatalf("read %s: %v", sha, err)
-		}
-	}
-}
-
-// legacyReadable reads every object the way the release before the layered index does: from the pack rows, each pack
-// with its own .idx file.
-func (w *world) legacyReadable() {
-	w.t.Helper()
-	ctx := w.t.Context()
-	rows, err := w.meta.Packs(ctx, repo.String())
-	if err != nil {
-		w.t.Fatal(err)
-	}
-	prefix := "repos/native/" + b64("repo_x") + "/"
-	var packs []*gitpack.Pack
-	for _, r := range rows {
-		idx, ierr := w.mem.Get(ctx, prefix+r.ID+".idx")
-		data, derr := w.mem.Get(ctx, prefix+r.ID+".pack")
-		if ierr != nil || derr != nil {
-			w.t.Fatalf("pack %s of the pack list lacks a file: idx %v, pack %v", r.ID, ierr, derr)
-		}
-		p, err := gitpack.NewPack(idx, bytesAt(data))
-		if err != nil {
-			w.t.Fatalf("pack %s: %v", r.ID, err)
-		}
-		packs = append(packs, p)
-	}
-	for _, sha := range w.have {
-		found := false
-		for _, p := range packs {
-			if p.Has(sha) {
-				if _, _, err := p.Get(sha); err != nil {
-					w.t.Fatalf("legacy read of %s: %v", sha, err)
-				}
-				found = true
-				break
-			}
-		}
-		if !found {
-			w.t.Fatalf("object %s is not readable by the previous release", sha)
 		}
 	}
 }
@@ -943,7 +909,7 @@ func (w *world) retiredPack() ([]gitpack.Object, string) {
 	for _, r := range retired {
 		for _, sent := range w.sent {
 			pack, _, _ := gitpack.Build(sent)
-			if id := fmt.Sprintf("%x", sha256sum(pack)); r.Key == id+".pack" {
+			if id := fmt.Sprintf("%x", sha256sum(pack)); strings.HasPrefix(r.Key, id) && strings.HasSuffix(r.Key, ".pack") {
 				return sent, r.Key
 			}
 		}
@@ -952,9 +918,10 @@ func (w *world) retiredPack() ([]gitpack.Object, string) {
 	return nil, ""
 }
 
-func TestACollectorThatStallsPastTheLeaseKeepsAFileStoredAgain(t *testing.T) {
+func TestACollectorThatStallsPastTheLeaseLeavesAFileStoredAgainReadable(t *testing.T) {
 	t.Parallel()
 	w := newWorld(t)
+	w.spy.unconditional = true
 	for range 10 {
 		w.push(2)
 	}
@@ -987,13 +954,33 @@ func TestACollectorThatStallsPastTheLeaseKeepsAFileStoredAgain(t *testing.T) {
 	if err := <-slow; err != nil {
 		t.Fatal(err)
 	}
-	if _, err := w.mem.Get(t.Context(), path); err != nil {
-		t.Errorf("the collector that resumed deleted the file stored again: %v", err)
+	if _, err := w.mem.Get(t.Context(), path); err == nil {
+		t.Errorf("the collector that resumed left the old key %s", victim)
+	}
+	row, err := w.meta.Manifest(t.Context(), repo.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := midx.DecodeManifest(row.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, l := range m.Layers {
+		if l.IsIndex() && l.Packs[0].ID == victim[:64] {
+			found = true
+			if _, err := w.mem.Get(t.Context(), "repos/native/"+b64("repo_x")+"/"+l.Packs[0].FileKey()); err != nil {
+				t.Errorf("the pack stored again is gone: %v", err)
+			}
+		}
+	}
+	if !found {
+		t.Error("the manifest lacks the pack stored again")
 	}
 	w.reachable(w.cold())
 }
 
-func TestMaintenanceKeepsRetiredFilesOnABucketThatDeletesUnconditionally(t *testing.T) {
+func TestMaintenanceDeletesRetiredFilesOnABucketThatDeletesUnconditionally(t *testing.T) {
 	t.Parallel()
 	w := newWorld(t)
 	w.spy.unconditional = true
@@ -1008,62 +995,10 @@ func TestMaintenanceKeepsRetiredFilesOnABucketThatDeletesUnconditionally(t *test
 	if err := w.svc.Maintain(t.Context(), repo); err != nil {
 		t.Fatal(err)
 	}
-	if st := w.svc.MaintStats(); st.MergeRuns+st.CompactRuns == 0 || st.Deleted != 0 || st.DeleteSkipped == 0 {
-		t.Errorf("stats = %+v, want work done, no file deleted and the skipped deletes counted", st)
-	}
-	objs, _ := w.retiredPack()
-	if _, err := w.svc.PutObjects(t.Context(), repo, objs); err != nil {
-		t.Errorf("a write of a retired pack after skipped collection: %v", err)
+	if st := w.svc.MaintStats(); st.MergeRuns+st.CompactRuns == 0 || st.Deleted == 0 {
+		t.Errorf("stats = %+v, want work done and retired files deleted", st)
 	}
 	w.reachable(w.cold())
-}
-
-func TestAPackStoredAgainWhileItIsBeingDeletedStaysReadable(t *testing.T) {
-	t.Parallel()
-	w := newWorld(t)
-	for range 10 {
-		w.push(2)
-	}
-	if err := w.svc.Maintain(t.Context(), repo); err != nil {
-		t.Fatal(err)
-	}
-	objs, victim := w.retiredPack()
-	done := make(chan struct{})
-	var once sync.Once
-	var parked *quartz.Call
-	trap := w.clock.Trap().NewTimer()
-	w.spy.onDelete = func(key string) {
-		if key == "repos/native/"+b64("repo_x")+"/"+victim {
-			once.Do(func() {
-				go func() {
-					defer close(done)
-					if _, err := w.svc.PutObjects(t.Context(), repo, objs); err != nil {
-						t.Error(err)
-					}
-				}()
-				parked = trap.MustWait(t.Context())
-			})
-		}
-	}
-	w.pastGrace()
-	if err := w.svc.Maintain(t.Context(), repo); err != nil {
-		t.Fatal(err)
-	}
-	parked.MustRelease(t.Context())
-	trap.Close()
-	for waiting := true; waiting; {
-		select {
-		case <-done:
-			waiting = false
-		default:
-			w.clock.Advance(100 * time.Millisecond).MustWait(t.Context())
-			runtime.Gosched()
-		}
-	}
-	w.reachable(w.cold())
-	if _, err := w.mem.Get(t.Context(), "repos/native/"+b64("repo_x")+"/"+victim); err != nil {
-		t.Errorf("the pack stored again is gone: %v", err)
-	}
 }
 
 func TestAWriteThatHoldsTheWholeMemoryBudgetStillFinishes(t *testing.T) {

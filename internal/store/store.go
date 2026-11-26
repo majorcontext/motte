@@ -412,26 +412,21 @@ func (s *Service) putPack(ctx context.Context, repo Repo, id string, idx, pack [
 	}
 	zfile := midx.BuildSizes(sizes)
 	zkey := sizeKey(zfile)
-	claims := []string{id + ".pack", id + ".idx"}
-	if zkey != "" {
-		claims = append(claims, zkey)
-	}
-	if err := s.claim(ctx, repo, claims...); err != nil {
-		return err
-	}
+	wid := writeID()
+	packKey, idxKey := uniqueKey(id+".pack", wid), uniqueKey(id+".idx", wid)
 	var g errgroup.Group
 	if zkey != "" {
 		g.Go(func() error { return s.storeSizes(ctx, prefix, zkey, zfile, len(sizes)) })
 	}
-	g.Go(func() error { _, err := s.st.Create(ctx, prefix+"/"+id+".idx", idx); return err })
-	g.Go(func() error { _, err := s.st.Create(ctx, prefix+"/"+id+".pack", pack); return err })
+	g.Go(func() error { _, err := s.st.Create(ctx, prefix+"/"+idxKey, idx); return err })
+	g.Go(func() error { _, err := s.st.Create(ctx, prefix+"/"+packKey, pack); return err })
 	if err := g.Wait(); err != nil {
 		return err
 	}
-	if err := s.index.AddPack(ctx, repo.String(), id, int64(len(pack))); err != nil {
+	if err := s.appendPack(ctx, repo, midx.Pack{ID: id, Bytes: int64(len(pack)), Key: packKey, Idx: idxKey}, idx, graph, zkey); err != nil {
 		return err
 	}
-	return s.appendPack(ctx, repo, id, int64(len(pack)), idx, graph, zkey)
+	return s.index.AddPack(ctx, repo.String(), id, int64(len(pack)))
 }
 
 type bytesReader []byte
