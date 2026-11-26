@@ -366,7 +366,67 @@ func contractFileReadAndCommitParents(t *testing.T, on backend) {
 	_, err = rd.File(ctx, "gh:acme/other", first, "a.txt")
 	refuses(t, err, client.ErrRepoForbidden, 403)
 	_, err = e.Client(e.WriteGrant(t, repoText)).File(ctx, repoText, first, "a.txt")
-	refuses(t, err, client.ErrUnauthorized, 401)
+	refuses(t, err, client.ErrRepoForbidden, 403)
+}
+
+func contractEventsSubscriptionsAndRepoIDs(t *testing.T, on backend) {
+	t.Parallel()
+	e := newEnvOn(t, on)
+	ctx := context.Background()
+	const other = "gh:acme/other"
+	merge, op := e.Client(e.MergeGrant(t, repoText)), e.Client(e.operator())
+	var o objSet
+	c1 := o.commit(nil, "", "one")
+	o.upload(t, e, repoText)
+	if _, err := e.Client(e.MergeGrant(t, other)).SwapRef(ctx, "main", 0, commitA); err != nil {
+		t.Fatal(err)
+	}
+	read := e.Client(e.readGrant(repoText))
+	_, cursor, err := read.Events(ctx, client.FromLatest, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Client(e.MergeGrant(t, other)).SwapRef(ctx, "dev", 0, commitA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := merge.SwapRef(ctx, "main", 0, c1); err != nil {
+		t.Fatal(err)
+	}
+	evs, _, err := read.Events(ctx, cursor, 0)
+	if err != nil || len(evs) != 1 || evs[0].Repo != repoText || evs[0].New != c1 {
+		t.Errorf("read events = %+v, %v; want only the event of the grant repository", evs, err)
+	}
+	all, _, err := op.Events(ctx, "", 1000)
+	if err != nil || len(all) < 3 {
+		t.Errorf("operator events = %d, %v; want every repository", len(all), err)
+	}
+	if none, _, err := read.Events(ctx, client.FromLatest, 0); err != nil || len(none) != 0 {
+		t.Errorf("from latest = %v, %v; want no event", none, err)
+	}
+	req := api.PutSubscriptionRequest{URL: "https://x.invalid/a", Secret: strings.Repeat("s", 16)}
+	first, err := op.PutSubscription(ctx, "mine", req)
+	if err != nil || first.ID != "mine" {
+		t.Fatalf("put = %+v, %v", first, err)
+	}
+	req.URL = "https://x.invalid/b"
+	again, err := op.PutSubscription(ctx, "mine", req)
+	subs, _ := op.Subscriptions(ctx)
+	if err != nil || again.Cursor != first.Cursor || len(subs) != 1 || subs[0].URL != req.URL {
+		t.Errorf("replace = %+v, %v, %v; want one subscription at the new URL with the same cursor", again, err, subs)
+	}
+	_, err = op.PutSubscription(ctx, "bad name", req)
+	refuses(t, err, client.ErrInvalidBody, 400)
+	p1, err := op.CreateRepoWithID(ctx, "create-key-1", "widgets", "o1")
+	p2, err2 := op.CreateRepoWithID(ctx, "create-key-1", "widgets", "o1")
+	if err != nil || err2 != nil || p1 != p2 {
+		t.Errorf("repeat = %q, %v, %q, %v; want the same path", p1, err, p2, err2)
+	}
+	_, err = op.CreateRepoWithID(ctx, "create-key-1", "other", "o1")
+	refuses(t, err, client.ErrInvalidBody, 400)
+	repos, _ := op.Repos(ctx)
+	if len(repos) != 1 {
+		t.Errorf("repos = %d, want 1", len(repos))
+	}
 }
 
 func TestGrantScopeRefusals(t *testing.T) {
@@ -391,12 +451,12 @@ func TestGrantScopeRefusals(t *testing.T) {
 		status                    int
 		code                      string
 	}{
-		{"read grant writes a ref", "PUT", "/v1/vcs/refs/x", read, body, 401, "unauthorized"},
-		{"import grant reads a ref", "GET", "/v1/vcs/refs", imp, nil, 401, "unauthorized"},
-		{"node grant imports a pack", "PUT", "/v1/vcs/packs/" + strings.Repeat("0", 64), node, map[string]any{}, 401, "unauthorized"},
-		{"node grant creates a repo", "POST", "/v1/repos", node, map[string]any{"name": "w", "owner": "o"}, 401, "unauthorized"},
-		{"operator grant reads a ref", "GET", "/v1/vcs/refs", op, nil, 401, "unauthorized"},
-		{"read grant claims", "PUT", "/v1/workspaces/ws1/claim", read, map[string]any{}, 401, "unauthorized"},
+		{"read grant writes a ref", "PUT", "/v1/vcs/refs/x", read, body, 403, "vcs_repo_forbidden"},
+		{"import grant reads a ref", "GET", "/v1/vcs/refs", imp, nil, 403, "vcs_repo_forbidden"},
+		{"node grant imports a pack", "PUT", "/v1/vcs/packs/" + strings.Repeat("0", 64), node, map[string]any{}, 403, "vcs_repo_forbidden"},
+		{"node grant creates a repo", "POST", "/v1/repos", node, map[string]any{"name": "w", "owner": "o"}, 403, "vcs_repo_forbidden"},
+		{"operator grant reads a ref", "GET", "/v1/vcs/refs", op, nil, 403, "vcs_repo_forbidden"},
+		{"read grant claims", "PUT", "/v1/workspaces/ws1/claim", read, map[string]any{}, 403, "vcs_repo_forbidden"},
 		{"node key signs an operator grant", "GET", "/v1/repos", nodeKeyOperator, nil, 401, "unauthorized"},
 		{"expired grant", "GET", "/v1/vcs/refs", expired, nil, 401, "unauthorized"},
 		{"no grant", "GET", "/v1/vcs/refs", "", nil, 401, "unauthorized"},
@@ -539,5 +599,6 @@ func TestContract(t *testing.T) {
 		"claim binds":       contractClaimBindsOwnerAndRepoOnce,
 		"flush order":       contractFlushOrdersByGenerationUnderTheEpochFence,
 		"file read":         contractFileReadAndCommitParents,
+		"events and ids":    contractEventsSubscriptionsAndRepoIDs,
 	})
 }

@@ -3,6 +3,8 @@ package repos
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base32"
 	"errors"
 	"fmt"
 	"strings"
@@ -24,6 +26,13 @@ var ErrInvalidName = errors.New("repos: name must be 1 to 100 bytes with no cont
 
 // NewPath mints the path of a repository: repo_ and random base32 text.
 func NewPath() string { return "repo_" + rand.Text() }
+
+// PathOf returns the path of the repository that the idempotency key id creates: repo_ and the base32 text of the
+// first 16 bytes of its SHA-256.
+func PathOf(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return "repo_" + base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:16])
+}
 
 // Text returns the repository text of a path.
 func Text(path string) string { return Prefix + ":" + path }

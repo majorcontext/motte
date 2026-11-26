@@ -202,8 +202,8 @@ func TestLandScopesProtectionAndTheRepositoryOfTheGrant(t *testing.T) {
 		_, err := l.land(l.write, "main", l.root, heads[0])
 		refuses(t, err, client.ErrRefProtected, 403)
 		for name, c := range map[string]*client.Client{"node": l.Client(l.nodeGrant("ws1", 1)), "read": l.reader, "operator": l.Client(l.operator())} {
-			if _, err := l.land(c, "feature", l.root, heads[0]); !strings.Contains(fmt.Sprint(err), "401") {
-				t.Errorf("%s grant: %v, want 401", name, err)
+			if _, err := l.land(c, "feature", l.root, heads[0]); !strings.Contains(fmt.Sprint(err), "403") {
+				t.Errorf("%s grant: %v, want 403", name, err)
 			}
 		}
 		_, err = l.merge.Land(context.Background(), "gh:acme/other", api.LandRequest{Ref: "main", Base: l.root, Head: heads[0]})

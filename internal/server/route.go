@@ -121,8 +121,11 @@ type authenticate func(r *http.Request) (grant.Claims, error)
 
 func (s *Server) auth(r *http.Request, authn authenticate, scopes []grant.Scope) (call, error) {
 	claims, err := authn(r)
-	if err != nil || !slices.Contains(scopes, claims.Scope) {
+	if err != nil {
 		return call{}, errUnauthorized
+	}
+	if !slices.Contains(scopes, claims.Scope) {
+		return call{}, errWrongScope
 	}
 	c := call{claims: claims}
 	if claims.Scope == grant.ScopeOperator {

@@ -192,7 +192,7 @@ Ordinary `git` clones, fetches and pushes a repository over HTTPS. The routes ne
 
 | Route | Scope |
 |---|---|
-| `POST /v1/repos` with `{name, owner}` answers 201 with `{path}` | `operator` |
+| `POST /v1/repos` with `{id?, name, owner}` answers 201 with `{path}`. An `id` (8 to 64 characters of letters, digits, `_` and `-`) is an idempotency key: the path derives from it, a repeat with the same name and owner answers the same path, and a repeat with another name or owner answers 400 `invalid_body`. | `operator` |
 | `GET /v1/repos` lists repositories, newest first | `operator` |
 | `GET /v1/repos/{path}` | `operator` |
 | `PUT /v1/workspaces/{id}/claim` with `{epoch, owner, repo}` returns `{epoch, op, snapshot}` | `operator` |
@@ -202,8 +202,9 @@ Ordinary `git` clones, fetches and pushes a repository over HTTPS. The routes ne
 | `POST /v1/repos/{repo}/lands` with `{id, ref, base, head, expect_tree}` lands the commits `base..head` on `ref` and answers 200 with `{id, ref, generation, tip, fast_forward, commits}`. See Land. `{repo}` is the repository text, with `/` as `%2F`. | `merge`, `write` |
 | `GET /v1/repos/{repo}/files/{commit}/{path...}` returns `{sha, size, data}`, the base64 content of the file at `path` in the tree of `commit`. A path that names no file, or names a directory, answers 404 `vcs_path_not_found`. A file over 1 MiB answers 413 `vcs_object_too_large`. `{repo}` must be the repository of the grant. | `read` |
 | `POST /v1/tokens` with `{principal, scope, repos, ttl_seconds}` answers 201 with `{token, user_token}`. `GET /v1/tokens` lists the records, newest first. `DELETE /v1/tokens/{id}` revokes and answers 204. See Human identities. | `operator`, a signed grant only |
-| `GET /v1/events?cursor=<cursor>&limit=<n>` returns `{events, cursor}` | `operator` |
+| `GET /v1/events?cursor=<cursor>&limit=<n>` returns `{events, cursor}`. `from=latest` (with no `cursor`) returns no event and the cursor of the newest event. A `read` grant gets only the events of its repository; a read examines at most 5000 events, and the cursor passes the events that it examined. | `operator`, `read` |
 | `POST /v1/subscriptions` with `{url, secret, repo}` answers 201 with the subscription | `operator` |
+| `PUT /v1/subscriptions/{name}` with `{url, secret, repo}` creates the subscription `name` (201) or replaces its receiver and keeps its cursors (200). `name` is 1 to 64 characters of letters, digits, `_` and `-`. | `operator` |
 | `GET /v1/subscriptions` lists the subscriptions, oldest first | `operator` |
 | `DELETE /v1/subscriptions/{id}` answers 204 | `operator` |
 
@@ -600,7 +601,7 @@ A grant is `mg1.<base64url payload>.<base64url signature>`. The payload is JSON.
 
 Required claims by scope: `node` needs `ws`, `epoch` and `repo`. `read`, `write`, `import` and `merge` need `repo`. `operator` needs none.
 
-The verifier holds only public keys. Each key has a `kid` and a set of allowed scopes. The verifier rejects a grant whose scope is not allowed for its key. Every rejection answers 401 with the same error, and the response never carries the grant.
+The verifier holds only public keys. Each key has a `kid` and a set of allowed scopes. The verifier rejects a grant whose scope is not allowed for its key. Every rejection answers 401 with the same error, and the response never carries the grant. A valid grant whose scope a route does not serve answers 403 `vcs_repo_forbidden`; a grant that is not valid answers 401. The same rule holds for every route, including the git routes.
 
 ### Keys
 

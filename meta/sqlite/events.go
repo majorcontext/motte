@@ -145,6 +145,26 @@ func (s *Store) CreateSubscription(ctx context.Context, sub meta.Subscription) (
 	return sub, nil
 }
 
+func (s *Store) UpdateSubscription(ctx context.Context, sub meta.Subscription) (meta.Subscription, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE subscriptions SET url = ?, secret = ?, repo = ? WHERE id = ?`, sub.URL, sub.Secret, sub.Repo, sub.ID)
+	if err != nil {
+		return meta.Subscription{}, fmt.Errorf("sqlite: update subscription: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		return meta.Subscription{}, meta.ErrNotFound
+	}
+	all, err := s.Subscriptions(ctx)
+	if err != nil {
+		return meta.Subscription{}, err
+	}
+	for _, got := range all {
+		if got.ID == sub.ID {
+			return got, nil
+		}
+	}
+	return meta.Subscription{}, meta.ErrNotFound
+}
+
 func (s *Store) Subscriptions(ctx context.Context) ([]meta.Subscription, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT s.id, s.url, s.secret, s.repo, s.created_at, c.cursor

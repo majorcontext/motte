@@ -43,7 +43,7 @@ func (s *Server) moveRef(ctx context.Context, c call, w refWrite) (meta.Ref, err
 	switch {
 	case scope == grant.ScopeMerge, scope == grant.ScopeWrite && w.ByCommit, scope == grant.ScopeNode && !w.ByCommit:
 	default:
-		return meta.Ref{}, errUnauthorized
+		return meta.Ref{}, errWrongScope
 	}
 	if err := s.refProtected(ctx, scope, repo, w.Name); err != nil {
 		return meta.Ref{}, err

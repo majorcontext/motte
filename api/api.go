@@ -188,6 +188,9 @@ type ImportPackRequest struct {
 
 // CreateRepoRequest is the body of POST /v1/repos.
 type CreateRepoRequest struct {
+	// ID is an optional idempotency key of 8 to 64 characters of letters, digits, "_" and "-". A repeat of an ID
+	// with the same name and owner answers the first path, and a repeat with another name or owner is refused.
+	ID    string `json:"id,omitempty"`
 	Name  string `json:"name"`
 	Owner string `json:"owner"`
 }
@@ -329,6 +332,9 @@ type CreateSubscriptionRequest struct {
 	Secret string `json:"secret"`
 	Repo   string `json:"repo,omitempty"`
 }
+
+// PutSubscriptionRequest is the body of PUT /v1/subscriptions/{name}. A replace keeps the cursors.
+type PutSubscriptionRequest = CreateSubscriptionRequest
 
 // Subscription is a registered receiver. Cursor is an event cursor that holds
 // the last event that it acknowledged in each partition. The secret is never returned.

@@ -79,9 +79,9 @@ func TestProtectedRefsRouteRules(t *testing.T) {
 	}
 	refuses(t, op.SetProtectedRefs(ctx, "no-colon", []string{"main"}), client.ErrInvalidBody, 400)
 	for name, c := range map[string]*client.Client{"node": e.Client(e.nodeGrant("ws1", 1)), "merge": e.Client(e.MergeGrant(t, repoText)), "read": e.Client(e.readGrant(repoText))} {
-		refuses(t, c.SetProtectedRefs(ctx, repoText, []string{"main"}), client.ErrUnauthorized, 401)
+		refuses(t, c.SetProtectedRefs(ctx, repoText, []string{"main"}), client.ErrRepoForbidden, 403)
 		_, err := c.ProtectedRefs(ctx, repoText)
-		if !strings.Contains(fmt.Sprint(err), "401") {
+		if !strings.Contains(fmt.Sprint(err), "403") {
 			t.Errorf("%s grant read the list: %v", name, err)
 		}
 	}
@@ -228,9 +228,10 @@ func TestEventRouteRules(t *testing.T) {
 		e.want(e.call("GET", "/v1/events?"+q, e.operator(), nil), 400, "invalid_body")
 	}
 	e.want(e.claim("ws1", 1, repoText), 200, "")
-	for _, tok := range []string{e.nodeGrant("ws1", 1), e.MergeGrant(t, repoText), e.readGrant(repoText)} {
-		e.want(e.call("GET", "/v1/events", tok, nil), 401, "unauthorized")
+	for _, tok := range []string{e.nodeGrant("ws1", 1), e.MergeGrant(t, repoText)} {
+		e.want(e.call("GET", "/v1/events", tok, nil), 403, "vcs_repo_forbidden")
 	}
+	e.want(e.call("GET", "/v1/events", e.readGrant(repoText), nil), 200, "")
 }
 
 func TestSubscriptionRoutes(t *testing.T) {
@@ -265,5 +266,5 @@ func TestSubscriptionRoutes(t *testing.T) {
 	}
 	refuses(t, op.DeleteSubscription(ctx, sub.ID), client.ErrNotFound, 404)
 	_, err = e.Client(e.MergeGrant(t, repoText)).CreateSubscription(ctx, api.CreateSubscriptionRequest{URL: "https://x.invalid/h", Secret: strings.Repeat("s", 16)})
-	refuses(t, err, client.ErrUnauthorized, 401)
+	refuses(t, err, client.ErrRepoForbidden, 403)
 }

@@ -292,6 +292,12 @@ func subscriptions(t *testing.T, s meta.Store) {
 	if err != nil || len(list) != 2 || list[0].ID != "s1" || list[1].ID != "s2" || list[0].Repo != repoText || fmt.Sprint(list[0].Cursors) != fmt.Sprint(heads) {
 		t.Errorf("list = %+v, %v, want oldest first with a cursor for each partition", list, err)
 	}
+	upd, err := s.UpdateSubscription(ctx, meta.Subscription{ID: "s1", URL: "https://u.invalid", Secret: "k2"})
+	if err != nil || upd.URL != "https://u.invalid" || upd.Repo != "" || fmt.Sprint(upd.Cursors) != fmt.Sprint(heads) || !upd.CreatedAt.Equal(list[0].CreatedAt) {
+		t.Errorf("update = %+v, %v, want the new receiver with the old cursors", upd, err)
+	}
+	_, err = s.UpdateSubscription(ctx, meta.Subscription{ID: "none", URL: "https://u.invalid", Secret: "k2"})
+	is(t, err, meta.ErrNotFound)
 	ok(t, s.DeleteSubscription(ctx, "s1"))
 	is(t, s.DeleteSubscription(ctx, "s1"), meta.ErrNotFound)
 	_, err = s.AcquireLease(ctx, "s1", 0, "a", time.Now(), time.Now().Add(time.Second))

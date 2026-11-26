@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
@@ -38,14 +39,46 @@ func (s *Server) createRepo(w http.ResponseWriter, r *http.Request, _ call) erro
 		return errBody
 	}
 	path := repos.NewPath()
+	if req.ID != "" {
+		if !landID.MatchString(req.ID) {
+			return errBody
+		}
+		path = repos.PathOf(req.ID)
+		switch row, err := s.index.Repo(r.Context(), path); {
+		case err == nil:
+			if row.Name != name || row.Owner != req.Owner {
+				return errBody
+			}
+			s.writeJSON(w, http.StatusCreated, api.CreateRepoResponse{Path: path})
+			return nil
+		case !errors.Is(err, meta.ErrNotFound):
+			return err
+		}
+	}
 	names, err := s.objects.PutObjects(r.Context(), store.Repo{Prefix: repos.Prefix, Path: path}, repos.RootObjects(s.now()))
 	if err != nil {
 		return err
 	}
 	if err := s.index.CreateRepo(r.Context(), meta.Repo{Path: path, Name: name, Owner: req.Owner}, repos.Text(path), names[1].String()); err != nil {
-		return err
+		if !errors.Is(err, meta.ErrExists) || req.ID == "" {
+			return err
+		}
+		return s.createRepoAgain(w, r, path, name, req.Owner)
 	}
 	s.notify()
+	s.writeJSON(w, http.StatusCreated, api.CreateRepoResponse{Path: path})
+	return nil
+}
+
+// createRepoAgain answers a create whose id a concurrent create took first.
+func (s *Server) createRepoAgain(w http.ResponseWriter, r *http.Request, path, name, owner string) error {
+	row, err := s.index.Repo(r.Context(), path)
+	if err != nil {
+		return err
+	}
+	if row.Name != name || row.Owner != owner {
+		return errBody
+	}
 	s.writeJSON(w, http.StatusCreated, api.CreateRepoResponse{Path: path})
 	return nil
 }

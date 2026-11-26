@@ -289,6 +289,14 @@ func (c *Client) CreateRepo(ctx context.Context, name, owner string) (string, er
 	return out.Path, err
 }
 
+// CreateRepoWithID is CreateRepo with an idempotency key. A repeat of id with the same name and owner returns the first
+// path, and a repeat with another name or owner is ErrInvalidBody.
+func (c *Client) CreateRepoWithID(ctx context.Context, id, name, owner string) (string, error) {
+	var out api.CreateRepoResponse
+	err := c.do(ctx, http.MethodPost, "/v1/repos", api.CreateRepoRequest{ID: id, Name: name, Owner: owner}, &out)
+	return out.Path, err
+}
+
 // Repos lists the repositories, newest first.
 func (c *Client) Repos(ctx context.Context) ([]api.Repo, error) {
 	var out api.Repos
@@ -379,12 +387,19 @@ func (c *Client) File(ctx context.Context, repo, commit, path string) ([]byte, e
 	return base64.StdEncoding.DecodeString(out.Data)
 }
 
+// FromLatest is the cursor of Events that starts after the newest event and returns none.
+const FromLatest = "latest"
+
 // Events returns up to limit ref events after cursor, and the cursor to pass next. An empty cursor starts at the
-// first event. Zero limit takes the server default. Events of one ref arrive in order. ErrEventsPruned means
+// first event, and FromLatest starts after the newest event and returns none. Zero limit takes the server default. Events of one ref arrive in order. ErrEventsPruned means
 // retention removed events after the cursor, and the caller must read the refs again.
 func (c *Client) Events(ctx context.Context, cursor string, limit int) ([]api.Event, string, error) {
 	q := url.Values{}
-	if cursor != "" {
+	switch cursor {
+	case "":
+	case FromLatest:
+		q.Set("from", "latest")
+	default:
 		q.Set("cursor", cursor)
 	}
 	if limit > 0 {
@@ -399,6 +414,13 @@ func (c *Client) Events(ctx context.Context, cursor string, limit int) ([]api.Ev
 func (c *Client) CreateSubscription(ctx context.Context, req api.CreateSubscriptionRequest) (api.Subscription, error) {
 	var out api.Subscription
 	err := c.do(ctx, http.MethodPost, "/v1/subscriptions", req, &out)
+	return out, err
+}
+
+// PutSubscription creates the subscription name, or replaces its receiver and keeps its cursors.
+func (c *Client) PutSubscription(ctx context.Context, name string, req api.PutSubscriptionRequest) (api.Subscription, error) {
+	var out api.Subscription
+	err := c.do(ctx, http.MethodPut, "/v1/subscriptions"+segs(name), req, &out)
 	return out, err
 }
 

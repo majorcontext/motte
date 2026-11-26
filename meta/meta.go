@@ -233,6 +233,9 @@ type Store interface {
 	// partition. ErrExists when the id exists. The returned value has
 	// Cursors and CreatedAt.
 	CreateSubscription(ctx context.Context, s Subscription) (Subscription, error)
+	// UpdateSubscription replaces the URL, the secret and the repo of subscription id and keeps its cursors and
+	// CreatedAt. ErrNotFound when it is absent.
+	UpdateSubscription(ctx context.Context, s Subscription) (Subscription, error)
 	// Subscriptions lists every subscription, oldest first, ties by id.
 	Subscriptions(ctx context.Context) ([]Subscription, error)
 	// DeleteSubscription removes a subscription and its cursors. ErrNotFound when it is absent.

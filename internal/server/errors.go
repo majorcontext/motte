@@ -46,6 +46,8 @@ func (s *Server) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 		s.writeError(w, api.CodeWorkspaceConflict, "the workspace has another owner or repository", nil)
 	case errors.Is(err, errForbidden):
 		s.writeError(w, api.CodeRepoForbidden, "the repository is not readable", nil)
+	case errors.Is(err, errWrongScope):
+		s.writeError(w, api.CodeRepoForbidden, "the scope of the grant does not allow this call", nil)
 	case errors.Is(err, errNotWritable):
 		s.writeError(w, api.CodeRepoForbidden, "the grant does not allow writes", nil)
 	case errors.Is(err, errProtected):
@@ -89,6 +91,7 @@ var (
 	errForbidden    = errors.New("server: repository forbidden")
 	errBody         = errors.New("server: invalid body")
 	errUnauthorized = errors.New("server: grant not accepted")
+	errWrongScope   = errors.New("server: grant scope refused")
 	errNotWritable  = errors.New("server: grant cannot write")
 	errProtected    = errors.New("server: ref protected")
 )

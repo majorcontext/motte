@@ -2,8 +2,10 @@ package server
 
 import (
 	"crypto/rand"
+	"errors"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -23,8 +25,9 @@ const (
 )
 
 func (s *Server) registerEvents(mux *http.ServeMux) {
-	s.handle(mux, "GET /v1/events", s.listEvents, grant.ScopeOperator)
+	s.handle(mux, "GET /v1/events", s.listEvents, grant.ScopeOperator, grant.ScopeRead)
 	s.handle(mux, "POST /v1/subscriptions", s.createSubscription, grant.ScopeOperator)
+	s.handle(mux, "PUT /v1/subscriptions/{name}", s.putSubscription, grant.ScopeOperator)
 	s.handle(mux, "GET /v1/subscriptions", s.listSubscriptions, grant.ScopeOperator)
 	s.handle(mux, "DELETE /v1/subscriptions/{id}", s.deleteSubscription, grant.ScopeOperator)
 }
@@ -37,10 +40,32 @@ func subscriptionView(s meta.Subscription) api.Subscription {
 	return api.Subscription{ID: s.ID, URL: s.URL, Repo: s.Repo, Cursor: encodeCursor(s.Cursors), CreatedAt: s.CreatedAt.UTC().Format(time.RFC3339)}
 }
 
-func (s *Server) listEvents(w http.ResponseWriter, r *http.Request, _ call) error {
-	cursor, err := decodeCursor(r.URL.Query().Get("cursor"))
+// eventsScan is the most events that one read examines, so a read grant of a quiet repository does not walk the
+// whole log. The cursor of the answer passes the events that it examined.
+const eventsScan = 5000
+
+var subscriptionName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+func (s *Server) listEvents(w http.ResponseWriter, r *http.Request, c call) error {
+	q := r.URL.Query()
+	heads, err := s.index.EventHeads(r.Context())
 	if err != nil {
 		return err
+	}
+	if from := q.Get("from"); from != "" {
+		if from != "latest" || q.Get("cursor") != "" {
+			return errBody
+		}
+		s.writeJSON(w, http.StatusOK, api.Events{Events: []api.Event{}, Cursor: encodeCursor(heads)})
+		return nil
+	}
+	cursor, err := decodeCursor(q.Get("cursor"))
+	if err != nil {
+		return err
+	}
+	only := ""
+	if c.claims.Scope == grant.ScopeRead {
+		only = c.claims.Repo
 	}
 	limit := int64(eventsDefault)
 	if v := r.URL.Query().Get("limit"); v != "" {
@@ -48,27 +73,37 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request, _ call) erro
 			return errBody
 		}
 	}
-	heads, err := s.index.EventHeads(r.Context())
-	if err != nil {
-		return err
-	}
 	out := api.Events{Events: []api.Event{}}
-	for p, c := range cursor {
-		if c > heads[p] {
+	for p, seq := range cursor {
+		if seq > heads[p] {
 			return errBody
 		}
 	}
-	for p := 0; p < meta.Partitions && len(out.Events) < int(limit); p++ {
-		if heads[p] == cursor[p] {
-			continue
-		}
-		evs, err := s.index.Events(r.Context(), p, cursor[p], int(limit)-len(out.Events))
-		if err != nil {
-			return err
-		}
-		for _, e := range evs {
-			out.Events = append(out.Events, eventView(e))
-			cursor[p] = e.Seq
+	scanned := 0
+	for p := 0; p < meta.Partitions && len(out.Events) < int(limit) && scanned < eventsScan; p++ {
+		for heads[p] != cursor[p] && len(out.Events) < int(limit) && scanned < eventsScan {
+			n := int(limit) - len(out.Events)
+			if only != "" {
+				n = min(eventsScan-scanned, eventsMax)
+			}
+			evs, err := s.index.Events(r.Context(), p, cursor[p], n)
+			if err != nil {
+				return err
+			}
+			if len(evs) == 0 {
+				break
+			}
+			for i, e := range evs {
+				if only != "" && len(out.Events) == int(limit) {
+					evs = evs[:i]
+					break
+				}
+				if only == "" || e.Repo == only {
+					out.Events = append(out.Events, eventView(e))
+				}
+				cursor[p] = e.Seq
+			}
+			scanned += len(evs)
 		}
 	}
 	out.Cursor = encodeCursor(cursor)
@@ -95,6 +130,34 @@ func (s *Server) createSubscription(w http.ResponseWriter, r *http.Request, _ ca
 	}
 	s.notify()
 	s.writeJSON(w, http.StatusCreated, subscriptionView(sub))
+	return nil
+}
+
+// putSubscription creates the subscription name or replaces its receiver. A replace keeps the cursors.
+func (s *Server) putSubscription(w http.ResponseWriter, r *http.Request, _ call) error {
+	var req api.PutSubscriptionRequest
+	if err := decodeBody(w, r, smallBodyMax, &req); err != nil {
+		return err
+	}
+	name := r.PathValue("name")
+	if _, err := store.ParseRepo(req.Repo); req.Repo != "" && err != nil || !subscriptionName.MatchString(name) || !validReceiver(req.URL) || len(req.Secret) < secretMin || len(req.Secret) > secretMax {
+		return errBody
+	}
+	want := meta.Subscription{ID: name, URL: req.URL, Secret: req.Secret, Repo: req.Repo}
+	status := http.StatusOK
+	sub, err := s.index.UpdateSubscription(r.Context(), want)
+	if errors.Is(err, meta.ErrNotFound) {
+		status = http.StatusCreated
+		if sub, err = s.index.CreateSubscription(r.Context(), want); errors.Is(err, meta.ErrExists) {
+			status = http.StatusOK
+			sub, err = s.index.UpdateSubscription(r.Context(), want)
+		}
+	}
+	if err != nil {
+		return err
+	}
+	s.notify()
+	s.writeJSON(w, status, subscriptionView(sub))
 	return nil
 }
 

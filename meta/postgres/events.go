@@ -108,6 +108,28 @@ func (s *Store) CreateSubscription(ctx context.Context, sub meta.Subscription) (
 	return created, nil
 }
 
+func (s *Store) UpdateSubscription(ctx context.Context, sub meta.Subscription) (meta.Subscription, error) {
+	tag, err := s.Pool.Exec(ctx, `UPDATE subscriptions SET url = $2, secret = $3, repo = $4 WHERE id = $1`, sub.ID, sub.URL, sub.Secret, sub.Repo)
+	if err != nil {
+		return meta.Subscription{}, fmt.Errorf("postgres: update subscription: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return meta.Subscription{}, meta.ErrNotFound
+	}
+	rows, err := s.Pool.Query(ctx, subscriptionSelect+` WHERE s.id = $1`, sub.ID)
+	if err != nil {
+		return meta.Subscription{}, fmt.Errorf("postgres: update subscription: %w", err)
+	}
+	out, err := pgx.CollectOneRow(rows, pgx.RowToStructByPos[meta.Subscription])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return meta.Subscription{}, meta.ErrNotFound
+	}
+	if err != nil {
+		return meta.Subscription{}, fmt.Errorf("postgres: update subscription: %w", err)
+	}
+	return out, nil
+}
+
 func (s *Store) Subscriptions(ctx context.Context) ([]meta.Subscription, error) {
 	rows, err := s.Pool.Query(ctx, subscriptionSelect+` ORDER BY s.created_at, s.id COLLATE "C"`)
 	if err != nil {
