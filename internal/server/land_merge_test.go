@@ -72,3 +72,29 @@ func TestCloseEndsALeaderThatWaitsForAnotherLease(t *testing.T) {
 		<-closed
 	})
 }
+
+func TestLandIgnoresAPathThatTheTargetAddedAndRemoved(t *testing.T) {
+	eachBackend(t, func(t *testing.T, l *landEnv) {
+		var o objSet
+		adds := o.commit(map[string]string{"x": "1"}, "", "add x", l.root)
+		removes := o.commit(nil, "", "remove x", adds)
+		mine := o.commit(map[string]string{"x": "1", "y": "2"}, "", "mine", l.root)
+		o.upload(t, l.env, l.repo)
+		land := func(base, head string, want []string) {
+			if r, err := l.land(l.merge, "main", base, head); err != nil || want != nil && !slices.Equal(l.files(r.Tip), want) {
+				t.Fatalf("land of %s = %+v, %v, want %v", head, r, err, want)
+			}
+		}
+		land(l.root, adds, nil)
+		land(adds, removes, nil)
+		land(l.root, mine, []string{"x", "y"})
+		start := l.tip("main").Commit
+		asFile := o.commit(map[string]string{"x": "1", "y": "2", "d": "1"}, "", "d as a file", start)
+		asDir := o.commit(map[string]string{"x": "1", "y": "2", "d/y": "1"}, "", "d as a directory", asFile)
+		beside := o.commit(map[string]string{"x": "1", "y": "2", "d/z": "1"}, "", "beside", start)
+		o.upload(t, l.env, l.repo)
+		land(start, asFile, nil)
+		land(asFile, asDir, nil)
+		land(start, beside, []string{"d/", "x", "y"})
+	})
+}

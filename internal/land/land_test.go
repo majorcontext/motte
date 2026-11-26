@@ -293,3 +293,15 @@ func TestEveryClashingPathIsCheckedBeyondTheCapOfTheConflictList(t *testing.T) {
 		t.Fatalf("err = %v, want a conflict that lists %d paths: the last path clashes on its lines", err, MaxConflictPaths)
 	}
 }
+
+func TestALandOntoATargetWithAnOversizedNetDiffIsRefused(t *testing.T) {
+	defer func(n int) { MaxChangedPaths = n }(MaxChangedPaths)
+	MaxChangedPaths = 3
+	m := mem{}
+	base := m.commit(gitpack.SHA{}, m.tree(map[string]string{"a": "0"}), "")
+	tip := m.commit(base, m.tree(map[string]string{"a": "0", "t1": "1", "t2": "1", "t3": "1", "t4": "1"}), "")
+	head := m.commit(base, m.tree(map[string]string{"a": "0", "z": "1"}), "")
+	if _, err := m.batch(tip).Land(context.Background(), base, head, time.Unix(1, 0)); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("err = %v, want ErrTooLarge", err)
+	}
+}

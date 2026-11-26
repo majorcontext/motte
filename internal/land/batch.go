@@ -86,11 +86,8 @@ type Batch struct {
 	merging  map[string]struct{}
 }
 
-// diffResult is the paths that differ between a base and the start tip, and false when they are too many to keep.
-type diffResult struct {
-	paths []string
-	ok    bool
-}
+// diffResult is the paths that differ between a base and the start tip.
+type diffResult struct{ paths []string }
 
 // NewBatch starts a batch on tip. grow is told how many bytes the batch holds before each read, and may refuse. hist
 // answers the stored lands since a base.
@@ -334,16 +331,16 @@ func (b *Batch) rebase(ctx context.Context, base gitpack.SHA, baseCommit Commit,
 		return Landed{}, err
 	}
 	paths := set.sorted()
-	hits, err := b.conflicts(ctx, base, paths)
+	tipCommit, err := b.commit(ctx, b.tip)
+	if err != nil {
+		return Landed{}, err
+	}
+	hits, err := b.conflicts(ctx, base, baseCommit.Tree, tipCommit.Tree, paths)
 	if err != nil {
 		return Landed{}, err
 	}
 	if !b.canMerge(hits, set, changes) {
 		return Landed{}, &ConflictError{Paths: hits[:min(len(hits), MaxConflictPaths)]}
-	}
-	tipCommit, err := b.commit(ctx, b.tip)
-	if err != nil {
-		return Landed{}, err
 	}
 	root, prev := tipCommit.Tree, b.tip
 	out := Landed{Old: b.tip}
@@ -375,13 +372,31 @@ func (b *Batch) rebase(ctx context.Context, base gitpack.SHA, baseCommit Commit,
 	return out, nil
 }
 
-// conflicts returns the paths that changed since base and clash with the paths of the change.
-func (b *Batch) conflicts(ctx context.Context, base gitpack.SHA, paths []string) ([]string, error) {
+// conflicts returns the paths of the net tree diff between the base tree and the tip tree that clash with the paths of
+// the change. The land log only narrows the work: when it names no clashing path, the diff is not read. A path that
+// the log names and that the tree diff does not, such as a path that one land added and a later land removed, is not
+// a conflict. The diff streams and keeps only the paths that clash. A diff of more leaves than a land may change is
+// refused with ErrTooLarge, never answered from the log.
+func (b *Batch) conflicts(ctx context.Context, base, baseTree, tipTree gitpack.SHA, paths []string) ([]string, error) {
 	c := newClash(paths)
 	if err := b.since(ctx, base, c.add); err != nil {
 		return nil, err
 	}
-	return c.result(), nil
+	if len(c.hit) == 0 {
+		return nil, nil
+	}
+	n, leaves := newClash(paths), 0
+	err := b.diff(ctx, baseTree, tipTree, "", func(ch Change) error {
+		if leaves++; leaves > MaxChangedPaths {
+			return ErrTooLarge
+		}
+		n.add(ch.Path)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return n.result(), nil
 }
 
 // since emits every path that changed between base and the running tip. The stored lands answer for the part before
@@ -443,19 +458,16 @@ func (b *Batch) before(ctx context.Context, base gitpack.SHA, emit func(string))
 			return false, err
 		}
 		paths, err := b.collect(ctx, from.Tree, to.Tree, false)
-		if err != nil && !errors.Is(err, ErrTooLarge) {
+		if err != nil {
 			return false, err
 		}
-		d = diffResult{paths: paths, ok: err == nil}
+		d = diffResult{paths: paths}
 		if b.cached+len(d.paths) > MaxChangedPaths {
 			clear(b.diffs)
 			b.cached = 0
 		}
 		b.diffs[base] = d
 		b.cached += len(d.paths)
-	}
-	if !d.ok {
-		return false, nil
 	}
 	for _, p := range d.paths {
 		emit(p)
@@ -472,5 +484,12 @@ func (b *Batch) diffTips(ctx context.Context, base gitpack.SHA, emit func(string
 	if err != nil {
 		return err
 	}
-	return b.diff(ctx, from.Tree, to.Tree, "", func(ch Change) error { emit(ch.Path); return nil })
+	leaves := 0
+	return b.diff(ctx, from.Tree, to.Tree, "", func(ch Change) error {
+		if leaves++; leaves > MaxChangedPaths {
+			return ErrTooLarge
+		}
+		emit(ch.Path)
+		return nil
+	})
 }

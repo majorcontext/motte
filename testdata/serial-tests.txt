@@ -9,6 +9,7 @@ internal/server TestObjectsBodyStartingWithAHugeTokenAnswersTooLarge LowerLimits
 internal/gitpack TestUnpackCountsWholeObjectsInTheResolvedTotal it writes the package variable unpackLimit that every Unpack reads
 internal/land TestTheLimitCountsDistinctPaths it writes the package variable MaxChangedPaths that every land reads
 internal/land TestTheCacheOfBaseDiffsIsBounded it writes the package variable MaxChangedPaths that every land reads
+internal/land TestALandOntoATargetWithAnOversizedNetDiffIsRefused it writes the package variable MaxChangedPaths that every land reads
 internal/land TestALandThatMakesAnObjectAboveTheLimitFailsAloneAndLeavesNoTrace it writes the package variable MaxObjectBytes that every land reads
 internal/server TestTheMemoryBudgetAndTheFetchSlotsOnOneServer LowerFetchSlots writes the package variables that every running server reads
 internal/store TestSlowReadsGetASpanAtMostOnceASecond sets the global tracer provider
