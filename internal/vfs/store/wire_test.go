@@ -23,7 +23,7 @@ import (
 func TestHTTPStoreSpeaksTheStoreWire(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	srv := testserver.Start(t, "")
+	srv := testserver.Start(t, testserver.WithPostgres(""))
 	const repo = "gh:acme/widgets"
 	cl := client.New(srv.URL, client.StaticGrant(srv.OperatorGrant(t)))
 	if _, err := cl.Claim(ctx, "w1", api.ClaimRequest{Epoch: 1, Owner: "o", Repo: repo}); err != nil {

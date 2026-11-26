@@ -84,7 +84,7 @@ func benchLand(b *testing.B, backend, store string, agents int) {
 	if backend == "sqlite" {
 		ts = testserver.StartLocal(b)
 	} else {
-		ts = testserver.Start(b, "")
+		ts = testserver.Start(b, testserver.WithPostgres(""))
 	}
 	if store == "mem" {
 		srv := httptest.NewServer(server.New(server.Config{Meta: ts.Meta, Bucket: &memBucket{m: map[string][]byte{}}, Verifier: ts.Verifier}).Handler())

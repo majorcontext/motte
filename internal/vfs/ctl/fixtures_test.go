@@ -50,7 +50,7 @@ func startDaemon(t *testing.T, maxLine int) *daemon { return startDaemonLogged(t
 func startDaemonLogged(t *testing.T, maxLine int, log *slog.Logger) *daemon {
 	t.Helper()
 	const repo = "gh:acme/widgets"
-	srv := testserver.Start(t, "")
+	srv := testserver.Start(t, testserver.WithPostgres(""))
 	op := client.New(srv.URL, client.StaticGrant(srv.OperatorGrant(t)))
 	if _, err := op.Claim(t.Context(), "w1", api.ClaimRequest{Epoch: 1, Owner: "o", Repo: repo}); err != nil {
 		t.Fatal(err)

@@ -51,15 +51,15 @@ type reply struct {
 type backend func(testing.TB) *testserver.Server
 
 var (
-	sqliteBackend   backend = func(t testing.TB) *testserver.Server { return testserver.New(t) }
-	postgresBackend backend = func(t testing.TB) *testserver.Server { return testserver.New(t, testserver.WithPostgres("")) }
+	sqliteBackend   backend = func(t testing.TB) *testserver.Server { return testserver.Start(t) }
+	postgresBackend backend = func(t testing.TB) *testserver.Server { return testserver.Start(t, testserver.WithPostgres("")) }
 )
 
 func newEnv(t *testing.T) *env { return newEnvOn(t, postgresBackend) }
 
 func newEnvLimits(t *testing.T, l testserver.Limits) *env {
 	t.Helper()
-	ts := testserver.New(t, testserver.WithPostgres(""), testserver.WithLimits(l))
+	ts := testserver.Start(t, testserver.WithPostgres(""), testserver.WithLimits(l))
 	return &env{Server: ts, t: t, url: ts.URL, cp: ts.Operator, node: ts.Node}
 }
 

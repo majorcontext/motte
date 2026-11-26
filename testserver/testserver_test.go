@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/majorcontext/motte/api"
@@ -14,7 +15,7 @@ import (
 
 func TestLimitsLowerTheObjectLimit(t *testing.T) {
 	t.Parallel()
-	s := testserver.New(t, testserver.WithLimits(testserver.Limits{Object: 256 << 10}))
+	s := testserver.Start(t, testserver.WithLimits(testserver.Limits{Object: 256 << 10}))
 	ctx := context.Background()
 	if _, err := s.Client(s.OperatorGrant(t)).Claim(ctx, "ws1", api.ClaimRequest{Epoch: 1, Owner: "o1", Repo: "gh:acme/widgets"}); err != nil {
 		t.Fatal(err)
@@ -35,8 +36,62 @@ func TestTemplateStartsFromAMigratedCopy(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	s := testserver.New(t, testserver.Template(path))
+	s := testserver.Start(t, testserver.Template(path))
 	if _, err := s.Client(s.OperatorGrant(t)).CreateRepo(context.Background(), "widgets", "o1"); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func claim(t *testing.T, s *testserver.Server, repo string) {
+	t.Helper()
+	if _, err := s.Client(s.OperatorGrant(t)).Claim(context.Background(), "ws1", api.ClaimRequest{Epoch: 1, Owner: "o1", Repo: repo}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAReplicaServesTheStateOfTheServer(t *testing.T) {
+	t.Parallel()
+	s := testserver.Start(t, testserver.WithReplicas(1))
+	claim(t, s, "gh:acme/widgets")
+	if len(s.Replicas) != 1 {
+		t.Fatalf("replicas = %v, want one URL", s.Replicas)
+	}
+	node := client.New(s.Replicas[0], client.StaticGrant(s.NodeGrant(t, "ws1", 1, "gh:acme/widgets")))
+	if _, err := node.PutObjects(context.Background(), []client.Object{{Type: "blob", Data: []byte("x")}}); err != nil {
+		t.Fatalf("put through the replica of a claim made on the first server: %v", err)
+	}
+}
+
+func TestFaultsFailTheCallsThatTheyName(t *testing.T) {
+	t.Parallel()
+	var called atomic.Bool
+	s := testserver.Start(t, testserver.WithFaults(testserver.Faults{BucketCreate: func(context.Context, string) error {
+		called.Store(true)
+		return errors.New("bucket is down")
+	}}))
+	claim(t, s, "gh:acme/widgets")
+	_, err := s.Client(s.NodeGrant(t, "ws1", 1, "gh:acme/widgets")).PutObjects(context.Background(), []client.Object{{Type: "blob", Data: []byte("x")}})
+	if err == nil || !called.Load() {
+		t.Fatalf("put with a failing bucket = %v (hook called %v), want an error", err, called.Load())
+	}
+}
+
+func TestTheSharedServerServesThePackage(t *testing.T) {
+	t.Parallel()
+	s := testserver.Package(t)
+	claim(t, s, "gh:acme/shared")
+	if _, err := s.Client(s.NodeGrant(t, "ws1", 1, "gh:acme/shared")).PutObjects(context.Background(), []client.Object{{Type: "blob", Data: []byte("x")}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestThePackageServerIsOneServerForEveryTest(t *testing.T) {
+	t.Parallel()
+	first := testserver.Package(t)
+	t.Run("again", func(t *testing.T) {
+		t.Parallel()
+		if testserver.Package(t) != first {
+			t.Fatal("Package returned another server")
+		}
+	})
 }

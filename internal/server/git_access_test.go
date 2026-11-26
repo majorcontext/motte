@@ -12,7 +12,6 @@ import (
 	"github.com/majorcontext/motte/identity"
 	"github.com/majorcontext/motte/identity/identitytest"
 	"github.com/majorcontext/motte/identity/oidc"
-	"github.com/majorcontext/motte/internal/server"
 	"github.com/majorcontext/motte/testserver"
 )
 
@@ -27,17 +26,14 @@ func TestGitOIDCIdentityPushesBranchesAndNeverProtectedRefs(t *testing.T) {
 		return []string{"-c", "http.extraHeader=Cf-Access-Jwt-Assertion: " + jwt}
 	}
 	repo := []string{"pending"}
-	ts := testserver.StartLocalWith(t, func(c *server.Config) {
-		a, err := oidc.New(oidc.Config{Issuer: "https://team.example.test", Audience: "aud1", KeysURL: iss.URL, Header: "Cf-Access-Jwt-Assertion"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		c.Identity = a
-		c.Rules = identity.Rules{
-			{Principals: []string{"dev@example.test"}, Repos: repo, Scope: identity.ScopeWrite},
-			{Principals: []string{"reader@example.test"}, Repos: repo, Scope: identity.ScopeRead},
-			{Principals: []string{"admin@example.test"}, Scope: identity.ScopeAdmin}}
-	})
+	a, err := oidc.New(oidc.Config{Issuer: "https://team.example.test", Audience: "aud1", KeysURL: iss.URL, Header: "Cf-Access-Jwt-Assertion"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := testserver.Start(t, testserver.WithIdentity(a, identity.Rules{
+		{Principals: []string{"dev@example.test"}, Repos: repo, Scope: identity.ScopeWrite},
+		{Principals: []string{"reader@example.test"}, Repos: repo, Scope: identity.ScopeRead},
+		{Principals: []string{"admin@example.test"}, Scope: identity.ScopeAdmin}}))
 	e := &env{Server: ts, t: t, url: ts.URL, cp: ts.Operator, node: ts.Node}
 	ctx := context.Background()
 	path, err := e.Client(e.operator()).CreateRepo(ctx, "widgets", "o1")

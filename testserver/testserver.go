@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/majorcontext/motte/client"
 	"github.com/majorcontext/motte/grant"
+	"github.com/majorcontext/motte/identity"
 	"github.com/majorcontext/motte/internal/bucket"
 	"github.com/majorcontext/motte/internal/bucket/fs"
 	"github.com/majorcontext/motte/internal/meta/postgres"
@@ -33,8 +35,12 @@ type Server struct {
 	URL string
 	// Pool reaches the schema of the server, for a test that sets up a state no route can make. StartLocal leaves it nil.
 	Pool *pgxpool.Pool
-	// Meta, Bucket and Verifier are the state and the keys of the server, for a test that runs a second replica on them
-	// or sets up a state no route can make.
+	// Replicas are the URLs of the extra servers that WithReplicas started on the state and keys of this one.
+	Replicas []string
+	// Meta, Bucket and Verifier are the state and the keys of the server, for a test that sets up a state no route can
+	// make or runs a server with a configuration that no option sets.
+	//
+	// Deprecated: use WithReplicas and WithFaults. A caller outside this module still reads Meta.
 	Meta     meta.Store
 	Bucket   bucket.Store
 	Verifier *grant.Verifier
@@ -66,6 +72,8 @@ type options struct {
 	required bool
 	template string
 	limits   *Limits
+	replicas int
+	faults   *Faults
 	change   func(*server.Config)
 }
 
@@ -85,9 +93,36 @@ func Template(path string) Option { return func(o *options) { o.template = path 
 // WithLimits lowers the size limits of the server for the test.
 func WithLimits(l Limits) Option { return func(o *options) { o.limits = &l } }
 
-// New runs a server on a temporary SQLite database and a temporary filesystem bucket, or on PostgreSQL with
+// Faults makes the server fail or wait on the calls that tests need to break. A nil field changes nothing. A function
+// runs before its call, and a non-nil error fails the call; a function that blocks holds the call.
+type Faults struct {
+	// FinishLands runs before the leader records the results of a batch of lands.
+	FinishLands func(ctx context.Context) error
+	// ProtectedRefs runs before the server reads the protected ref patterns of a repository.
+	ProtectedRefs func(ctx context.Context) error
+	// BucketGet runs before the server reads the object at key, whole or in a range.
+	BucketGet func(ctx context.Context, key string) error
+	// BucketCreate runs before the server writes the object at key.
+	BucketCreate func(ctx context.Context, key string) error
+}
+
+// WithIdentity makes the server accept the identity verifier v and the access rules.
+func WithIdentity(v identity.Verifier, rules identity.Rules) Option {
+	return func(o *options) {
+		o.change = func(c *server.Config) { c.Identity, c.Rules = v, rules }
+	}
+}
+
+// WithFaults applies faults to the server and its replicas. Server.Meta and Server.Bucket stay without them.
+func WithFaults(f Faults) Option { return func(o *options) { o.faults = &f } }
+
+// WithReplicas starts n more servers on the state and keys of the first, each with its own instance name. Their URLs
+// are Server.Replicas.
+func WithReplicas(n int) Option { return func(o *options) { o.replicas = n } }
+
+// Start runs a server on a temporary SQLite database and a temporary filesystem bucket, or on PostgreSQL with
 // WithPostgres.
-func New(t testing.TB, opts ...Option) *Server {
+func Start(t testing.TB, opts ...Option) *Server {
 	t.Helper()
 	var o options
 	for _, opt := range opts {
@@ -108,33 +143,18 @@ func New(t testing.TB, opts ...Option) *Server {
 			pool = pgtest.RequiredPool
 		}
 		p := pool(t, o.dsn)
-		s := run(t, &postgres.Store{Pool: p}, o.change)
+		s := run(t, &postgres.Store{Pool: p}, o)
 		s.Pool = p
 		return s
 	}
 	return startSQLite(t, o)
 }
 
-// Start runs a server on a fresh schema of the database at dsn and a temporary
-// filesystem bucket. An empty dsn is read from DSNEnv. When that is empty too,
-// Start skips the test. Cleanup drops the schema.
-func Start(t testing.TB, dsn string) *Server {
-	t.Helper()
-	pool := pgtest.Pool(t, dsn)
-	s := run(t, &postgres.Store{Pool: pool}, nil)
-	s.Pool = pool
-	return s
-}
-
-// StartLocal runs a server on a temporary SQLite database and a temporary
-// filesystem bucket. It needs no other service and never skips. Pool is nil.
-func StartLocal(t testing.TB) *Server { return StartLocalWith(t, nil) }
-
-// StartLocalWith is StartLocal with a change to the server configuration. A nil change leaves it as is.
-func StartLocalWith(t testing.TB, change func(*server.Config)) *Server {
-	t.Helper()
-	return startSQLite(t, options{change: change})
-}
+// StartLocal runs a server on a temporary SQLite database and a temporary filesystem bucket. It needs no other
+// service and never skips. Pool is nil.
+//
+// Deprecated: use Start, which runs on SQLite by default. A caller outside this module still calls StartLocal.
+func StartLocal(t testing.TB) *Server { return startSQLite(t, options{}) }
 
 func startSQLite(t testing.TB, o options) *Server {
 	t.Helper()
@@ -153,12 +173,11 @@ func startSQLite(t testing.TB, o options) *Server {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return run(t, db, o.change)
+	return run(t, db, o)
 }
 
-func run(t testing.TB, store meta.Store, change func(*server.Config)) *Server {
+func run(t testing.TB, store meta.Store, o options) *Server {
 	t.Helper()
-	testcount.Add(t, testcount.Servers)
 	root, err := fs.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -169,18 +188,30 @@ func run(t testing.TB, store meta.Store, change func(*server.Config)) *Server {
 	verifier := grant.NewVerifier(
 		grant.Key{Kid: "cp", Public: cpPub, Scopes: []grant.Scope{grant.ScopeNode, grant.ScopeRead, grant.ScopeWrite, grant.ScopeImport, grant.ScopeOperator, grant.ScopeMerge}},
 		grant.Key{Kid: "node", Public: nodePub, Scopes: []grant.Scope{grant.ScopeNode}})
-	cfg := server.Config{Meta: store, Bucket: bkt, Verifier: verifier}
-	if change != nil {
-		change(&cfg)
+	build := func(instance string) *httptest.Server {
+		testcount.Add(t, testcount.Servers)
+		cfg := server.Config{Meta: store, Bucket: bkt, Verifier: verifier, Events: server.EventsConfig{Instance: instance}}
+		if f := o.faults; f != nil {
+			cfg.Meta, cfg.Bucket = faultMeta{store, *f}, faultBucket{bkt, *f}
+		}
+		if o.change != nil {
+			o.change(&cfg)
+		}
+		srv := server.New(cfg)
+		ts := httptest.NewServer(srv.Handler())
+		t.Cleanup(srv.Close)
+		t.Cleanup(ts.Close)
+		return ts
 	}
-	srv := server.New(cfg)
-	ts := httptest.NewServer(srv.Handler())
-	t.Cleanup(srv.Close)
-	t.Cleanup(ts.Close)
-	return &Server{
-		URL: ts.URL, Meta: store, Bucket: bkt, Verifier: verifier, Operator: grant.Signer{Kid: "cp", Key: cpKey}, Node: grant.Signer{Kid: "node", Key: nodeKey},
+	s := &Server{
+		Meta: store, Bucket: bkt, Verifier: verifier, Operator: grant.Signer{Kid: "cp", Key: cpKey}, Node: grant.Signer{Kid: "node", Key: nodeKey},
 		Expire: time.Now().Add(time.Hour),
 	}
+	s.URL = build("").URL
+	for i := range o.replicas {
+		s.Replicas = append(s.Replicas, build(fmt.Sprintf("replica-%d", i+1)).URL)
+	}
+	return s
 }
 
 // Mint signs c with signer and sets the expiry of the server when c has none.

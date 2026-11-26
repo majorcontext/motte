@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/majorcontext/tools/testcount"
+	"github.com/majorcontext/motte/testserver"
 )
 
-func TestMain(m *testing.M) { os.Exit(testcount.Run(m)) }
+func TestMain(m *testing.M) { os.Exit(testserver.Shared(m)) }
