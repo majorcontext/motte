@@ -7,7 +7,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use common::{FakeDaemon, Fixture, write_tree};
 use gix::objs::Kind;
@@ -202,14 +202,14 @@ fn a_state_file_with_unknown_fields_still_loads() {
     );
 }
 
-/// Accepts OTLP/HTTP posts and keeps (path, body) of each.
-type Posts = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+/// Accepts OTLP/HTTP posts and sends (path, body) of each. The command exports after it exits, so a
+/// test waits on the channel.
+type Posts = std::sync::mpsc::Receiver<(String, Vec<u8>)>;
 
 fn fake_collector() -> (String, Posts) {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", l.local_addr().unwrap());
-    let got = Arc::new(Mutex::new(Vec::new()));
-    let g = got.clone();
+    let (tx, got) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         for conn in l.incoming() {
             let Ok(mut conn) = conn else { return };
@@ -230,7 +230,7 @@ fn fake_collector() -> (String, Posts) {
             }
             let mut body = vec![0; len];
             r.read_exact(&mut body).unwrap();
-            g.lock().unwrap().push((path, body));
+            tx.send((path, body)).unwrap();
             conn.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 .unwrap();
         }
@@ -282,8 +282,7 @@ fn jj_sends_traceparent_and_exports_spans() {
             .any(|t| t.starts_with(&format!("00-{trace_id}-"))),
         "{tps:?}"
     );
-    let got = got.lock().unwrap();
-    let (path, body) = got.first().expect("no OTLP request");
+    let (path, body) = got.recv().expect("no OTLP request");
     assert_eq!(path, "/v1/traces");
     for name in [&b"jj.command"[..], b"jj.snapshot"] {
         assert!(body.windows(name.len()).any(|w| w == name));

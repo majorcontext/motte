@@ -7,7 +7,6 @@ mod common;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
-use std::sync::{Arc, Mutex};
 
 use common::{FakeDaemon, Fixture, UNSET, Workspace};
 use gix::objs::Kind;
@@ -22,14 +21,14 @@ const NATIVE: [&str; 5] = [
     "main",
 ];
 
-type Posts = Arc<Mutex<Vec<Vec<u8>>>>;
+/// The body of each OTLP post. The command exports after it exits, so a test waits on the channel.
+type Posts = std::sync::mpsc::Receiver<Vec<u8>>;
 
-/// Accepts OTLP/HTTP posts and keeps the body of each.
+/// Accepts OTLP/HTTP posts.
 fn collector() -> (String, Posts) {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", l.local_addr().unwrap());
-    let got: Posts = Arc::new(Mutex::new(Vec::new()));
-    let g = got.clone();
+    let (tx, got) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         for conn in l.incoming() {
             let Ok(mut conn) = conn else { return };
@@ -48,7 +47,7 @@ fn collector() -> (String, Posts) {
             }
             let mut body = vec![0; len];
             r.read_exact(&mut body).unwrap();
-            g.lock().unwrap().push(body);
+            tx.send(body).unwrap();
             conn.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 .unwrap();
         }
@@ -64,8 +63,7 @@ fn run(f: &Fixture, ws: &Workspace, args: &[&str]) -> (bool, String, String) {
     let (url, posts) = collector();
     let env = [("OTEL_EXPORTER_OTLP_ENDPOINT", url.as_str())];
     let (ok, text) = f.jj_try(&ws.mount, args, &env);
-    let posts = posts.lock().unwrap();
-    let body = posts.concat();
+    let body = posts.recv().expect("no OTLP request");
     let seen: Vec<&str> = OUTCOMES
         .into_iter()
         .filter(|o| body.windows(o.len()).any(|w| w == o.as_bytes()))

@@ -608,6 +608,7 @@ impl Fixture {
             .env("JJ_CONFIG", self.dir.path().join("none.toml"))
             .env("JJ_USER", "t")
             .env("JJ_EMAIL", "t@example.com")
+            .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
             .env("MOTTE_VFS_SOCK", self.daemon.path());
         for (k, v) in env {
             if *v == UNSET {
