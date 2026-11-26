@@ -400,6 +400,14 @@ func (c *Client) LandTrial(ctx context.Context, repo string, req api.TrialReques
 	return out, err
 }
 
+// AckLand drops the stored result of the land id, which the caller has saved. The server keeps a result until the
+// caller acknowledges it or 30 days pass, and a repeat of the id answers the result meanwhile. After the
+// acknowledgment a repeat of the id is ErrLandAcknowledged and never lands again. A land that has no result yet is
+// ErrLandPending, and an unknown id is ErrNotFound.
+func (c *Client) AckLand(ctx context.Context, repo, id string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/repos"+segs(repo, "lands", id), nil, nil)
+}
+
 // FromLatest is the cursor of Events that starts after the newest event and returns none.
 const FromLatest = "latest"
 

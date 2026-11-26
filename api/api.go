@@ -25,6 +25,8 @@ const (
 	CodeLandStale          Code = "vcs_land_stale"
 	CodeLandInvalid        Code = "vcs_land_invalid"
 	CodeLandTimeout        Code = "vcs_land_timeout"
+	CodeLandPending        Code = "vcs_land_pending"
+	CodeLandAcknowledged   Code = "vcs_land_acknowledged"
 	CodeUnauthorized       Code = "unauthorized"
 	CodeInvalidBody        Code = "invalid_body"
 	CodeInternal           Code = "internal_error"
@@ -47,6 +49,8 @@ var statuses = map[Code]int{
 	CodeLandStale:          http.StatusConflict,
 	CodeLandInvalid:        http.StatusBadRequest,
 	CodeLandTimeout:        http.StatusGatewayTimeout,
+	CodeLandPending:        http.StatusConflict,
+	CodeLandAcknowledged:   http.StatusGone,
 	CodeUnauthorized:       http.StatusUnauthorized,
 	CodeInvalidBody:        http.StatusBadRequest,
 	CodeInternal:           http.StatusInternalServerError,

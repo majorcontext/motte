@@ -18,27 +18,27 @@ func (s *Store) EnqueueLand(ctx context.Context, r meta.LandRequest, now time.Ti
 	err := s.db.QueryRowContext(ctx, `
 		INSERT INTO land_queue (repo, id, ref, base, head, kind, expect_tree, enqueued_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (repo, id) DO UPDATE SET id = land_queue.id
-		RETURNING seq, ref, base, head, kind, expect_tree, state, result, COALESCE(generation, 0)`, r.Repo, r.ID, r.Ref, r.Base, r.Head, r.Kind, r.ExpectTree, now.UnixMicro()).
-		Scan(&item.Seq, &item.Ref, &item.Base, &item.Head, &item.Kind, &item.ExpectTree, &state, &item.Result, &item.Generation)
+		RETURNING seq, ref, base, head, kind, expect_tree, state, result, COALESCE(generation, 0), acked`, r.Repo, r.ID, r.Ref, r.Base, r.Head, r.Kind, r.ExpectTree, now.UnixMicro()).
+		Scan(&item.Seq, &item.Ref, &item.Base, &item.Head, &item.Kind, &item.ExpectTree, &state, &item.Result, &item.Generation, &item.Acked)
 	if err != nil {
 		return meta.LandItem{}, fmt.Errorf("sqlite: enqueue land: %w", err)
 	}
-	item.Done = state == "done"
+	item.State = meta.LandState(state)
 	return item, nil
 }
 
 func (s *Store) LandItem(ctx context.Context, repo, id string) (meta.LandItem, error) {
 	item := meta.LandItem{LandRequest: meta.LandRequest{ID: id, Repo: repo}}
 	var state string
-	err := s.db.QueryRowContext(ctx, `SELECT seq, ref, base, head, kind, expect_tree, state, result, COALESCE(generation, 0) FROM land_queue WHERE repo = ? AND id = ?`, repo, id).
-		Scan(&item.Seq, &item.Ref, &item.Base, &item.Head, &item.Kind, &item.ExpectTree, &state, &item.Result, &item.Generation)
+	err := s.db.QueryRowContext(ctx, `SELECT seq, ref, base, head, kind, expect_tree, state, result, COALESCE(generation, 0), acked FROM land_queue WHERE repo = ? AND id = ?`, repo, id).
+		Scan(&item.Seq, &item.Ref, &item.Base, &item.Head, &item.Kind, &item.ExpectTree, &state, &item.Result, &item.Generation, &item.Acked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return meta.LandItem{}, meta.ErrNotFound
 	}
 	if err != nil {
 		return meta.LandItem{}, fmt.Errorf("sqlite: read land: %w", err)
 	}
-	item.Done = state == "done"
+	item.State = meta.LandState(state)
 	return item, nil
 }
 
@@ -117,7 +117,7 @@ func (s *Store) ClaimLands(ctx context.Context, repo, ref, owner string, now tim
 	defer func() { _ = rows.Close() }()
 	var out []meta.LandItem
 	for rows.Next() {
-		it := meta.LandItem{LandRequest: meta.LandRequest{Repo: repo, Ref: ref}}
+		it := meta.LandItem{LandRequest: meta.LandRequest{Repo: repo, Ref: ref}, State: meta.LandStateClaimed}
 		if err := rows.Scan(&it.ID, &it.Seq, &it.Base, &it.Head, &it.Kind, &it.ExpectTree); err != nil {
 			return nil, fmt.Errorf("sqlite: claim lands: %w", err)
 		}
@@ -279,6 +279,20 @@ func (s *Store) LandLogSince(ctx context.Context, repo, ref, base string, limit 
 		return nil, nil
 	}
 	return out, nil
+}
+
+func (s *Store) AckLand(ctx context.Context, repo, id string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE land_queue SET acked = 1, result = '' WHERE repo = ? AND id = ? AND state = 'done'`, repo, id)
+	if err != nil {
+		return fmt.Errorf("sqlite: ack land: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n > 0 {
+		return err
+	}
+	if _, err := s.LandItem(ctx, repo, id); err != nil {
+		return err
+	}
+	return meta.ErrLandPending
 }
 
 func (s *Store) PruneLands(ctx context.Context, before time.Time) error {
