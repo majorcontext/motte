@@ -30,7 +30,7 @@ func (n *Node) Open(ctx context.Context, flags uint32) (_ fs.FileHandle, _ uint3
 	if vw.isDir {
 		return nil, 0, syscall.EISDIR
 	}
-	bp, err := v.c.Blob(ctx, vw.be.SHA, v.readAhead(p))
+	bp, err := v.c.Blob(ctx, vw.be, v.readAhead(p))
 	if err != nil {
 		return nil, 0, syscall.EIO
 	}
@@ -91,7 +91,7 @@ func (n *Node) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64
 	if vw.isDir {
 		return nil, syscall.EISDIR
 	}
-	path, err := v.c.Blob(ctx, vw.be.SHA, v.readAhead(p))
+	path, err := v.c.Blob(ctx, vw.be, v.readAhead(p))
 	if err != nil {
 		return nil, syscall.EIO
 	}

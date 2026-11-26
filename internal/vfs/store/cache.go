@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -114,13 +115,35 @@ func (c *Cache) HasBlob(s gitpack.SHA) bool {
 	return false
 }
 
-// Blob returns the path of the blob in the node cache, fetching it (plus read-ahead) if absent.
-// next yields read-ahead candidates after s; it may be nil.
-func (c *Cache) Blob(ctx context.Context, s gitpack.SHA, next func(yield func(Entry) bool)) (string, error) {
+// held reports whether the file of the blob is in the node cache with the size of its tree entry. A file of another
+// size is removed: a crash or a full disk left it short, and a read must not serve it.
+func (c *Cache) held(e Entry) bool {
+	p := c.BlobPath(e.SHA)
+	fi, err := os.Stat(p)
+	if err == nil && fi.Size() == e.Size {
+		return true
+	}
+	c.mu.Lock()
+	delete(c.have, e.SHA)
+	c.mu.Unlock()
+	if err == nil {
+		_ = os.Remove(p)
+	}
+	return false
+}
+
+// Blob returns the path of the blob of e in the node cache, fetching it (plus read-ahead) if absent or if its file
+// does not have the size of e. next yields read-ahead candidates after e; it may be nil.
+func (c *Cache) Blob(ctx context.Context, e Entry, next func(yield func(Entry) bool)) (string, error) {
+	s := e.SHA
+	fetched := false
 	for {
-		if c.HasBlob(s) {
+		if c.held(e) {
 			c.BlobHits.Add(1)
 			return c.BlobPath(s), nil
+		}
+		if fetched {
+			return "", fmt.Errorf("store: the blob %s has %d bytes in the cache, and its tree entry says %d", s, c.size(s), e.Size)
 		}
 		var cands []Entry
 		if next != nil {
@@ -189,8 +212,19 @@ func (c *Cache) Blob(ctx context.Context, s gitpack.SHA, next func(yield func(En
 		if err != nil {
 			return "", err
 		}
+		fetched = true
 	}
 }
+
+func (c *Cache) size(s gitpack.SHA) int64 {
+	fi, err := os.Stat(c.BlobPath(s))
+	if err != nil {
+		return -1
+	}
+	return fi.Size()
+}
+
+const tmpPrefix = ".tmp-"
 
 // tier2Written is the number of blob bytes that this process wrote to the node cache.
 var tier2Written atomic.Int64
@@ -242,7 +276,7 @@ func (c *Cache) writeBlob(s gitpack.SHA, b []byte) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(p), ".tmp-")
+	tmp, err := os.CreateTemp(filepath.Dir(p), tmpPrefix)
 	if err != nil {
 		return err
 	}
@@ -262,10 +296,35 @@ func (c *Cache) writeBlob(s gitpack.SHA, b []byte) error {
 }
 
 // ReadBlob returns blob bytes from the node cache.
-func (c *Cache) ReadBlob(ctx context.Context, s gitpack.SHA) ([]byte, error) {
-	p, err := c.Blob(ctx, s, nil)
+func (c *Cache) ReadBlob(ctx context.Context, e Entry) ([]byte, error) {
+	p, err := c.Blob(ctx, e, nil)
 	if err != nil {
 		return nil, err
 	}
 	return os.ReadFile(p)
+}
+
+// RemoveStrayTemps removes the temporary files that an earlier process left in dir. It runs before the first read of
+// the cache: a file of a live writer carries the same prefix.
+func RemoveStrayTemps(dir string) {
+	_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasPrefix(d.Name(), tmpPrefix) {
+			_ = os.Remove(p)
+		}
+		return nil
+	})
+}
+
+// SeedCacheSize adds the size of the blobs that an earlier process left in dir to Tier2Bytes.
+func SeedCacheSize(dir string) {
+	var n int64
+	_ = filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && !strings.HasPrefix(d.Name(), tmpPrefix) {
+			if fi, err := d.Info(); err == nil {
+				n += fi.Size()
+			}
+		}
+		return nil
+	})
+	SeedTier2Bytes(n)
 }

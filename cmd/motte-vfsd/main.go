@@ -189,6 +189,7 @@ func runCSI(ctx context.Context, args []string) error {
 		UID: uint32(*uid), GID: uint32(*gid), HTTP: &http.Client{Timeout: 2 * time.Minute}, Logger: logger,
 	}
 	go (&tel.Health{Logger: logger, Node: *node, Mounts: p.Mounts, Tier2: store.Tier2Bytes}).Run(ctx)
+	p.RemoveStrayTemps(*state + "/cache")
 	go p.SeedCacheSize(*state + "/cache")
 	logger.Info("serving", "driver", *driver, "endpoint", *endpoint)
 	return p.Serve(ctx, *endpoint)

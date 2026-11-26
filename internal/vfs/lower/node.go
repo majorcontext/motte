@@ -135,7 +135,7 @@ func (n *Node) Readlink(ctx context.Context) (_ []byte, rerr syscall.Errno) {
 	if !vw.isLink {
 		return nil, syscall.EINVAL
 	}
-	b, err := n.v.c.ReadBlob(ctx, vw.be.SHA)
+	b, err := n.v.c.ReadBlob(ctx, vw.be)
 	if err != nil {
 		return nil, syscall.EIO
 	}

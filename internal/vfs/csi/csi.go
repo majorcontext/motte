@@ -96,18 +96,10 @@ func (p *NodePlugin) Mounts() int {
 }
 
 // SeedCacheSize adds the size of the blob cache that an earlier process left in dir to the tier-2 figure of vfs.health.
-func (p *NodePlugin) SeedCacheSize(dir string) {
-	var n int64
-	_ = filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
-		if err == nil && !d.IsDir() {
-			if fi, err := d.Info(); err == nil {
-				n += fi.Size()
-			}
-		}
-		return nil
-	})
-	store.SeedTier2Bytes(n)
-}
+func (p *NodePlugin) SeedCacheSize(dir string) { store.SeedCacheSize(dir) }
+
+// RemoveStrayTemps removes the temporary files that an earlier process left in dir. Call it before Serve.
+func (p *NodePlugin) RemoveStrayTemps(dir string) { store.RemoveStrayTemps(dir) }
 
 func (p *NodePlugin) volDir(id string) string { return filepath.Join(p.StateDir, "vol", id) }
 
