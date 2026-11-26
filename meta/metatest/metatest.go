@@ -710,7 +710,7 @@ func retiredFiles(t *testing.T, s meta.Store, repo string) {
 	ok(t, s.RetireFiles(ctx, repo, []string{"b.pack", "a.idx"}, t0))
 	ok(t, s.RetireFiles(ctx, repo, []string{"c.pack"}, t0.Add(time.Second)))
 	ok(t, s.RetireFiles(ctx, repo, []string{"b.pack"}, t0.Add(2*time.Second)))
-	ok(t, s.RetireFiles(ctx, "gh:acme/other", []string{"z"}, t0))
+	ok(t, s.RetireFiles(ctx, "gh:acme/other", []string{"z", "z"}, t0))
 	got, err := s.RetiredFiles(ctx, repo)
 	want := []meta.Retired{{Key: "a.idx", At: t0}, {Key: "c.pack", At: t0.Add(time.Second)}, {Key: "b.pack", At: t0.Add(2 * time.Second)}}
 	if err != nil || len(got) != len(want) {
