@@ -59,6 +59,9 @@ type landOutcome struct {
 	Message string            `json:"message,omitempty"`
 	Details map[string]any    `json:"details,omitempty"`
 	Land    *api.LandResponse `json:"land,omitempty"`
+	// seq is the queue sequence of the land that the outcome ends. A request takes only the outcome of its own land: the
+	// same id can be queued again after an acknowledgment while a leader still tells the old result.
+	seq int64
 }
 
 type landWaiter struct{ repo, id string }
@@ -71,7 +74,23 @@ type landing struct {
 
 func (s *Server) registerLands(mux *http.ServeMux) {
 	s.handle(mux, "POST /v1/repos/{repo}/lands", s.land, grant.ScopeMerge, grant.ScopeWrite)
+	s.handle(mux, "DELETE /v1/repos/{repo}/lands/{id}", s.ackLand, grant.ScopeMerge, grant.ScopeWrite)
 	s.handle(mux, "GET /v1/repos/{repo}/files/{commit}/{path...}", s.getFile, grant.ScopeRead)
+}
+
+func (s *Server) ackLand(w http.ResponseWriter, r *http.Request, c call) error {
+	if r.PathValue("repo") != c.claims.Repo {
+		return errForbidden
+	}
+	id := r.PathValue("id")
+	if !landID.MatchString(id) {
+		return errBody
+	}
+	if err := s.index.AckLand(r.Context(), c.claims.Repo, id); err != nil {
+		return err
+	}
+	w.WriteHeader(http.StatusNoContent)
+	return nil
 }
 
 func (s *Server) land(w http.ResponseWriter, r *http.Request, c call) error {
@@ -128,7 +147,7 @@ func (s *Server) enqueueAndWait(ctx context.Context, req meta.LandRequest) (res 
 	if item.Base != req.Base || item.Head != req.Head || item.Ref != req.Ref || item.ExpectTree != req.ExpectTree {
 		return landOutcome{Code: api.CodeInvalidBody, Message: "the land id is used by another change"}, nil
 	}
-	if !item.Done {
+	if item.State != meta.LandStateDone {
 		select {
 		case s.warmers <- struct{}{}:
 			warm, stop := context.WithCancel(ctx)
@@ -144,12 +163,15 @@ func (s *Server) enqueueAndWait(ctx context.Context, req meta.LandRequest) (res 
 	defer timeout.Stop()
 	_, endWait := store.StartSpan(ctx, "vcs.land.wait")
 	defer func() { endWait(waitErr, attribute.Bool("leader_here", s.leadingHere(key))) }()
-	for !item.Done {
+	for item.State != meta.LandStateDone {
 		s.kickLeader(key)
 		poll := clk.NewTimer(s.lands.Poll)
 		select {
 		case out := <-ch:
 			poll.Stop()
+			if out.seq != item.Seq {
+				continue
+			}
 			return out, nil
 		case <-poll.C:
 			if s.leadingHere(key) {

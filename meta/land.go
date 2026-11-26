@@ -2,6 +2,7 @@ package meta
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -17,12 +18,25 @@ type LandRequest struct {
 	ExpectTree                      string
 }
 
+// LandState is the stage of a queued land. A land is Queued until a leader claims it, Claimed until the leader ends it,
+// and Done from then until a caller acknowledges it or the retention ends.
+type LandState string
+
+const (
+	LandStateQueued  LandState = "pending"
+	LandStateClaimed LandState = "claimed"
+	LandStateDone    LandState = "done"
+)
+
+// ErrLandPending is the acknowledgment of a land that has no result yet.
+var ErrLandPending = errors.New("meta: land has no result yet")
+
 // LandItem is a queued land. Seq orders the queue of a repo. Result is set once the item is done, and is opaque to the
 // store. Generation is the generation of the ref move that landed the item, and 0 for an item that did not land.
 type LandItem struct {
 	LandRequest
 	Seq        int64
-	Done       bool
+	State      LandState
 	Result     string
 	Generation int64
 }
@@ -87,6 +101,8 @@ type LandStore interface {
 	// LandLogSince returns the log rows from the latest one that starts or ends at base, in order, at most limit. It
 	// returns none when base is in no row or the rows after it are more than limit.
 	LandLogSince(ctx context.Context, repo, ref, base string, limit int) ([]LandLogRow, error)
+	// AckLand removes the done item of a repo and id. ErrNotFound when it is absent, ErrLandPending when it is not done.
+	AckLand(ctx context.Context, repo, id string) error
 	// PruneLands removes the items that ended before the time.
 	PruneLands(ctx context.Context, before time.Time) error
 }

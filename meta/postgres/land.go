@@ -37,7 +37,7 @@ func (s *Store) EnqueueLand(ctx context.Context, r meta.LandRequest, now time.Ti
 	if err != nil {
 		return meta.LandItem{}, fmt.Errorf("postgres: enqueue land: %w", err)
 	}
-	item.Done = state == "done"
+	item.State = meta.LandState(state)
 	return item, nil
 }
 
@@ -52,7 +52,7 @@ func (s *Store) LandItem(ctx context.Context, repo, id string) (meta.LandItem, e
 	if err != nil {
 		return meta.LandItem{}, fmt.Errorf("postgres: read land: %w", err)
 	}
-	item.Done = state == "done"
+	item.State = meta.LandState(state)
 	return item, nil
 }
 
@@ -113,7 +113,7 @@ func (s *Store) ClaimLands(ctx context.Context, repo, ref, owner string, now tim
 		return nil, fmt.Errorf("postgres: claim lands: %w", err)
 	}
 	out, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (meta.LandItem, error) {
-		it := meta.LandItem{LandRequest: meta.LandRequest{Repo: repo, Ref: ref}}
+		it := meta.LandItem{LandRequest: meta.LandRequest{Repo: repo, Ref: ref}, State: meta.LandStateClaimed}
 		err := r.Scan(&it.ID, &it.Seq, &it.Base, &it.Head, &it.Kind, &it.ExpectTree)
 		return it, err
 	})
@@ -240,6 +240,20 @@ func (s *Store) LandLogSince(ctx context.Context, repo, ref, base string, limit 
 		return nil, nil
 	}
 	return out, nil
+}
+
+func (s *Store) AckLand(ctx context.Context, repo, id string) error {
+	tag, err := s.Pool.Exec(ctx, `DELETE FROM land_queue WHERE repo = $1 AND id = $2 AND state = 'done'`, repo, id)
+	if err != nil {
+		return fmt.Errorf("postgres: ack land: %w", err)
+	}
+	if tag.RowsAffected() > 0 {
+		return nil
+	}
+	if _, err := s.LandItem(ctx, repo, id); err != nil {
+		return err
+	}
+	return meta.ErrLandPending
 }
 
 func (s *Store) PruneLands(ctx context.Context, before time.Time) error {

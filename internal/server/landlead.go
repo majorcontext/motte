@@ -24,7 +24,7 @@ const (
 	historyRows         = 1000
 	landAttempts        = 8
 	landFailures        = 3
-	landResultRetention = 24 * time.Hour
+	landResultRetention = 30 * 24 * time.Hour
 	// landWarmers bounds the lands that read their objects while they wait.
 	landWarmers = 8
 )
@@ -159,7 +159,7 @@ func (s *Server) failLands(ctx context.Context, key meta.LandKey, owner string, 
 		return
 	}
 	for _, it := range items {
-		s.tellLand(landWaiter{key.Repo, it.ID}, landOutcome{Code: api.CodeInternal, Message: "the land failed: ask again with a new id"})
+		s.tellLand(landWaiter{key.Repo, it.ID}, landOutcome{Code: api.CodeInternal, Message: "the land failed: ask again with a new id", seq: it.Seq})
 	}
 }
 
@@ -209,6 +209,7 @@ type batchRun struct {
 
 func (b *batchRun) end(it meta.LandItem, out landOutcome, landed bool) {
 	b.results = append(b.results, meta.LandDone{ID: it.ID, Result: mustJSON(out), Landed: landed})
+	out.seq = it.Seq
 	b.told[it.ID] = out
 }
 

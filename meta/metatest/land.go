@@ -66,7 +66,7 @@ func claimIDs(t *testing.T, s meta.Store, owner string, limit int) []string {
 
 func landQueueOrder(t *testing.T, s meta.Store) {
 	a, b := enqueue(t, s, "a"), enqueue(t, s, "b")
-	if again := enqueue(t, s, "a"); again.Seq != a.Seq || again.Done || again.Base != commitA {
+	if again := enqueue(t, s, "a"); again.Seq != a.Seq || again.State != meta.LandStateQueued || again.Base != commitA {
 		t.Errorf("a repeated id = %+v, want the first item %+v", again, a)
 	}
 	enqueue(t, s, "c")
@@ -115,14 +115,14 @@ func landCrashRecovery(t *testing.T, s meta.Store) {
 	ok(t, s.AcquireLandLease(ctx, repoText, landRef, "o2", later, later.Add(lease)))
 	items, err := s.ClaimLands(ctx, repoText, landRef, "o2", later, 10)
 	ok(t, err)
-	if len(items) != 2 || items[0].ID != "b" || items[1].ID != "c" {
+	if len(items) != 2 || items[0].ID != "b" || items[1].ID != "c" || items[0].State != meta.LandStateClaimed {
 		t.Errorf("new leader claimed %+v, want the claimed b and the queued c", items)
 	}
 	is(t, s.FinishLands(ctx, repoText, landRef, "o1", later, []meta.LandDone{{ID: "b", Result: "x"}}), meta.ErrLeaseHeld)
-	if it, err := s.LandItem(ctx, repoText, "b"); err != nil || it.Done {
+	if it, err := s.LandItem(ctx, repoText, "b"); err != nil || it.State == meta.LandStateDone {
 		t.Errorf("b = %+v, %v, want it open: a lost leader ends nothing", it, err)
 	}
-	if it, err := s.LandItem(ctx, repoText, "a"); err != nil || !it.Done || it.Result != "r" {
+	if it, err := s.LandItem(ctx, repoText, "a"); err != nil || it.State != meta.LandStateDone || it.Result != "r" {
 		t.Errorf("a = %+v, %v, want it done with its result", it, err)
 	}
 }
@@ -152,7 +152,7 @@ func landBatchIsAtomic(t *testing.T, s meta.Store) {
 		if id == "a" {
 			want = ref.Generation
 		}
-		if it, err := s.LandItem(ctx, repoText, id); err != nil || !it.Done || it.Result != "done "+id || it.Generation != want {
+		if it, err := s.LandItem(ctx, repoText, id); err != nil || it.State != meta.LandStateDone || it.Result != "done "+id || it.Generation != want {
 			t.Errorf("item %s = %+v, %v, want generation %d", id, it, err, want)
 		}
 	}
@@ -181,7 +181,7 @@ func landBatchLoses(t *testing.T, s meta.Store) {
 		if got, _ := s.Ref(ctx, repoText, landRef); got != seed {
 			t.Errorf("%s: ref = %+v, want %+v", why, got, seed)
 		}
-		if it, _ := s.LandItem(ctx, repoText, "a"); it.Done {
+		if it, _ := s.LandItem(ctx, repoText, "a"); it.State == meta.LandStateDone {
 			t.Errorf("%s: item ended", why)
 		}
 		if rows, _ := s.LandLogSince(ctx, repoText, landRef, commitA, 10); len(rows) != 0 {
@@ -227,7 +227,7 @@ func landFinish(t *testing.T, s meta.Store) {
 	is(t, s.FinishLands(ctx, repoText, landRef, "o1", t0, []meta.LandDone{{ID: "a", Result: "r"}}), meta.ErrLeaseHeld)
 	lead(t, s, "o1")
 	ok(t, s.FinishLands(ctx, repoText, landRef, "o1", t0, []meta.LandDone{{ID: "a", Result: "r"}, {ID: "unknown", Result: "r"}}))
-	if it, _ := s.LandItem(ctx, repoText, "a"); !it.Done || it.Result != "r" {
+	if it, _ := s.LandItem(ctx, repoText, "a"); it.State != meta.LandStateDone || it.Result != "r" {
 		t.Errorf("item = %+v", it)
 	}
 	ok(t, s.FinishLands(ctx, repoText, landRef, "o1", t0, []meta.LandDone{{ID: "a", Result: "second"}}))
@@ -237,6 +237,12 @@ func landFinish(t *testing.T, s meta.Store) {
 	if got, _ := s.Ref(ctx, repoText, landRef); got != seed {
 		t.Errorf("ref = %+v, want it unmoved", got)
 	}
+	enqueue(t, s, "d")
+	is(t, s.AckLand(ctx, repoText, "d"), meta.ErrLandPending)
+	is(t, s.AckLand(ctx, repoText, "none"), meta.ErrNotFound)
+	ok(t, s.FinishLands(ctx, repoText, landRef, "o1", t0, []meta.LandDone{{ID: "d", Result: "r"}}))
+	ok(t, s.AckLand(ctx, repoText, "d"))
+	is(t, s.AckLand(ctx, repoText, "d"), meta.ErrNotFound)
 	ok(t, s.PruneLands(ctx, t0.Add(-time.Hour)))
 	if _, err := s.LandItem(ctx, repoText, "a"); err != nil {
 		t.Errorf("an item that ended after the cut was pruned: %v", err)

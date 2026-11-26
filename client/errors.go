@@ -24,6 +24,7 @@ var (
 	ErrLandStale          = errors.New("motte: land stale")
 	ErrLandInvalid        = errors.New("motte: land invalid")
 	ErrLandTimeout        = errors.New("motte: land timeout")
+	ErrLandPending        = errors.New("motte: land pending")
 	ErrUnauthorized       = errors.New("motte: unauthorized")
 	ErrInvalidBody        = errors.New("motte: invalid body")
 	ErrInternal           = errors.New("motte: internal error")
@@ -49,6 +50,7 @@ var sentinels = map[api.Code]error{
 	api.CodeLandStale:          ErrLandStale,
 	api.CodeLandInvalid:        ErrLandInvalid,
 	api.CodeLandTimeout:        ErrLandTimeout,
+	api.CodeLandPending:        ErrLandPending,
 	api.CodeUnauthorized:       ErrUnauthorized,
 	api.CodeInvalidBody:        ErrInvalidBody,
 	api.CodeInternal:           ErrInternal,
