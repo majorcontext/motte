@@ -116,10 +116,10 @@ func launch(initdb, postgres string) (string, error) {
 	return u.String(), nil
 }
 
-func missingDatabase(t testing.TB) {
+func missingDatabase(t testing.TB, required bool) {
 	t.Helper()
 	msg := DSNEnv + " is not set and no PostgreSQL binaries were found: the test needs a PostgreSQL database"
-	if os.Getenv(RequireEnv) == "1" {
+	if required || os.Getenv(RequireEnv) == "1" {
 		t.Fatal(msg)
 	}
 	t.Skip(msg)

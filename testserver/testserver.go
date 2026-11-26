@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -45,6 +46,67 @@ type Server struct {
 	Expire time.Time
 }
 
+// Limits lowers the size limits of one test, so that it crosses the same boundaries with small bodies. A zero field
+// keeps the limit. The limits are process-wide and return when the test ends, so a test that sets them must not run in
+// parallel with another test of the package that sends large bodies.
+type Limits struct {
+	// Object is the largest object that a put accepts, in bytes.
+	Object int
+	// Window bounds the JSON text that the decoder holds for one object, in bytes.
+	Window int64
+	// TreeFirst is the first reservation of a tree read, and TreeFixed the fixed part of every later one, in bytes.
+	TreeFirst, TreeFixed int64
+}
+
+type options struct {
+	postgres bool
+	dsn      string
+	required bool
+	template string
+	limits   *Limits
+	change   func(*server.Config)
+}
+
+// Option changes how New starts a server.
+type Option func(*options)
+
+// WithPostgres runs the server on a fresh schema of the PostgreSQL database at dsn. An empty dsn is read from DSNEnv,
+// and then from the throwaway cluster of the package. Without a database the test skips, unless Required is set.
+func WithPostgres(dsn string) Option { return func(o *options) { o.postgres, o.dsn = true, dsn } }
+
+// Required makes a missing PostgreSQL database fail the test instead of skipping it.
+func Required() Option { return func(o *options) { o.required = true } }
+
+// Template starts a SQLite server from a copy of the migrated database file at path. It has no effect on PostgreSQL.
+func Template(path string) Option { return func(o *options) { o.template = path } }
+
+// WithLimits lowers the size limits of the server for the test.
+func WithLimits(l Limits) Option { return func(o *options) { o.limits = &l } }
+
+// New runs a server on a temporary SQLite database and a temporary filesystem bucket, or on PostgreSQL with
+// WithPostgres.
+func New(t testing.TB, opts ...Option) *Server {
+	t.Helper()
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+	if o.limits != nil {
+		server.LowerLimits(t, o.limits.Object, o.limits.Window, o.limits.TreeFirst, o.limits.TreeFixed)
+	}
+	if o.postgres {
+		pool := pgtest.Pool
+		if o.required {
+			pool = pgtest.RequiredPool
+		}
+		p := pool(t, o.dsn)
+		s := run(t, &postgres.Store{Pool: p}, o.change)
+		s.Pool = p
+		return s
+	}
+	return startSQLite(t, o)
+}
+
 // Start runs a server on a fresh schema of the database at dsn and a temporary
 // filesystem bucket. An empty dsn is read from DSNEnv. When that is empty too,
 // Start skips the test. Cleanup drops the schema.
@@ -63,12 +125,27 @@ func StartLocal(t testing.TB) *Server { return StartLocalWith(t, nil) }
 // StartLocalWith is StartLocal with a change to the server configuration. A nil change leaves it as is.
 func StartLocalWith(t testing.TB, change func(*server.Config)) *Server {
 	t.Helper()
-	db, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "meta.db"))
+	return startSQLite(t, options{change: change})
+}
+
+func startSQLite(t testing.TB, o options) *Server {
+	t.Helper()
+	file := filepath.Join(t.TempDir(), "meta.db")
+	if o.template != "" {
+		raw, err := os.ReadFile(o.template)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db, err := sqlite.Open(context.Background(), file)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return run(t, db, change)
+	return run(t, db, o.change)
 }
 
 func run(t testing.TB, store meta.Store, change func(*server.Config)) *Server {

@@ -20,7 +20,12 @@ const DSNEnv = "MOTTE_TEST_DATABASE_URL"
 // Pool creates a fresh schema in the database at dsn, applies the migrations and returns a pool on it. An empty dsn
 // is read from DSNEnv. When that is empty too, Pool starts one throwaway cluster for the package from the binaries
 // of BinEnv or PATH. Without binaries it skips the test, or fails it when RequireEnv is 1. Cleanup drops the schema.
-func Pool(t testing.TB, dsn string) *pgxpool.Pool {
+func Pool(t testing.TB, dsn string) *pgxpool.Pool { return pool(t, dsn, false) }
+
+// RequiredPool is Pool, but it fails the test, not skips it, when no database is available.
+func RequiredPool(t testing.TB, dsn string) *pgxpool.Pool { return pool(t, dsn, true) }
+
+func pool(t testing.TB, dsn string, required bool) *pgxpool.Pool {
 	t.Helper()
 	if dsn == "" {
 		dsn = os.Getenv(DSNEnv)
@@ -32,7 +37,7 @@ func Pool(t testing.TB, dsn string) *pgxpool.Pool {
 		}
 	}
 	if dsn == "" {
-		missingDatabase(t)
+		missingDatabase(t, required)
 	}
 	testcount.Add(t, testcount.Schemas)
 	ctx := context.Background()
@@ -51,17 +56,17 @@ func Pool(t testing.TB, dsn string) *pgxpool.Pool {
 		t.Fatal(err)
 	}
 	cfg.ConnConfig.RuntimeParams["search_path"] = schema
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	p, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		pool.Close()
+		p.Close()
 		_, _ = admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE")
 		admin.Close()
 	})
-	if err := postgres.Migrate(ctx, pool); err != nil {
+	if err := postgres.Migrate(ctx, p); err != nil {
 		t.Fatal(err)
 	}
-	return pool
+	return p
 }
