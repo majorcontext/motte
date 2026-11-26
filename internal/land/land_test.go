@@ -293,3 +293,29 @@ func TestEveryClashingPathIsCheckedBeyondTheCapOfTheConflictList(t *testing.T) {
 		t.Fatalf("err = %v, want a conflict that lists %d paths: the last path clashes on its lines", err, MaxConflictPaths)
 	}
 }
+
+func (m mem) at(when int, tree gitpack.SHA, parents ...gitpack.SHA) gitpack.SHA {
+	var ps string
+	for _, p := range parents {
+		ps += "parent " + p.String() + "\n"
+	}
+	return m.put(gitpack.Commit, fmt.Appendf(nil, "tree %s\n%sauthor A <a@x> 1 +0000\ncommitter C <c@x> %d +0000\n\nmsg\n", tree, ps, when))
+}
+
+func TestFindBaseDoesNotTrustCommitTimes(t *testing.T) {
+	t.Parallel()
+	m := mem{}
+	tree := m.tree(nil)
+	a := m.at(9_000_000_000, tree)
+	h := m.at(1_000_000_000, tree, a)
+	x := m.at(1_000, tree, h)
+	tip := m.at(9_000_000_001, tree, a, x)
+	got, err := m.batch(tip).FindBase(context.Background(), tip, h)
+	if err != nil || got != h {
+		t.Errorf("base = %v, %v, want the head itself, which the tip reaches through the old commit", got, err)
+	}
+	other := m.at(5, tree)
+	if _, err := m.batch(tip).FindBase(context.Background(), other, h); err == nil {
+		t.Error("a head with no commit that the tip reaches found a base")
+	}
+}

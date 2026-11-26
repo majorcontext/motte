@@ -291,12 +291,51 @@ type Event struct {
 // LandRequest is the body of POST /v1/repos/{repo}/lands. Base..Head is a linear range of commits that the repository
 // already stores. ID is optional: a repeat of an accepted ID returns the first result and never lands twice.
 // ExpectTree is optional: when set, the land moves the ref only if the tree of the commit that Head becomes equals it.
+//
+// Onto replaces Base: the server finds the base as the first commit of the first-parent chain of Head that Onto
+// reaches, and the range from there to Head must be linear. Set exactly one of Base and Onto.
 type LandRequest struct {
 	ID         string `json:"id,omitempty"`
 	Ref        string `json:"ref"`
-	Base       string `json:"base"`
+	Base       string `json:"base,omitempty"`
+	Onto       string `json:"onto,omitempty"`
 	Head       string `json:"head"`
 	ExpectTree string `json:"expect_tree,omitempty"`
+}
+
+// TrialChange is one change of a trial land. When Base is empty the server finds it as for a land with Onto.
+type TrialChange struct {
+	Head string `json:"head"`
+	Base string `json:"base,omitempty"`
+}
+
+// TrialRequest is the body of POST /v1/repos/{repo}/lands:trial. Each change lands on the result of the one before,
+// the first on Tip.
+type TrialRequest struct {
+	Tip     string        `json:"tip"`
+	Changes []TrialChange `json:"changes"`
+}
+
+// TrialConflict names the paths that a change shares with what changed since its base.
+type TrialConflict struct {
+	Paths []string `json:"paths"`
+}
+
+// TrialItem is the result of one change of a trial land: Base, Tree, Tip and Commits when it landed, Conflict when it
+// clashed, else Error. Tree is the root tree of Tip, and Commits maps the commits of the range to the new commits,
+// empty for a head that already descends from the running tip.
+type TrialItem struct {
+	Base     string         `json:"base,omitempty"`
+	Tree     string         `json:"tree,omitempty"`
+	Tip      string         `json:"tip,omitempty"`
+	Commits  []LandedCommit `json:"commits,omitempty"`
+	Conflict *TrialConflict `json:"conflict,omitempty"`
+	Error    *Error         `json:"error,omitempty"`
+}
+
+// TrialResponse has one item for each change, in order.
+type TrialResponse struct {
+	Items []TrialItem `json:"items"`
 }
 
 // LandedCommit is a commit of the range and the commit that replaced it on the ref.

@@ -334,16 +334,16 @@ func (b *Batch) rebase(ctx context.Context, base gitpack.SHA, baseCommit Commit,
 		return Landed{}, err
 	}
 	paths := set.sorted()
-	hits, err := b.conflicts(ctx, base, paths)
+	tipCommit, err := b.commit(ctx, b.tip)
+	if err != nil {
+		return Landed{}, err
+	}
+	hits, err := b.conflicts(ctx, base, baseCommit.Tree, tipCommit.Tree, paths)
 	if err != nil {
 		return Landed{}, err
 	}
 	if !b.canMerge(hits, set, changes) {
 		return Landed{}, &ConflictError{Paths: hits[:min(len(hits), MaxConflictPaths)]}
-	}
-	tipCommit, err := b.commit(ctx, b.tip)
-	if err != nil {
-		return Landed{}, err
 	}
 	root, prev := tipCommit.Tree, b.tip
 	out := Landed{Old: b.tip}
@@ -375,13 +375,25 @@ func (b *Batch) rebase(ctx context.Context, base gitpack.SHA, baseCommit Commit,
 	return out, nil
 }
 
-// conflicts returns the paths that changed since base and clash with the paths of the change.
-func (b *Batch) conflicts(ctx context.Context, base gitpack.SHA, paths []string) ([]string, error) {
+// conflicts returns the paths of the net tree diff between the base tree and the tip tree that clash with the paths of
+// the change. The land log only narrows the work: when it names no clashing path, the diff is not read. A path that
+// the log names and that the tree diff does not, such as a path that one land added and a later land removed, is not
+// a conflict. The diff is streamed, and only the paths that clash with the change are kept.
+func (b *Batch) conflicts(ctx context.Context, base gitpack.SHA, baseTree, tipTree gitpack.SHA, paths []string) ([]string, error) {
 	c := newClash(paths)
 	if err := b.since(ctx, base, c.add); err != nil {
 		return nil, err
 	}
-	return c.result(), nil
+	narrowed := c.result()
+	if len(narrowed) == 0 {
+		return nil, nil
+	}
+	n := newClash(paths)
+	err := b.diff(ctx, baseTree, tipTree, "", func(ch Change) error { n.add(ch.Path); return nil })
+	if err != nil {
+		return nil, err
+	}
+	return n.result(), nil
 }
 
 // since emits every path that changed between base and the running tip. The stored lands answer for the part before

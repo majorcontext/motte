@@ -71,6 +71,7 @@ type landing struct {
 
 func (s *Server) registerLands(mux *http.ServeMux) {
 	s.handle(mux, "POST /v1/repos/{repo}/lands", s.land, grant.ScopeMerge, grant.ScopeWrite)
+	s.handle(mux, "POST /v1/repos/{repo}/lands:trial", s.landTrial, grant.ScopeMerge, grant.ScopeWrite)
 	s.handle(mux, "GET /v1/repos/{repo}/files/{commit}/{path...}", s.getFile, grant.ScopeRead)
 }
 
@@ -83,16 +84,29 @@ func (s *Server) land(w http.ResponseWriter, r *http.Request, c call) error {
 	if repo != c.claims.Repo {
 		return errForbidden
 	}
-	if !refname.Valid(req.Ref) || !lowerHex(req.Base, 40, 40) || !lowerHex(req.Head, 40, 40) || req.ID != "" && !landID.MatchString(req.ID) || req.ExpectTree != "" && !lowerHex(req.ExpectTree, 40, 40) {
+	if (req.Base == "") == (req.Onto == "") || req.Onto != "" && !lowerHex(req.Onto, 40, 40) {
+		return errBody
+	}
+	if !refname.Valid(req.Ref) || req.Base != "" && !lowerHex(req.Base, 40, 40) || !lowerHex(req.Head, 40, 40) || req.ID != "" && !landID.MatchString(req.ID) || req.ExpectTree != "" && !lowerHex(req.ExpectTree, 40, 40) {
 		return errBody
 	}
 	known := false
 	if req.ID == "" {
 		req.ID = rand.Text()
-	} else if _, err := s.index.LandItem(r.Context(), repo, req.ID); err == nil {
+	} else if first, err := s.index.LandItem(r.Context(), repo, req.ID); err == nil {
 		known = true
+		if req.Base == "" {
+			req.Base = first.Base
+		}
 	} else if !errors.Is(err, meta.ErrNotFound) {
 		return err
+	}
+	if req.Base == "" {
+		base, err := s.findBase(r.Context(), c.repo, req.Onto, req.Head)
+		if err != nil {
+			return s.answerLandError(w, err)
+		}
+		req.Base = base
 	}
 	if !known {
 		if err := s.refProtected(r.Context(), c.claims.Scope, repo, req.Ref); err != nil {
