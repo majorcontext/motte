@@ -150,7 +150,7 @@ The service keeps the ranges that requests read from packs in one cache for all 
 
 | Route | Scopes |
 |---|---|
-| `GET /v1/vcs/commits/{sha}` | `node`, `read` |
+| `GET /v1/vcs/commits/{sha}` returns `{tree, time, parents}`, the parents in commit order | `node`, `read` |
 | `GET /v1/vcs/trees/{sha}` | `node`, `read` |
 | `GET /v1/vcs/objects/{sha}` | `node`, `read` |
 | `POST /v1/vcs/blobs/batch` | `node`, `read` |
@@ -200,6 +200,7 @@ Ordinary `git` clones, fetches and pushes a repository over HTTPS. The routes ne
 | `DELETE /v1/workspaces/{id}` | `operator` |
 | `PUT /v1/repos/{repo}/protected-refs` with `{patterns}` replaces the list and answers 200 with `{patterns}`. `GET` of the same path returns it. `{repo}` is the repository text, with `/` as `%2F`. | `operator` |
 | `POST /v1/repos/{repo}/lands` with `{id, ref, base, head, expect_tree}` lands the commits `base..head` on `ref` and answers 200 with `{id, ref, generation, tip, fast_forward, commits}`. See Land. `{repo}` is the repository text, with `/` as `%2F`. | `merge`, `write` |
+| `GET /v1/repos/{repo}/files/{commit}/{path...}` returns `{sha, size, data}`, the base64 content of the file at `path` in the tree of `commit`. A path that names no file, or names a directory, answers 404 `vcs_path_not_found`. A file over 1 MiB answers 413 `vcs_object_too_large`. `{repo}` must be the repository of the grant. | `read` |
 | `POST /v1/tokens` with `{principal, scope, repos, ttl_seconds}` answers 201 with `{token, user_token}`. `GET /v1/tokens` lists the records, newest first. `DELETE /v1/tokens/{id}` revokes and answers 204. See Human identities. | `operator`, a signed grant only |
 | `GET /v1/events?cursor=<cursor>&limit=<n>` returns `{events, cursor}` | `operator` |
 | `POST /v1/subscriptions` with `{url, secret, repo}` answers 201 with the subscription | `operator` |

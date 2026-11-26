@@ -10,6 +10,7 @@ import (
 
 var (
 	ErrNotFound           = errors.New("motte: not found")
+	ErrPathNotFound       = errors.New("motte: path not found")
 	ErrGenerationConflict = errors.New("motte: generation conflict")
 	ErrClaimLost          = errors.New("motte: claim lost")
 	ErrObjectInvalid      = errors.New("motte: object invalid")
@@ -34,6 +35,7 @@ var (
 
 var sentinels = map[api.Code]error{
 	api.CodeNotFound:           ErrNotFound,
+	api.CodePathNotFound:       ErrPathNotFound,
 	api.CodeGenerationConflict: ErrGenerationConflict,
 	api.CodeClaimLost:          ErrClaimLost,
 	api.CodeObjectInvalid:      ErrObjectInvalid,

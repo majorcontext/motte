@@ -32,6 +32,8 @@ func (s *Server) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 		w.WriteHeader(statusClientClosed)
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, meta.ErrNotFound):
 		s.writeError(w, api.CodeNotFound, "not found", nil)
+	case errors.Is(err, store.ErrNoPath):
+		s.writeError(w, api.CodePathNotFound, "the commit has no file at the path", nil)
 	case errors.Is(err, store.ErrInvalid):
 		s.writeError(w, api.CodeObjectInvalid, "invalid object name or content", nil)
 	case errors.Is(err, store.ErrTooLarge), errors.Is(err, gitproto.ErrTooLarge):

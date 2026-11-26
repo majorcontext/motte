@@ -368,6 +368,17 @@ func (c *Client) Land(ctx context.Context, repo string, req api.LandRequest) (ap
 	return out, err
 }
 
+// File returns the content of the file at path in the commit. repo is the repository text of the grant, and the grant
+// has the read scope. A path that names no file is ErrPathNotFound, and a file over the server limit of 1 MiB is
+// ErrObjectTooLarge.
+func (c *Client) File(ctx context.Context, repo, commit, path string) ([]byte, error) {
+	var out api.File
+	if err := c.do(ctx, http.MethodGet, "/v1/repos"+segs(append([]string{repo, "files", commit}, strings.Split(path, "/")...)...), nil, &out); err != nil {
+		return nil, err
+	}
+	return base64.StdEncoding.DecodeString(out.Data)
+}
+
 // Events returns up to limit ref events after cursor, and the cursor to pass next. An empty cursor starts at the
 // first event. Zero limit takes the server default. Events of one ref arrive in order. ErrEventsPruned means
 // retention removed events after the cursor, and the caller must read the refs again.

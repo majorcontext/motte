@@ -8,6 +8,7 @@ type Code string
 
 const (
 	CodeNotFound           Code = "vcs_not_found"
+	CodePathNotFound       Code = "vcs_path_not_found"
 	CodeGenerationConflict Code = "vcs_generation_conflict"
 	CodeClaimLost          Code = "vcs_claim_lost"
 	CodeObjectInvalid      Code = "vcs_object_invalid"
@@ -29,6 +30,7 @@ const (
 
 var statuses = map[Code]int{
 	CodeNotFound:           http.StatusNotFound,
+	CodePathNotFound:       http.StatusNotFound,
 	CodeGenerationConflict: http.StatusConflict,
 	CodeClaimLost:          http.StatusConflict,
 	CodeObjectInvalid:      http.StatusBadRequest,
@@ -115,10 +117,18 @@ type OpObject struct {
 	Data string `json:"data"`
 }
 
-// Commit is the root tree of a commit and its committer time (RFC 3339).
+// Commit is the root tree of a commit, its committer time (RFC 3339) and its parents in order.
 type Commit struct {
-	Tree string `json:"tree"`
-	Time string `json:"time"`
+	Tree    string   `json:"tree"`
+	Time    string   `json:"time"`
+	Parents []string `json:"parents"`
+}
+
+// File is one file of a commit. Data is the base64 of the content.
+type File struct {
+	SHA  string `json:"sha"`
+	Size int64  `json:"size"`
+	Data string `json:"data"`
 }
 
 // TreeEntry is one entry of a tree. Name is the base64 of the name bytes,

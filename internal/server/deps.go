@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"time"
 
 	"github.com/majorcontext/motte/api"
 	"github.com/majorcontext/motte/internal/gitpack"
@@ -14,7 +13,8 @@ import (
 type objects interface {
 	Reserve(ctx context.Context, bytes int64) (release func(), err error)
 	ReserveLand(ctx context.Context, bytes int64) (release func(), err error)
-	Commit(ctx context.Context, repo store.Repo, sha gitpack.SHA, grow func(size int64) error) (gitpack.SHA, time.Time, error)
+	Commit(ctx context.Context, repo store.Repo, sha gitpack.SHA, grow func(size int64) error) (store.CommitInfo, error)
+	File(ctx context.Context, repo store.Repo, commit gitpack.SHA, path string, max int64, grow func(size int64) error) ([]byte, error)
 	TreeBulk(ctx context.Context, repo store.Repo, sha gitpack.SHA, maxEntries int, grow func(treeBytes int64) error) ([]store.Tree, error)
 	Blobs(ctx context.Context, repo store.Repo, shas []gitpack.SHA, grow func(size int64) error) ([][]byte, error)
 	Has(ctx context.Context, repo store.Repo, shas []gitpack.SHA) ([]bool, error)

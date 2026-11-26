@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -333,6 +334,41 @@ func contractFlushOrdersByGenerationUnderTheEpochFence(t *testing.T, on backend)
 	refuses(t, flush(1, 6, "", opB), client.ErrClaimLost, 409)
 }
 
+func contractFileReadAndCommitParents(t *testing.T, on backend) {
+	t.Parallel()
+	e := newEnvOn(t, on)
+	ctx := context.Background()
+	var o objSet
+	first := o.commit(map[string]string{"a.txt": "one", "dir/b.txt": "two", "big": strings.Repeat("x", 1<<20+1)}, "", "first")
+	second := o.commit(map[string]string{"a.txt": "one"}, "", "second", first)
+	merge := o.commit(map[string]string{"a.txt": "one"}, "", "merge", second, first)
+	link := append([]byte("160000 sub\x00"), make([]byte, 20)...)
+	withLink := o.add(gitpack.Commit, []byte("tree "+o.add(gitpack.Tree, link)+"\nauthor A <a@example.com> 1 +0000\ncommitter A <a@example.com> 1 +0000\n\nlink\n"))
+	o.upload(t, e, repoText)
+	rd := e.Client(e.readGrant(repoText))
+	_, err := rd.File(ctx, repoText, withLink, "sub/file")
+	refuses(t, err, client.ErrPathNotFound, 404)
+	for commit, want := range map[string][]string{first: {}, second: {first}, merge: {second, first}} {
+		c, err := rd.Commit(ctx, commit)
+		if err != nil || !slices.Equal(c.Parents, want) {
+			t.Errorf("parents of %s = %v, %v; want %v", commit, c.Parents, err, want)
+		}
+	}
+	if got, err := rd.File(ctx, repoText, first, "dir/b.txt"); err != nil || string(got) != "two" {
+		t.Errorf("file = %q, %v; want two", got, err)
+	}
+	for _, path := range []string{"missing", "dir", "a.txt/x", "dir/missing"} {
+		_, err := rd.File(ctx, repoText, first, path)
+		refuses(t, err, client.ErrPathNotFound, 404)
+	}
+	_, err = rd.File(ctx, repoText, first, "big")
+	refuses(t, err, client.ErrObjectTooLarge, 413)
+	_, err = rd.File(ctx, "gh:acme/other", first, "a.txt")
+	refuses(t, err, client.ErrRepoForbidden, 403)
+	_, err = e.Client(e.WriteGrant(t, repoText)).File(ctx, repoText, first, "a.txt")
+	refuses(t, err, client.ErrUnauthorized, 401)
+}
+
 func TestGrantScopeRefusals(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -502,5 +538,6 @@ func TestContract(t *testing.T) {
 		"create repo":       contractCreateRepoStartsOnARootCommitOfMain,
 		"claim binds":       contractClaimBindsOwnerAndRepoOnce,
 		"flush order":       contractFlushOrdersByGenerationUnderTheEpochFence,
+		"file read":         contractFileReadAndCommitParents,
 	})
 }

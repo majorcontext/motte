@@ -71,6 +71,7 @@ type landing struct {
 
 func (s *Server) registerLands(mux *http.ServeMux) {
 	s.handle(mux, "POST /v1/repos/{repo}/lands", s.land, grant.ScopeMerge, grant.ScopeWrite)
+	s.handle(mux, "GET /v1/repos/{repo}/files/{commit}/{path...}", s.getFile, grant.ScopeRead)
 }
 
 func (s *Server) land(w http.ResponseWriter, r *http.Request, c call) error {

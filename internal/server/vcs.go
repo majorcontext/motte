@@ -112,11 +112,15 @@ func (s *Server) getCommit(w http.ResponseWriter, r *http.Request, c call) error
 	if err != nil {
 		return err
 	}
-	tree, when, err := s.objects.Commit(r.Context(), c.repo, sha, func(size int64) error { return hold.grow(readCost(size, 3)) })
+	info, err := s.objects.Commit(r.Context(), c.repo, sha, func(size int64) error { return hold.grow(readCost(size, 3)) })
 	if err != nil {
 		return err
 	}
-	s.writeJSON(w, http.StatusOK, api.Commit{Tree: tree.String(), Time: when.Format(time.RFC3339)})
+	parents := make([]string, len(info.Parents))
+	for i, p := range info.Parents {
+		parents[i] = p.String()
+	}
+	s.writeJSON(w, http.StatusOK, api.Commit{Tree: info.Tree.String(), Time: info.Time.Format(time.RFC3339), Parents: parents})
 	return nil
 }
 

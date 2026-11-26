@@ -863,23 +863,47 @@ func (s *Service) Has(ctx context.Context, repo Repo, shas []gitpack.SHA) ([]boo
 	return r.Has(ctx, shas)
 }
 
-// Commit returns the tree of a commit and its committer time. It calls grow, when it is set, with the size of the
-// commit before it reads it.
-func (s *Service) Commit(ctx context.Context, repo Repo, sha gitpack.SHA, grow func(size int64) error) (gitpack.SHA, time.Time, error) {
+// CommitInfo is the root tree, the parents and the committer time of a commit.
+type CommitInfo struct {
+	Tree    gitpack.SHA
+	Parents []gitpack.SHA
+	Time    time.Time
+}
+
+// Commit returns the tree, the parents and the committer time of a commit. It calls grow, when it is set, with the
+// size of the commit before it reads it.
+func (s *Service) Commit(ctx context.Context, repo Repo, sha gitpack.SHA, grow func(size int64) error) (CommitInfo, error) {
 	v, err := s.view(ctx, repo)
 	if err != nil {
-		return gitpack.SHA{}, time.Time{}, err
+		return CommitInfo{}, err
 	}
+	return v.commit(ctx, sha, grow)
+}
+
+func (v *view) commit(ctx context.Context, sha gitpack.SHA, grow func(size int64) error) (CommitInfo, error) {
 	t, d, err := v.getSized(ctx, sha, grow)
 	if err != nil {
-		return gitpack.SHA{}, time.Time{}, err
+		return CommitInfo{}, err
 	}
 	if t != gitpack.Commit || !bytes.HasPrefix(d, []byte("tree ")) || len(d) < 45 {
-		return gitpack.SHA{}, time.Time{}, ErrInvalid
+		return CommitInfo{}, ErrInvalid
 	}
 	tree, err := gitpack.ParseSHA(string(d[5:45]))
 	if err != nil {
-		return gitpack.SHA{}, time.Time{}, ErrInvalid
+		return CommitInfo{}, ErrInvalid
+	}
+	info := CommitInfo{Tree: tree}
+	head, _, _ := bytes.Cut(d, []byte("\n\n"))
+	for _, line := range bytes.Split(head, []byte("\n"))[1:] {
+		rest, ok := bytes.CutPrefix(line, []byte("parent "))
+		if !ok {
+			break
+		}
+		p, err := gitpack.ParseSHA(string(rest))
+		if err != nil {
+			return CommitInfo{}, ErrInvalid
+		}
+		info.Parents = append(info.Parents, p)
 	}
 	var sec int64
 	if i := bytes.Index(d, []byte("\ncommitter ")); i >= 0 {
@@ -891,7 +915,58 @@ func (s *Service) Commit(ctx context.Context, repo Repo, sha gitpack.SHA, grow f
 			_, _ = fmt.Sscanf(string(line[j+1:]), "%d", &sec)
 		}
 	}
-	return tree, time.Unix(sec, 0).UTC(), nil
+	info.Time = time.Unix(sec, 0).UTC()
+	return info, nil
+}
+
+// ErrNoPath is the failure of File for a path that names no file of the commit.
+var ErrNoPath = errors.New("store: no such file")
+
+// File returns the content of the file at path in the tree of a commit. It fails with ErrNoPath when a segment is
+// missing or the path does not end at a file, and with ErrTooLarge when the file has more than max bytes. It calls
+// grow with the bytes that it holds before it reads each object.
+func (s *Service) File(ctx context.Context, repo Repo, commit gitpack.SHA, path string, max int64, grow func(size int64) error) ([]byte, error) {
+	v, err := s.view(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
+	info, err := v.commit(ctx, commit, grow)
+	if err != nil {
+		return nil, err
+	}
+	cur := info.Tree
+	segs := strings.Split(path, "/")
+	for i, seg := range segs {
+		t, d, err := v.getSized(ctx, cur, grow)
+		if err != nil {
+			return nil, err
+		}
+		if t != gitpack.Tree || len(d) > maxTreeBytes {
+			return nil, ErrInvalid
+		}
+		tree, err := parseEntries(ctx, cur, d)
+		if err != nil {
+			return nil, err
+		}
+		j := slices.IndexFunc(tree.Entries, func(e Entry) bool { return e.Name == seg })
+		if j < 0 {
+			return nil, ErrNoPath
+		}
+		e := tree.Entries[j]
+		if last := i == len(segs)-1; last && !isBlobEntry(e) || !last && e.Mode != 0o40000 {
+			return nil, ErrNoPath
+		}
+		cur = e.SHA
+	}
+	size, err := v.size(ctx, cur)
+	if err != nil {
+		return nil, err
+	}
+	if size > max {
+		return nil, ErrTooLarge
+	}
+	_, data, err := v.getSized(ctx, cur, grow)
+	return data, err
 }
 
 type Entry struct {
