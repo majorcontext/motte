@@ -198,3 +198,5 @@ func TestAPushStoresItsPackIndexAndSizesTogetherAndItsTailMergeReadsNoSizeFile(t
 		t.Errorf("the tail merges of 5 pushes read a size file %d times; the size file that a push wrote is in the layer cache", n)
 	}
 }
+
+func (k *keyBucket) ConditionalDelete() bool { return bucket.DeletesConditionally(k.Store) }

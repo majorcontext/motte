@@ -184,3 +184,5 @@ func TestTheLayerCacheChargesAGraphByTheCapacityOfItsBuffer(t *testing.T) {
 		t.Errorf("the layer cache charged %d bytes for a graph held in a buffer of %d, want at least that", used, 2*len(file))
 	}
 }
+
+func (g *graphFiles) ConditionalDelete() bool { return bucket.DeletesConditionally(g.Store) }

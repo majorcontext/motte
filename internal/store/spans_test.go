@@ -38,3 +38,7 @@ func TestAFlightThatFollowsAFilledCacheMakesNoBucketRead(t *testing.T) {
 		t.Errorf("3 flights for one range made %d bucket reads, want 1: a flight must look in the cache before it reads", n)
 	}
 }
+
+func (c *countingStore) ConditionalDelete() bool { return bucket.DeletesConditionally(c.Store) }
+
+func (f fixedStore) ConditionalDelete() bool { return bucket.DeletesConditionally(f.Store) }

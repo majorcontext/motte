@@ -235,6 +235,7 @@ func (s *Server) registerCacheMetrics() {
 	mcounter("motte_layer_merge_runs_total", "Merges of layers into one layer.", func(m store.MaintStats) int64 { return m.MergeRuns })
 	mcounter("motte_layer_merge_objects_total", "Records that layer merges read.", func(m store.MaintStats) int64 { return m.MergeObjects })
 	mcounter("motte_retired_files_deleted_total", "Retired pack and layer files deleted after their grace.", func(m store.MaintStats) int64 { return m.Deleted })
+	mcounter("motte_retired_files_delete_skipped_total", "Retired files that maintenance kept because the bucket does not delete conditionally.", func(m store.MaintStats) int64 { return m.DeleteSkipped })
 	mcounter("motte_maintenance_failures_total", "Maintenance passes of a repository that failed.", func(m store.MaintStats) int64 { return m.Failures })
 	mgauge("motte_manifest_layers_max", "Most layers of any repository that maintenance has seen.", func(m store.MaintStats) int64 { return m.LayersMax })
 	mgauge("motte_manifest_layers_sum", "Layers of all repositories that maintenance has seen.", func(m store.MaintStats) int64 { return m.LayersSum })

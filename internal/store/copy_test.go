@@ -251,3 +251,5 @@ func TestACopyOfManySmallRunsReadsAtMost64AtOnceAndOpensNoPack(t *testing.T) {
 		t.Errorf("the copy left %d packs in the pack cache, want none", n)
 	}
 }
+
+func (g *gatedStore) ConditionalDelete() bool { return bucket.DeletesConditionally(g.Store) }

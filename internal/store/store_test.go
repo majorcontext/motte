@@ -38,6 +38,7 @@ type spy struct {
 	failAt           int64
 	onDelete         func(key string)
 	afterLanding     bool
+	unconditional    bool
 	mu               sync.Mutex
 	files, deletions int
 }
@@ -992,6 +993,31 @@ func TestACollectorThatStallsPastTheLeaseKeepsAFileStoredAgain(t *testing.T) {
 	w.reachable(w.cold())
 }
 
+func TestMaintenanceKeepsRetiredFilesOnABucketThatDeletesUnconditionally(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	w.spy.unconditional = true
+	for range 10 {
+		w.push(2)
+	}
+	w.pastGrace()
+	if err := w.svc.Maintain(t.Context(), repo); err != nil {
+		t.Fatal(err)
+	}
+	w.pastGrace()
+	if err := w.svc.Maintain(t.Context(), repo); err != nil {
+		t.Fatal(err)
+	}
+	if st := w.svc.MaintStats(); st.MergeRuns+st.CompactRuns == 0 || st.Deleted != 0 || st.DeleteSkipped == 0 {
+		t.Errorf("stats = %+v, want work done, no file deleted and the skipped deletes counted", st)
+	}
+	objs, _ := w.retiredPack()
+	if _, err := w.svc.PutObjects(t.Context(), repo, objs); err != nil {
+		t.Errorf("a write of a retired pack after skipped collection: %v", err)
+	}
+	w.reachable(w.cold())
+}
+
 func TestAPackStoredAgainWhileItIsBeingDeletedStaysReadable(t *testing.T) {
 	t.Parallel()
 	w := newWorld(t)
@@ -1314,3 +1340,11 @@ func TestATreeReadFetchesOnlyTheHeadersOfItsBlobs(t *testing.T) {
 		t.Errorf("a tree of 100 blobs of 140 KiB cost %d bytes of range reads; it needs the headers only", got)
 	}
 }
+
+func (s *spy) ConditionalDelete() bool {
+	return !s.unconditional && bucket.DeletesConditionally(s.Store)
+}
+
+func (s *slowBucket) ConditionalDelete() bool { return bucket.DeletesConditionally(s.Store) }
+
+func (b *memBucket) ConditionalDelete() bool { return true }

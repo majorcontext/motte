@@ -22,6 +22,8 @@ type slowBucket struct {
 	d time.Duration
 }
 
+func (s slowBucket) ConditionalDelete() bool { return bucket.DeletesConditionally(s.Store) }
+
 func (s slowBucket) wait(ctx context.Context) error {
 	t := time.NewTimer(s.d)
 	defer t.Stop()
