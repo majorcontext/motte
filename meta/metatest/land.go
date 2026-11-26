@@ -102,7 +102,7 @@ func landLeaseExclusive(t *testing.T, s meta.Store) {
 		t.Errorf("lease end reported to a loser = %v, want %v", end, t0.Add(lease))
 	}
 	ok(t, acquire(s, repoText, landRef, "o1", t0.Add(time.Second), t0.Add(lease+time.Second)))
-	ok(t, acquire(s, repoText, "gh:acme/other", landRef, t0, t0.Add(lease)))
+	ok(t, acquire(s, "gh:acme/other", landRef, "o2", t0, t0.Add(lease)))
 	ok(t, s.ReleaseLandLease(ctx, repoText, landRef, "o2"))
 	is(t, acquire(s, repoText, landRef, "o2", t0.Add(2*time.Second), t0.Add(2*lease)), meta.ErrLeaseHeld)
 	ok(t, s.ReleaseLandLease(ctx, repoText, landRef, "o1"))

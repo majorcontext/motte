@@ -115,7 +115,7 @@ func (s *Store) ClaimLands(ctx context.Context, repo, ref, owner string, now tim
 		picked AS (
 			SELECT id FROM land_queue WHERE repo = $1 AND ref = $2 AND state <> 'done' AND EXISTS (SELECT 1 FROM lease)
 			ORDER BY seq LIMIT $5)
-		UPDATE land_queue q SET state = 'claimed', owner = $3 FROM picked WHERE q.repo = $1 AND q.id = picked.id
+		UPDATE land_queue q SET state = 'claimed', owner = $3 FROM picked WHERE q.repo = $1 AND q.id = picked.id AND q.state <> 'done'
 		RETURNING q.id, q.seq, q.base, q.head, q.kind, q.expect_tree`, repo, ref, owner, now, limit)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: claim lands: %w", err)
