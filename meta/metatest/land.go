@@ -30,6 +30,7 @@ var landCases = []struct {
 	{"a land batch whose condition fails changes nothing", landBatchLoses},
 	{"one racer of many moves a ref with a land batch", oneLandBatchWins},
 	{"items end with no ref move while the lease holds", landFinish},
+	{"deleting a ref deletes its land log and lease", landRefDeleteDropsMeta},
 	{"the land log answers from the latest row of a base and keeps a bounded tail", landLogRules},
 }
 
@@ -288,5 +289,26 @@ func landLogRules(t *testing.T, s meta.Store) {
 	}
 	if rows, _ := s.LandLogSince(ctx, repoText, landRef, tip(n-4), 2); rows != nil {
 		t.Errorf("a window of 2 for 4 rows = %+v, want none", rows)
+	}
+}
+
+func landRefDeleteDropsMeta(t *testing.T, s meta.Store) {
+	for name, del := range map[string]func(meta.Ref) error{
+		"delete by generation": func(r meta.Ref) error { return s.MergeDeleteRef(ctx, repoText, landRef, r.Generation) },
+		"delete by commit": func(r meta.Ref) error {
+			_, err := s.UpdateRef(ctx, repoText, landRef, r.Commit, "", meta.WriterMerge)
+			return err
+		},
+	} {
+		seedLandRef(t, s)
+		lead(t, s, "o1")
+		ref, err := s.LandRef(ctx, landMove(commitA, commitB), "o1", t0)
+		ok(t, err)
+		ok(t, del(ref))
+		if rows, err := s.LandLogSince(ctx, repoText, landRef, commitA, 10); err != nil || len(rows) != 0 {
+			t.Errorf("%s: log = %+v, %v, want none", name, rows, err)
+		}
+		ok(t, s.AcquireLandLease(ctx, repoText, landRef, "o2", t0, t0.Add(lease)))
+		ok(t, s.ReleaseLandLease(ctx, repoText, landRef, "o2"))
 	}
 }

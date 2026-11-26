@@ -514,7 +514,10 @@ func (s *Store) deleteRef(ctx context.Context, w writer, ws string, epoch uint64
 			INSERT INTO events (partition, seq, repo, ref, old_commit, new_commit, generation, kind)
 			SELECT $8::int, $7::bigint, $3::text, $4::text, gone.old_commit, '', $5::bigint, $6::text FROM gone`,
 			ws, int64(epoch), repo, name, expect, w.kind, seq, meta.Partition(repo, name))
-		return tag.RowsAffected() == 1, err
+		if err != nil || tag.RowsAffected() != 1 {
+			return false, err
+		}
+		return true, dropLandMeta(ctx, tx, repo, name)
 	})
 	if err != nil {
 		return fmt.Errorf("postgres: delete ref: %w", err)
@@ -523,6 +526,16 @@ func (s *Store) deleteRef(ctx context.Context, w writer, ws string, epoch uint64
 		return nil
 	}
 	return s.refLost(ctx, w, ws, epoch, repo, name)
+}
+
+// dropLandMeta removes the land log, head and lease of a deleted ref in the transaction of the delete.
+func dropLandMeta(ctx context.Context, tx pgx.Tx, repo, name string) error {
+	for _, table := range []string{"land_log", "land_heads", "land_leases"} {
+		if _, err := tx.Exec(ctx, `DELETE FROM `+table+` WHERE repo = $1 AND ref = $2`, repo, name); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // UpdateRef compares on the commit of the ref instead of its generation. The write and its event commit together.
@@ -557,6 +570,12 @@ func (s *Store) UpdateRef(ctx context.Context, repo, name, old, new, kind string
 		}
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if new == "" {
+			err = dropLandMeta(ctx, tx, repo, name)
 		}
 		return err == nil, err
 	})

@@ -666,7 +666,7 @@ func (s *Store) deleteRef(ctx context.Context, w writer, ws string, epoch uint64
 			}
 			return sql.ErrNoRows
 		}
-		return nil
+		return dropLandMeta(ctx, tx, repo, name)
 	})
 	if err == nil {
 		return nil
@@ -675,6 +675,16 @@ func (s *Store) deleteRef(ctx context.Context, w writer, ws string, epoch uint64
 		return fmt.Errorf("sqlite: delete ref: %w", err)
 	}
 	return s.refLost(ctx, w, ws, epoch, repo, name)
+}
+
+// dropLandMeta removes the land log, head and lease of a deleted ref in the transaction of the delete.
+func dropLandMeta(ctx context.Context, tx *sql.Tx, repo, name string) error {
+	for _, table := range []string{"land_log", "land_heads", "land_leases"} {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE repo = ? AND ref = ?`, repo, name); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // UpdateRef compares on the commit of the ref instead of its generation. Its event insert has the condition of the
@@ -709,7 +719,13 @@ func (s *Store) UpdateRef(ctx context.Context, repo, name, old, new, kind string
 		if _, err := tx.ExecContext(ctx, bumpSeq, part); err != nil {
 			return err
 		}
-		return tx.QueryRowContext(ctx, write, args...).Scan(&generation)
+		if err := tx.QueryRowContext(ctx, write, args...).Scan(&generation); err != nil {
+			return err
+		}
+		if new == "" {
+			return dropLandMeta(ctx, tx, repo, name)
+		}
+		return nil
 	})
 	if err == nil {
 		return meta.Ref{Name: name, Commit: new, Generation: generation}, nil
