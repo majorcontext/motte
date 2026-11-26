@@ -226,14 +226,7 @@ func (s *Store) Claim(ctx context.Context, id string, epoch uint64, owner, repo 
 	if !errors.Is(err, sql.ErrNoRows) {
 		return meta.Workspace{}, fmt.Errorf("sqlite: claim: %w", err)
 	}
-	f, err := s.fence(ctx, id)
-	if err != nil {
-		return meta.Workspace{}, err
-	}
-	if f.Deleted {
-		return meta.Workspace{}, meta.ErrGone
-	}
-	return meta.Workspace{}, meta.ErrWorkspaceConflict
+	return meta.Workspace{}, sqlcore.ClaimLost(ctx, s.probe(), id)
 }
 
 func (s *Store) fence(ctx context.Context, id string) (meta.Fence, error) {

@@ -80,15 +80,7 @@ func (s *Store) AcquireLandLease(ctx context.Context, repo, ref, owner string, n
 	if tag.RowsAffected() > 0 {
 		return until, nil
 	}
-	var end time.Time
-	err = s.Pool.QueryRow(ctx, `SELECT lease_until FROM land_leases WHERE repo = $1 AND ref = $2`, repo, ref).Scan(&end)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return now, meta.ErrLeaseHeld
-	}
-	if err != nil {
-		return time.Time{}, fmt.Errorf("postgres: read land lease end: %w", err)
-	}
-	return end, meta.ErrLeaseHeld
+	return sqlcore.LandLeaseBusy(ctx, s.probe(), repo, ref, now)
 }
 
 func (s *Store) ReleaseLandLease(ctx context.Context, repo, ref, owner string) error {
@@ -240,10 +232,7 @@ func (s *Store) AckLand(ctx context.Context, repo, id string) error {
 	if tag.RowsAffected() > 0 {
 		return nil
 	}
-	if _, err := s.LandItem(ctx, repo, id); err != nil {
-		return err
-	}
-	return meta.ErrLandPending
+	return sqlcore.AckLandLost(ctx, s.probe(), repo, id)
 }
 
 func (s *Store) PruneLands(ctx context.Context, before time.Time) error {

@@ -2,8 +2,11 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/majorcontext/motte/internal/meta/sqlcore"
 	"github.com/majorcontext/motte/meta"
@@ -38,4 +41,20 @@ func (p probe) LandLeaseHeld(ctx context.Context, repo, ref, owner string, now t
 		return false, fmt.Errorf("postgres: read land lease: %w", err)
 	}
 	return held, nil
+}
+
+func (p probe) LandLeaseEnd(ctx context.Context, repo, ref string) (time.Time, error) {
+	var end time.Time
+	err := p.s.Pool.QueryRow(ctx, `SELECT lease_until FROM land_leases WHERE repo = $1 AND ref = $2`, repo, ref).Scan(&end)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, meta.ErrNotFound
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("postgres: read land lease end: %w", err)
+	}
+	return end, nil
+}
+
+func (p probe) LandItem(ctx context.Context, repo, id string) (meta.LandItem, error) {
+	return p.s.LandItem(ctx, repo, id)
 }
