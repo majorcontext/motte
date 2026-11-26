@@ -24,8 +24,8 @@ import (
 	"github.com/majorcontext/motte/internal/pktline"
 	"github.com/majorcontext/motte/internal/server"
 	"github.com/majorcontext/motte/internal/store"
-	"github.com/majorcontext/motte/internal/testcount"
 	"github.com/majorcontext/motte/testserver"
+	"github.com/majorcontext/tools/testcount"
 )
 
 type gitEnv struct {

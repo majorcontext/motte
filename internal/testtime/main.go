@@ -14,7 +14,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/majorcontext/motte/internal/testcount"
+	"github.com/majorcontext/tools/testcount"
 )
 
 const modulePath = "github.com/majorcontext/motte"

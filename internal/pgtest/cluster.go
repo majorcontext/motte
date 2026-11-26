@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/majorcontext/motte/internal/testcount"
+	"github.com/majorcontext/tools/testcount"
 )
 
 // BinEnv names a directory that holds initdb and postgres. Without it, Pool looks for both on PATH.

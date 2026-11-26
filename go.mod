@@ -12,6 +12,7 @@ require (
 	github.com/container-storage-interface/spec v1.13.0
 	github.com/hanwen/go-fuse/v2 v2.11.0
 	github.com/jackc/pgx/v5 v5.13.0
+	github.com/majorcontext/tools v0.2.1-0.20261126214138-69f01f16f443
 	github.com/prometheus/client_golang v1.25.0
 	go.opentelemetry.io/contrib/bridges/prometheus v0.72.0
 	go.opentelemetry.io/otel v1.47.0
@@ -70,7 +71,6 @@ require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.3 // indirect
-	github.com/majorcontext/tools v0.1.1-0.20261126195513-3703b0e36fb9 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/ncruces/go-strftime v1.1.0 // indirect
@@ -107,4 +107,5 @@ require (
 tool (
 	github.com/majorcontext/tools/cmd/leaklint
 	github.com/majorcontext/tools/cmd/lint
+	github.com/majorcontext/tools/cmd/testtime
 )

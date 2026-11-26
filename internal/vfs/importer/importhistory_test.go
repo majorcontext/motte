@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"github.com/majorcontext/motte/internal/gitpack"
-	"github.com/majorcontext/motte/internal/testcount"
+	"github.com/majorcontext/tools/testcount"
 )
 
 type packSink struct {

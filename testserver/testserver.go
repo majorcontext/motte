@@ -20,9 +20,9 @@ import (
 	"github.com/majorcontext/motte/internal/meta/postgres"
 	"github.com/majorcontext/motte/internal/pgtest"
 	"github.com/majorcontext/motte/internal/server"
-	"github.com/majorcontext/motte/internal/testcount"
 	"github.com/majorcontext/motte/meta"
 	"github.com/majorcontext/motte/meta/sqlite"
+	"github.com/majorcontext/tools/testcount"
 )
 
 // DSNEnv is the environment variable that Start reads when it gets no DSN.

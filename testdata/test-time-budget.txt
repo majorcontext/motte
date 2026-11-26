@@ -1,4 +1,4 @@
-# Time budgets for go test, read by internal/testtime.
+# Time budgets for go test, read by testtime of majorcontext/tools.
 #   leaf SECONDS                  a test that has no subtests
 #   package PATH|default SECONDS  wall time of one package; PATH@JOB sets it for one job
 #   test PATH NAME SECONDS        tests of PATH whose name starts with NAME
@@ -38,4 +38,4 @@ count internal/vfs/store servers 2
 count internal/vfs/store schemas 2
 count internal/vfs/store processes 1
 count internal/vfs/importer processes 12
-count internal/seams processes 2
+count internal/repocheck processes 2

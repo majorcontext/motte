@@ -59,7 +59,7 @@ jobs:
           GORACE: atexit_sleep_ms=0
         run: |
           set -o pipefail
-          go test -race -count=1 -p 1 -json ./... | go run ./internal/testtime -title Unit -job go
+          go test -race -count=1 -p 1 -json ./... | go tool testtime -title Unit -job go
       # A skipped suite passes in the run above, so this step prints the suites and fails on a skip.
       - run: |
           set -o pipefail
@@ -74,14 +74,14 @@ jobs:
           GORACE: atexit_sleep_ms=0
         run: |
           set -o pipefail
-          go test -race -count=1 -p 1 -json ./internal/vfs/testdata/overlaykit | go run ./internal/testtime -title Overlaykit -job go
+          go test -race -count=1 -p 1 -json ./internal/vfs/testdata/overlaykit | go tool testtime -title Overlaykit -job go
       # The overlay and upper directory tests mount file systems and read trusted.* attributes, so they need root.
       - run: go test -race -count=1 -run '^$' ./internal/vfs/...
       - env:
           GORACE: atexit_sleep_ms=0
         run: |
           set -o pipefail
-          sudo -E env "PATH=$PATH" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" go test -race -count=1 -p 1 -json ./internal/vfs/... | go run ./internal/testtime -title 'Privileged vfs' -job vfs
+          sudo -E env "PATH=$PATH" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" go test -race -count=1 -p 1 -json ./internal/vfs/... | go tool testtime -title 'Privileged vfs' -job vfs
       - run: helm lint charts/motte-vfsd --set apiURL=http://store.example --set image.repository=registry.example/motte-vfsd --set image.tag=v0.0.0 --set 'allowedNamespaces={workspaces}'
       - run: |
           helm template motte-vfsd charts/motte-vfsd --set apiURL=http://store.example --set image.repository=registry.example/motte-vfsd --set image.tag=v0.0.0 2>&1 | grep -q 'allowedNamespaces is required'

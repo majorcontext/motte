@@ -20,7 +20,7 @@ The CI job `leak` runs `go tool leaklint` (majorcontext/tools) against the secre
 - Added test lines stay at or below added code lines.
 - No wall-clock waits in tests: `time.Sleep` and `time.After` only inside a `synctest.Test` bubble; otherwise use channels. A wait that no bubble can hold, such as a cross-process wait, carries a `//lint:allow wallclock REASON` comment on its line. The analyzer `wallclock` of majorcontext/tools enforces this (`go tool lint`).
 - Run Go tests with `-race`.
-- A test is at most 10 s and a package at most 10 s, unless `testdata/test-time-budget.txt` says more. Make a slow test fast; raise a budget only with a stated reason in the same change. `internal/testtime` enforces the budget in CI. CI times each package alone (`go test -p 1`), so a package time is its own cost.
+- A test is at most 10 s and a package at most 10 s, unless `testdata/test-time-budget.txt` says more. Make a slow test fast; raise a budget only with a stated reason in the same change. `testtime` of `majorcontext/tools` enforces the budget in CI. CI times each package alone (`go test -p 1`), so a package time is its own cost.
 
 ### Test cost
 
@@ -28,8 +28,8 @@ Test time differs by machine, so the repository limits the causes of slow tests 
 
 - Every top-level `TestXxx` calls `t.Parallel()` on its own `t`, directly or through a helper of the same package that calls it. A test that cannot run in parallel is listed in `testdata/serial-tests.txt`, one `package TestName reason` per line, where `package` is the import path below the module path. A line without a reason, and a line that names a test that does not exist or already runs in parallel, fails the analyzer `paralleltests` of majorcontext/tools.
 - PostgreSQL tests use `MOTTE_TEST_DATABASE_URL` when it is set. Otherwise `pgtest` starts one throwaway cluster for each package from `initdb` and `postgres` on `PATH` or in `MOTTE_TEST_PG_BIN`, and the cluster counts as one process. `MOTTE_TEST_REQUIRE_PG=1` makes a missing database fail the test instead of skipping it. The check `budget` of `.ward/checks.json` sets both, with the PostgreSQL 17 binaries of the box image, so the land gate runs every PostgreSQL test.
-- A test helper that starts a server (`testserver.Start`, `testserver.StartLocal`), creates a PostgreSQL schema (`pgtest.Pool`) or starts a process (`testcount.Command`) counts it through `internal/testcount`. A package that uses these helpers calls `testcount.Run` from its `TestMain`; the helpers fail a test in a package that does not. At the end of the run the package prints one line `motte-testcount {"processes":N,"schemas":N,"servers":N}`. Under `-count=N` the counts are those of one run. A cached run prints the same line.
-- `testdata/test-time-budget.txt` holds one limit for each count: `count PATH NAME MAX` for one package, `count default NAME MAX` for a package without its own line. A package or name without a line, and without a default, has the limit 0. `internal/testtime` fails a package whose count passes its limit and prints the counts. A change that raises a count raises its line in the same diff and states why.
+- A test helper that starts a server (`testserver.Start`, `testserver.StartLocal`), creates a PostgreSQL schema (`pgtest.Pool`) or starts a process (`testcount.Command`) counts it through `testcount` of `majorcontext/tools`. A package that uses these helpers calls `testcount.Run` from its `TestMain`; the helpers fail a test in a package that does not. At the end of the run the package prints one line `testcount {"processes":N,"schemas":N,"servers":N}`. Under `-count=N` the counts are those of one run. A cached run prints the same line.
+- `testdata/test-time-budget.txt` holds one limit for each count: `count PATH NAME MAX` for one package, `count default NAME MAX` for a package without its own line. A package or name without a line, and without a default, has the limit 0. `testtime` of `majorcontext/tools` fails a package whose count passes its limit and prints the counts. A change that raises a count raises its line in the same diff and states why.
 - `testtime` runs a fixed calibration workload (a CPU loop and a loop of file create, write, stat and remove) after the test stream ends, when the machine is idle. The line `calibrate SECONDS` of the budget file is the calibration time on the reference runner, the GitHub `ubuntu-latest` job. `testtime` multiplies every time budget by measured divided by reference, and never by less than 1. It prints the calibration time and the factor.
 - `testtime` prints, for each package, the sum of the time of its leaf tests divided by the wall time of the package. The ratio has no limit.
 
@@ -41,7 +41,7 @@ Test time differs by machine, so the repository limits the causes of slow tests 
 - Name a provider host only in a file of `testdata/provider-hosts.txt`.
 - Update the seams table in the same diff as a change to a seam.
 - A seam that does not meet the rule is a gap row in the table and a line of `testdata/seam-gaps.txt`. The list only shrinks.
-- `internal/seams` enforces these rules in `go test`.
+- `seams` of `majorcontext/tools` enforces these rules in `go test`.
 
 ## Comments
 
@@ -69,7 +69,7 @@ ward lands a branch onto `main` only after it runs the checks of `.ward/checks.j
 go build ./...
 go vet ./...
 go tool lint ./...
-MOTTE_TEST_PG_BIN=/usr/lib/postgresql/17/bin MOTTE_TEST_REQUIRE_PG=1 go test -race -count=1 -p 1 -json ./... | go run ./internal/testtime
+MOTTE_TEST_PG_BIN=/usr/lib/postgresql/17/bin MOTTE_TEST_REQUIRE_PG=1 go test -race -count=1 -p 1 -json ./... | go tool testtime
 test -z "$(gofmt -l .)"
 LEAK_DENYLIST="$(cat denylist.txt)" go tool leaklint
 ```

@@ -38,7 +38,6 @@ Non-goals:
 | `devicelogin` | Signs a person in with the OAuth device authorization grant against an OIDC issuer and keeps the token in a private file. Public package. | M3 |
 | `identity`, `identity/oidc`, `identity/usertoken` | Verifies the credential of a request into a `Principal`, matches rules, and keeps per-user token hashes. Public packages. `internal/access` turns a principal and a scope into claims. | M3 |
 | `testserver` | Starts a real server in a caller's test, on PostgreSQL (`Start`) or on SQLite and a temporary directory (`StartLocal`). Public package. | M3 |
-| `internal/testcount` | Counts the servers, PostgreSQL schemas and processes that the test helpers start, and prints the counts of a package at the end of its test run for `internal/testtime`. | M3 |
 | `internal/vfs/...`, `cmd/motte-vfsd`, `volume` | Node daemon that serves a virtual workspace, and its public volume attributes. | M4 |
 | `cmd/motte-loadtest` | Load test. `gen` builds a synthetic repository of any object count in a running service by `PUT /v1/vcs/packs/{pack_id}` (`-via push` sends each pack of about `-pack-objects` objects, cut at a commit, by `git-receive-pack` to a ref of its own, as many pushes build a repository), and `run` drives a weighted mix of concurrent reads, fetches, pushes, ref swaps and lands, or with `-scenario agents` one coding-agent session for each client (git clones, fetches and pushes), or with `-scenario vfsd` one agent for each client that works as a workspace daemon does (a commit read and one bulk tree read of 30000 entries when it mounts, blob reads with read-ahead, one object upload and one ref swap for each snapshot, and a land), and reports latency percentiles, errors, the cache counters of `/metrics` and the CPU and memory of named processes, and `bench` runs a service, PostgreSQL and the load client in containers of one host on a real bucket, alone or as A/B pairs of two service binaries (see Load test). Not part of the service. | M8 |
 | jj backend | `jj/`: the jj binary whose stores and working copy use the workspace daemon. Released for linux amd64 and arm64. | M5 |
@@ -493,7 +492,7 @@ A backend implements the interface and returns the sentinel errors of its packag
 
 ## Provider seams
 
-Every external provider sits behind an interface that its consumer owns. A provider is a database, an object store, a forge, a cloud API or a remote credential source. A seam has a conformance suite that every implementation runs, and at least two implementations: a local or in-memory implementation counts. The table lists each seam. `internal/seams` checks the table against the code in CI.
+Every external provider sits behind an interface that its consumer owns. A provider is a database, an object store, a forge, a cloud API or a remote credential source. A seam has a conformance suite that every implementation runs, and at least two implementations: a local or in-memory implementation counts. The table lists each seam. `seams` of `majorcontext/tools` checks the table against the code in CI.
 
 | Seam | Interface | Suite | Implementations | Gap |
 |---|---|---|---|---|
@@ -506,7 +505,7 @@ Every external provider sits behind an interface that its consumer owns. A provi
 - A seam that meets the rule has an interface, a suite and at least two implementations. A seam that does not has a reason in the Gap column, and its name is a line of `testdata/seam-gaps.txt`. The list only shrinks: CI fails a gap that the merge base does not list.
 - A package under the directory of the interface (the suite excepted), or a package that holds `var _ pkg.Interface = ...`, is an implementation. The table must list it.
 - Each implementation has a test that calls the suite function.
-- Only an implementation package, a package under `cmd/`, or a package in `testdata/provider-sdk-importers.txt` imports a provider SDK. The SDK prefixes are in `internal/seams/providers.go`.
+- Only an implementation package, a package under `cmd/`, or a package in `testdata/provider-sdk-importers.txt` imports a provider SDK. The SDK prefixes are in `seams/providers.go` of `majorcontext/tools`.
 - A provider host name (`ghcr.io`, `github.com`, `api.github.com`, `googleapis.com`, `amazonaws.com`, `r2.cloudflarestorage.com`) appears only in a Go string literal or a YAML file of `.github` or `charts` that `testdata/provider-hosts.txt` lists. The module path and import paths are not literals for this rule.
 - A change to a seam updates the table in the same diff.
 

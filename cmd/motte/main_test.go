@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/majorcontext/motte/internal/testcount"
 	"github.com/majorcontext/motte/testserver"
+	"github.com/majorcontext/tools/testcount"
 )
 
 func TestMain(m *testing.M) { os.Exit(testcount.Run(m)) }

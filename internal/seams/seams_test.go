@@ -6,79 +6,10 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/majorcontext/motte/internal/testcount"
+	"github.com/majorcontext/tools/testcount"
 )
 
 func TestMain(m *testing.M) { os.Exit(testcount.Run(m)) }
-
-func readAllow(t *testing.T, name string) map[string]string {
-	t.Helper()
-	raw, err := os.ReadFile("../../testdata/" + name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	m, err := ParseAllowlist(name, raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return m
-}
-
-// gapsAtMergeBase reads the gap file at the merge base with GATES_BASE_REF (default origin/main). A missing base
-// skips the shrink check, unless SEAMS_REQUIRED is 1.
-func gapsAtMergeBase(t *testing.T) (map[string]string, bool) {
-	t.Helper()
-	ref := os.Getenv("GATES_BASE_REF")
-	if ref == "" {
-		ref = "origin/main"
-	}
-	sha, err := testcount.Command(t, "git", "-C", "../..", "merge-base", "HEAD", ref).Output()
-	if err != nil {
-		if os.Getenv("SEAMS_REQUIRED") == "1" {
-			t.Fatalf("find the merge base of HEAD and %s: %v", ref, err)
-		}
-		return nil, false
-	}
-	raw, err := testcount.Command(t, "git", "-C", "../..", "show", strings.TrimSpace(string(sha))+":testdata/seam-gaps.txt").Output()
-	if err != nil {
-		return nil, false
-	}
-	m, err := ParseAllowlist("seam-gaps.txt", raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return m, true
-}
-
-func TestRepositorySeams(t *testing.T) {
-	t.Parallel()
-	root := os.DirFS("../..")
-	m, err := Load(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	doc, err := os.ReadFile("../../docs/architecture.md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	seams, err := ParseTable(doc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	atBase, haveBase := gapsAtMergeBase(t)
-	hits, err := HostHits(m)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var all []string
-	all = append(all, CheckTable(m, seams)...)
-	all = append(all, CheckGaps(seams, readAllow(t, "seam-gaps.txt"), atBase, haveBase)...)
-	all = append(all, CheckSDKImports(m, ImplDirs(seams), readAllow(t, "provider-sdk-importers.txt"))...)
-	all = append(all, CheckHosts(hits, readAllow(t, "provider-hosts.txt"))...)
-	for _, v := range all {
-		t.Error(v)
-	}
-}
 
 const fixtureTable = `## Provider seams
 
