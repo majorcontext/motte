@@ -90,7 +90,7 @@ func TestAStalledClaimDoesNotReopenADoneLand(t *testing.T) {
 	if c := <-claimed; c.err != nil || len(c.items) != 0 {
 		t.Fatalf("claim = %+v, want no items: the land was done", c)
 	}
-	if it, err := s.LandItem(ctx, repo, "a"); err != nil || !it.Done {
+	if it, err := s.LandItem(ctx, repo, "a"); err != nil || it.State != meta.LandStateDone {
 		t.Fatalf("item = %+v, %v, want it done", it, err)
 	}
 }

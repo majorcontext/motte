@@ -11,9 +11,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/quartz"
+
 	"github.com/majorcontext/motte/api"
 	"github.com/majorcontext/motte/client"
 	"github.com/majorcontext/motte/internal/server"
+	"github.com/majorcontext/motte/meta"
 )
 
 func tenLines(edits map[int]string) string {
@@ -143,5 +146,73 @@ func TestLandTrialMatchesLandAndMovesNothing(t *testing.T) {
 		if bad.status != 400 || bad.code != "invalid_body" {
 			t.Errorf("a change with no base = %d %s, want 400 invalid_body", bad.status, bad.code)
 		}
+	})
+}
+
+func TestLandResultStaysUntilTheCallerAcknowledgesIt(t *testing.T) {
+	eachBackend(t, func(t *testing.T, l *landEnv) {
+		ctx := context.Background()
+		var o objSet
+		c1 := o.commit(map[string]string{"a": "1"}, "", "c1", l.root)
+		o.upload(t, l.env, l.repo)
+		req := api.LandRequest{ID: "ack-land-1", Ref: "main", Base: l.root, Head: c1}
+		first, err := l.merge.Land(ctx, l.repo, req)
+		again, err2 := l.merge.Land(ctx, l.repo, req)
+		if err != nil || err2 != nil || again.Tip != first.Tip || again.Generation != first.Generation {
+			t.Fatalf("repeat = %+v, %v, %v; want the first result %+v", again, err, err2, first)
+		}
+		refuses(t, l.reader.AckLand(ctx, l.repo, req.ID), client.ErrRepoForbidden, 403)
+		refuses(t, l.merge.AckLand(ctx, "gh:acme/other", req.ID), client.ErrRepoForbidden, 403)
+		refuses(t, l.merge.AckLand(ctx, l.repo, "unknown-id-1"), client.ErrNotFound, 404)
+		at := l.tip("main")
+		for range 2 {
+			if err := l.merge.AckLand(ctx, l.repo, req.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		_, err = l.merge.Land(ctx, l.repo, req)
+		refuses(t, err, client.ErrLandAcknowledged, 410)
+		if l.tip("main") != at {
+			t.Errorf("a repeat of an acknowledged id moved main to %+v, want %+v", l.tip("main"), at)
+		}
+	})
+}
+
+func TestAWaitingRequestFindsTheTombstoneOfItsLand(t *testing.T) {
+	eachBackend(t, func(t *testing.T, l *landEnv) {
+		ctx := context.Background()
+		var o objSet
+		c1 := o.commit(map[string]string{"a": "1"}, "", "c1", l.root)
+		o.upload(t, l.env, l.repo)
+		clk := quartz.NewMock(t)
+		now := clk.Now()
+		if _, err := l.Meta.AcquireLandLease(ctx, l.repo, "main", "other-replica", now, now.Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		srv := httptest.NewServer(server.New(server.Config{Meta: l.Meta, Bucket: l.Bucket, Verifier: l.Verifier, Events: server.EventsConfig{Clock: clk},
+			Lands: server.LandsConfig{Lease: 2 * time.Hour, Poll: time.Minute, Timeout: 3 * time.Hour}}).Handler())
+		t.Cleanup(srv.Close)
+		timers := clk.Trap().NewTimer()
+		done := make(chan error, 1)
+		go func() {
+			_, err := client.New(srv.URL, client.StaticGrant(l.MergeGrant(t, l.repo))).Land(ctx, l.repo, api.LandRequest{ID: "waiting-id-1", Ref: "main", Base: l.root, Head: c1})
+			done <- err
+		}()
+		for range 3 {
+			timers.MustWait(ctx).MustRelease(ctx)
+		}
+		timers.Close()
+		result := `{"land":{"id":"waiting-id-1","ref":"main","tip":"` + c1 + `"}}`
+		if _, err := l.Meta.ClaimLands(ctx, l.repo, "main", "other-replica", now, 10); err != nil {
+			t.Fatal(err)
+		}
+		if err := l.Meta.FinishLands(ctx, l.repo, "main", "other-replica", now, []meta.LandDone{{ID: "waiting-id-1", Result: result}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := l.Meta.AckLand(ctx, l.repo, "waiting-id-1"); err != nil {
+			t.Fatal(err)
+		}
+		clk.Advance(time.Minute).MustWait(ctx)
+		refuses(t, <-done, client.ErrLandAcknowledged, 410)
 	})
 }
