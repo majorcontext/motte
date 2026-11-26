@@ -68,18 +68,26 @@ func (s *Store) LandPending(ctx context.Context) ([]meta.LandKey, error) {
 	return out, nil
 }
 
-func (s *Store) AcquireLandLease(ctx context.Context, repo, ref, owner string, now, until time.Time) error {
+func (s *Store) AcquireLandLease(ctx context.Context, repo, ref, owner string, now, until time.Time) (time.Time, error) {
 	tag, err := s.Pool.Exec(ctx, `
 		INSERT INTO land_leases (repo, ref, owner, lease_until) VALUES ($1, $2, $3, $5)
 		ON CONFLICT (repo, ref) DO UPDATE SET owner = $3, lease_until = $5
 		WHERE land_leases.owner = $3 OR land_leases.lease_until <= $4`, repo, ref, owner, now, until)
 	if err != nil {
-		return fmt.Errorf("postgres: acquire land lease: %w", err)
+		return time.Time{}, fmt.Errorf("postgres: acquire land lease: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return meta.ErrLeaseHeld
+	if tag.RowsAffected() > 0 {
+		return until, nil
 	}
-	return nil
+	var end time.Time
+	err = s.Pool.QueryRow(ctx, `SELECT lease_until FROM land_leases WHERE repo = $1 AND ref = $2`, repo, ref).Scan(&end)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return now, meta.ErrLeaseHeld
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("postgres: read land lease end: %w", err)
+	}
+	return end, meta.ErrLeaseHeld
 }
 
 func (s *Store) ReleaseLandLease(ctx context.Context, repo, ref, owner string) error {

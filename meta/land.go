@@ -71,8 +71,9 @@ type LandStore interface {
 	// LandPending lists the refs that have an item that is not done.
 	LandPending(ctx context.Context) ([]LandKey, error)
 	// AcquireLandLease gives owner the lease of a ref until the time until, when no owner holds it at now or owner holds
-	// it. ErrLeaseHeld otherwise.
-	AcquireLandLease(ctx context.Context, repo, ref, owner string, now, until time.Time) error
+	// it, and returns until. It returns ErrLeaseHeld otherwise, with the end of the lease of the other owner, so a
+	// caller can wait for the rest of it.
+	AcquireLandLease(ctx context.Context, repo, ref, owner string, now, until time.Time) (time.Time, error)
 	// ReleaseLandLease ends the lease of owner at once. A lease of another owner stays.
 	ReleaseLandLease(ctx context.Context, repo, ref, owner string) error
 	// ClaimLands marks as claimed by owner, and returns, the oldest items of a ref that are not done, at most limit,

@@ -90,10 +90,10 @@ func (s *Server) lead(ctx context.Context, key meta.LandKey, l *leader) {
 	defer l.holding.Store(false)
 	for idle := 0; ; {
 		now := s.events.Clock.Now()
-		items, err := s.claimLands(ctx, key, owner, now)
+		items, heldUntil, err := s.claimLands(ctx, key, owner, now)
 		l.holding.Store(err == nil)
 		if errors.Is(err, meta.ErrLeaseHeld) {
-			if !s.sleepLead(ctx, s.lands.Lease) {
+			if !s.waitLease(ctx, l, heldUntil.Sub(s.events.Clock.Now())) {
 				s.dropLead(key, l)
 				return
 			}
@@ -152,24 +152,32 @@ func (s *Server) idleLead(ctx context.Context, l *leader) {
 	}
 }
 
-// sleepLead waits for d, the longest that a lease of another replica can still run, and reports false when the hub
-// closed first.
-func (s *Server) sleepLead(ctx context.Context, d time.Duration) bool {
+// waitLease waits for d, the rest of the lease of another replica, and ends early when a request kicks the leader. It
+// waits one poll when the end has passed, so it makes no busy loop. It reports false when the hub closed first.
+func (s *Server) waitLease(ctx context.Context, l *leader, d time.Duration) bool {
+	if d <= 0 {
+		d = s.lands.Poll
+	}
 	t := s.events.Clock.NewTimer(d)
 	defer t.Stop()
 	select {
 	case <-t.C:
-		return true
+	case <-l.wake:
 	case <-ctx.Done():
 		return false
 	}
+	return true
 }
 
-func (s *Server) claimLands(ctx context.Context, key meta.LandKey, owner string, now time.Time) ([]meta.LandItem, error) {
-	if err := s.index.AcquireLandLease(ctx, key.Repo, key.Ref, owner, now, now.Add(s.lands.Lease)); err != nil {
-		return nil, err
+// claimLands takes the lease and claims the items. When another owner holds the lease it returns ErrLeaseHeld and the
+// end of that lease.
+func (s *Server) claimLands(ctx context.Context, key meta.LandKey, owner string, now time.Time) ([]meta.LandItem, time.Time, error) {
+	until, err := s.index.AcquireLandLease(ctx, key.Repo, key.Ref, owner, now, now.Add(s.lands.Lease))
+	if err != nil {
+		return nil, until, err
 	}
-	return s.index.ClaimLands(ctx, key.Repo, key.Ref, owner, now, s.lands.MaxBatch)
+	items, err := s.index.ClaimLands(ctx, key.Repo, key.Ref, owner, now, s.lands.MaxBatch)
+	return items, now, err
 }
 
 func (s *Server) failLands(ctx context.Context, key meta.LandKey, owner string, items []meta.LandItem) {

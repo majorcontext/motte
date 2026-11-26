@@ -59,21 +59,30 @@ func (s *Store) LandPending(ctx context.Context) ([]meta.LandKey, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) AcquireLandLease(ctx context.Context, repo, ref, owner string, now, until time.Time) error {
+func (s *Store) AcquireLandLease(ctx context.Context, repo, ref, owner string, now, until time.Time) (time.Time, error) {
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO land_leases (repo, ref, owner, lease_until) VALUES (?1, ?2, ?3, ?5)
 		ON CONFLICT (repo, ref) DO UPDATE SET owner = ?3, lease_until = ?5
 		WHERE land_leases.owner = ?3 OR land_leases.lease_until <= ?4`, repo, ref, owner, now.UnixMicro(), until.UnixMicro())
 	if err != nil {
-		return fmt.Errorf("sqlite: acquire land lease: %w", err)
+		return time.Time{}, fmt.Errorf("sqlite: acquire land lease: %w", err)
 	}
-	if n, err := res.RowsAffected(); err != nil || n == 0 {
-		if err != nil {
-			return err
-		}
-		return meta.ErrLeaseHeld
+	n, err := res.RowsAffected()
+	if err != nil {
+		return time.Time{}, err
 	}
-	return nil
+	if n > 0 {
+		return until, nil
+	}
+	var end int64
+	err = s.db.QueryRowContext(ctx, `SELECT lease_until FROM land_leases WHERE repo = ? AND ref = ?`, repo, ref).Scan(&end)
+	if errors.Is(err, sql.ErrNoRows) {
+		return now, meta.ErrLeaseHeld
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("sqlite: read land lease end: %w", err)
+	}
+	return time.UnixMicro(end), meta.ErrLeaseHeld
 }
 
 func (s *Store) ReleaseLandLease(ctx context.Context, repo, ref, owner string) error {

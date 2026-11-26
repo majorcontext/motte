@@ -57,7 +57,7 @@ func TestCloseEndsALeaderThatWaitsForAnotherLease(t *testing.T) {
 	eachBackend(t, func(t *testing.T, l *landEnv) {
 		ctx := context.Background()
 		now := time.Now()
-		if err := l.Meta.AcquireLandLease(ctx, l.repo, "main", "other-replica", now, now.Add(time.Hour)); err != nil {
+		if _, err := l.Meta.AcquireLandLease(ctx, l.repo, "main", "other-replica", now, now.Add(time.Hour)); err != nil {
 			t.Fatal(err)
 		}
 		replica := server.New(server.Config{Meta: l.Meta, Bucket: l.Bucket, Verifier: l.Verifier, Events: server.EventsConfig{Instance: "replica-3"},

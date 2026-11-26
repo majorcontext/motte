@@ -48,9 +48,15 @@ func enqueue(t *testing.T, s meta.Store, id string) meta.LandItem {
 	return it
 }
 
+// acquire is AcquireLandLease without the end of the lease.
+func acquire(s meta.Store, repo, ref, owner string, now, until time.Time) error {
+	_, err := s.AcquireLandLease(ctx, repo, ref, owner, now, until)
+	return err
+}
+
 func lead(t *testing.T, s meta.Store, owner string) {
 	t.Helper()
-	ok(t, s.AcquireLandLease(ctx, repoText, landRef, owner, t0, t0.Add(lease)))
+	ok(t, acquire(s, repoText, landRef, owner, t0, t0.Add(lease)))
 }
 
 func claimIDs(t *testing.T, s meta.Store, owner string, limit int) []string {
@@ -89,16 +95,21 @@ func landQueueOrder(t *testing.T, s meta.Store) {
 
 func landLeaseExclusive(t *testing.T, s meta.Store) {
 	lead(t, s, "o1")
-	is(t, s.AcquireLandLease(ctx, repoText, landRef, "o2", t0.Add(lease-time.Second), t0.Add(2*lease)), meta.ErrLeaseHeld)
-	ok(t, s.AcquireLandLease(ctx, repoText, landRef, "o1", t0.Add(time.Second), t0.Add(lease+time.Second)))
-	ok(t, s.AcquireLandLease(ctx, repoText, "gh:acme/other", landRef, t0, t0.Add(lease)))
+	is(t, acquire(s, repoText, landRef, "o2", t0.Add(lease-time.Second), t0.Add(2*lease)), meta.ErrLeaseHeld)
+	end, err := s.AcquireLandLease(ctx, repoText, landRef, "o2", t0.Add(lease-time.Second), t0.Add(2*lease))
+	is(t, err, meta.ErrLeaseHeld)
+	if !end.Equal(t0.Add(lease)) {
+		t.Errorf("lease end reported to a loser = %v, want %v", end, t0.Add(lease))
+	}
+	ok(t, acquire(s, repoText, landRef, "o1", t0.Add(time.Second), t0.Add(lease+time.Second)))
+	ok(t, acquire(s, repoText, "gh:acme/other", landRef, t0, t0.Add(lease)))
 	ok(t, s.ReleaseLandLease(ctx, repoText, landRef, "o2"))
-	is(t, s.AcquireLandLease(ctx, repoText, landRef, "o2", t0.Add(2*time.Second), t0.Add(2*lease)), meta.ErrLeaseHeld)
+	is(t, acquire(s, repoText, landRef, "o2", t0.Add(2*time.Second), t0.Add(2*lease)), meta.ErrLeaseHeld)
 	ok(t, s.ReleaseLandLease(ctx, repoText, landRef, "o1"))
-	ok(t, s.AcquireLandLease(ctx, repoText, landRef, "o2", t0.Add(2*time.Second), t0.Add(2*lease)))
-	ok(t, s.AcquireLandLease(ctx, repoText, landRef, "o3", t0.Add(2*lease), t0.Add(3*lease)))
+	ok(t, acquire(s, repoText, landRef, "o2", t0.Add(2*time.Second), t0.Add(2*lease)))
+	ok(t, acquire(s, repoText, landRef, "o3", t0.Add(2*lease), t0.Add(3*lease)))
 	onlyOneWins(t, race(func(i int) error {
-		return s.AcquireLandLease(ctx, repoText, "raced", fmt.Sprint("o", i), t0, t0.Add(lease))
+		return acquire(s, repoText, "raced", fmt.Sprint("o", i), t0, t0.Add(lease))
 	}), func(err error) bool { return err == meta.ErrLeaseHeld })
 }
 
@@ -112,7 +123,7 @@ func landCrashRecovery(t *testing.T, s meta.Store) {
 	later := t0.Add(2 * lease)
 	_, err := s.ClaimLands(ctx, repoText, landRef, "o1", later, 10)
 	is(t, err, meta.ErrLeaseHeld)
-	ok(t, s.AcquireLandLease(ctx, repoText, landRef, "o2", later, later.Add(lease)))
+	ok(t, acquire(s, repoText, landRef, "o2", later, later.Add(lease)))
 	items, err := s.ClaimLands(ctx, repoText, landRef, "o2", later, 10)
 	ok(t, err)
 	if len(items) != 2 || items[0].ID != "b" || items[1].ID != "c" {
@@ -308,7 +319,7 @@ func landRefDeleteDropsMeta(t *testing.T, s meta.Store) {
 		if rows, err := s.LandLogSince(ctx, repoText, landRef, commitA, 10); err != nil || len(rows) != 0 {
 			t.Errorf("%s: log = %+v, %v, want none", name, rows, err)
 		}
-		ok(t, s.AcquireLandLease(ctx, repoText, landRef, "o2", t0, t0.Add(lease)))
+		ok(t, acquire(s, repoText, landRef, "o2", t0, t0.Add(lease)))
 		ok(t, s.ReleaseLandLease(ctx, repoText, landRef, "o2"))
 	}
 }

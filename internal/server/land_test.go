@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/quartz"
+
 	"github.com/majorcontext/motte/api"
 	"github.com/majorcontext/motte/client"
 	"github.com/majorcontext/motte/internal/server"
@@ -352,7 +354,7 @@ func TestLandRecoversAClaimedItemAndLeadsAcrossReplicas(t *testing.T) {
 		if _, err := l.Meta.EnqueueLand(ctx, meta.LandRequest{ID: "claimed-then-lost", Repo: l.repo, Ref: "main", Base: l.root, Head: lost, Kind: meta.WriterMerge}, now); err != nil {
 			t.Fatal(err)
 		}
-		if err := l.Meta.AcquireLandLease(ctx, l.repo, "main", "replica-dead", now, now.Add(cfg.Lands.Lease)); err != nil {
+		if _, err := l.Meta.AcquireLandLease(ctx, l.repo, "main", "replica-dead", now, now.Add(cfg.Lands.Lease)); err != nil {
 			t.Fatal(err)
 		}
 		if items, err := l.Meta.ClaimLands(ctx, l.repo, "main", "replica-dead", now, 10); err != nil || len(items) != 1 {
@@ -484,11 +486,12 @@ func TestLandLeaderWaitsForTheLeaseOfAnotherOwnerAndThenLands(t *testing.T) {
 		}
 		o.upload(t, l.env, l.repo)
 		now := time.Now()
-		if err := l.Meta.AcquireLandLease(context.Background(), l.repo, "main", "other-owner", now, now.Add(100*time.Millisecond)); err != nil {
+		if _, err := l.Meta.AcquireLandLease(context.Background(), l.repo, "main", "other-owner", now, now.Add(100*time.Millisecond)); err != nil {
 			t.Fatal(err)
 		}
+		// The lease outlasts any batch: a batch that outlasts its lease loses it at the ref move, and the next leader fails the same way.
 		srv := httptest.NewServer(server.New(server.Config{Meta: l.Meta, Bucket: l.Bucket, Verifier: l.Verifier,
-			Lands: server.LandsConfig{Lease: 200 * time.Millisecond, Poll: time.Millisecond, Timeout: 5 * time.Second}}).Handler())
+			Lands: server.LandsConfig{Lease: time.Hour, Poll: time.Millisecond, Timeout: 5 * time.Second}}).Handler())
 		t.Cleanup(srv.Close)
 		c := client.New(srv.URL, client.StaticGrant(l.MergeGrant(t, l.repo)))
 		var wg sync.WaitGroup
@@ -503,6 +506,37 @@ func TestLandLeaderWaitsForTheLeaseOfAnotherOwnerAndThenLands(t *testing.T) {
 			if err != nil {
 				t.Errorf("land %d: %v", i, err)
 			}
+		}
+	})
+}
+
+func TestLandLeaderTakesTheLeaseAtTheEndOfAnotherOwnersLease(t *testing.T) {
+	eachBackend(t, func(t *testing.T, l *landEnv) {
+		ctx := context.Background()
+		var o objSet
+		head := o.commit(map[string]string{"f": "1"}, "", "c", l.root)
+		o.upload(t, l.env, l.repo)
+		clk := quartz.NewMock(t)
+		now := clk.Now()
+		if end, err := l.Meta.AcquireLandLease(ctx, l.repo, "main", "other-owner", now, now.Add(100*time.Millisecond)); err != nil || !end.Equal(now.Add(100*time.Millisecond)) {
+			t.Fatalf("acquire = %v, %v", end, err)
+		}
+		srv := httptest.NewServer(server.New(server.Config{Meta: l.Meta, Bucket: l.Bucket, Verifier: l.Verifier, Events: server.EventsConfig{Clock: clk},
+			Lands: server.LandsConfig{Lease: time.Hour, Poll: time.Hour, Timeout: 2 * time.Hour}}).Handler())
+		t.Cleanup(srv.Close)
+		timers := clk.Trap().NewTimer()
+		done := make(chan error, 1)
+		go func() {
+			_, err := client.New(srv.URL, client.StaticGrant(l.MergeGrant(t, l.repo))).Land(ctx, l.repo, api.LandRequest{Ref: "main", Base: l.root, Head: head})
+			done <- err
+		}()
+		for range 3 {
+			timers.MustWait(ctx).MustRelease(ctx)
+		}
+		timers.Close()
+		clk.Advance(100 * time.Millisecond).MustWait(ctx)
+		if err := <-done; err != nil {
+			t.Fatalf("land after the end of the other lease: %v", err)
 		}
 	})
 }
