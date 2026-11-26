@@ -52,7 +52,7 @@ jobs:
           curl --retry 30 --retry-delay 1 --retry-connrefused --retry-all-errors -fsS http://localhost:4443/storage/v1/b
       - run: go build ./...
       - run: go vet ./...
-      - run: go run ./internal/lint/cmd/lint ./...
+      - run: go tool lint ./...
       # testtime prints the test log and fails a test or a package over testdata/test-time-budget.txt.
       - run: go test -race -count=1 -run '^$' ./...
       - env:
@@ -115,6 +115,6 @@ jobs:
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
-      - run: go run ./internal/leaklint
+      - run: go tool leaklint
         env:
           LEAK_DENYLIST: ${{ secrets.LEAK_DENYLIST }}
