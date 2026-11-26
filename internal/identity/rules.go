@@ -37,12 +37,12 @@ func Validate(rules []Rule) error {
 }
 
 // ScopeFor returns the highest scope that the rules give subject on repo, or "" for none. repo is empty for a call
-// that names no repository. A subject that holds an @ is an email and matches without case. Any other subject
-// matches exactly.
-func ScopeFor(rules []Rule, subject, repo string) grant.Scope {
+// that names no repository. An email subject (the claim email, isEmail true) matches without case, and a @domain
+// principal matches its domain. Any other subject, even one that holds an @, matches exactly.
+func ScopeFor(rules []Rule, subject, repo string, isEmail bool) grant.Scope {
 	fold := func(v string) string { return v }
 	domain := ""
-	if i := strings.LastIndex(subject, "@"); i >= 0 {
+	if i := strings.LastIndex(subject, "@"); isEmail && i >= 0 {
 		fold = strings.ToLower
 		domain = fold(subject[i:])
 	}

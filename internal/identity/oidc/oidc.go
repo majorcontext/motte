@@ -23,7 +23,10 @@ import (
 )
 
 const (
-	refreshAfter = time.Hour
+	// refreshAfter is the age of the key set at which a request starts a refresh, and staleAfter is the age at which
+	// the cached keys are refused. The gap is the time that a failed refresh can be retried while sign-ins go on.
+	refreshAfter = 45 * time.Minute
+	staleAfter   = time.Hour
 	// unknownKidWait limits the fetches that a token with an unknown kid can cause.
 	unknownKidWait = time.Minute
 	keysMax        = 64 << 10
@@ -58,6 +61,8 @@ type Authenticator struct {
 	keys    map[string]crypto.PublicKey
 	fetched time.Time
 	good    time.Time
+	// inflight is open while one fetch runs, so there is one fetch at a time and it holds no lock.
+	inflight chan struct{}
 }
 
 var hashes = map[string]crypto.Hash{"RS256": crypto.SHA256, "RS384": crypto.SHA384, "RS512": crypto.SHA512, "ES256": crypto.SHA256, "ES384": crypto.SHA384}
@@ -120,7 +125,7 @@ func (a *Authenticator) Authenticate(r *http.Request, repo string) (grant.Claims
 	if err != nil {
 		return grant.Claims{}, grant.ErrGrant
 	}
-	scope := identity.ScopeFor(a.cfg.Rules, jc.Subject, repo)
+	scope := identity.ScopeFor(a.cfg.Rules, jc.Subject, repo, a.cfg.Claim == "email")
 	if scope == "" {
 		return grant.Claims{}, grant.ErrGrant
 	}
@@ -159,11 +164,24 @@ func (a *Authenticator) verify(token string) (jwtClaims, error) {
 	} else {
 		_ = json.Unmarshal(raw["aud"], &jc.Aud)
 	}
+	if a.cfg.Claim == "email" && !verified(raw["email_verified"]) {
+		return jwtClaims{}, errors.New("email not verified")
+	}
 	now := a.cfg.Now().Unix()
 	if jc.Iss != a.cfg.Issuer || !slices.Contains(jc.Aud, a.cfg.Audience) || jc.Exp == 0 || now >= jc.Exp || now < jc.Nbf || jc.Subject == "" {
 		return jwtClaims{}, errors.New("claims refused")
 	}
 	return jc, nil
+}
+
+// verified reports whether the claim email_verified is true. Some issuers send it as the text "true".
+func verified(raw json.RawMessage) bool {
+	var b bool
+	if json.Unmarshal(raw, &b) == nil {
+		return b
+	}
+	var s string
+	return json.Unmarshal(raw, &s) == nil && s == "true"
 }
 
 func verifySig(alg string, key crypto.PublicKey, h crypto.Hash, sum, sig []byte) bool {
@@ -186,18 +204,36 @@ func decode(part string, v any) error {
 	return json.Unmarshal(raw, v)
 }
 
-// key returns the public key of kid. It fetches the key set when the cache is older than an hour or kid is unknown,
-// at most once a minute, and it refuses a cache that an hour has passed since the last good fetch.
+// key returns the public key of kid. It starts a fetch of the key set when the cache is older than refreshAfter or kid
+// is unknown, at most once a minute and one at a time, and it holds no lock during the fetch. A request that finds
+// no usable key, or only a stale one, waits for the fetch in flight. It refuses a cache that staleAfter has passed since the last good
+// fetch.
 func (a *Authenticator) key(kid string) (crypto.PublicKey, error) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	now := a.cfg.Now()
 	k, known := a.keys[kid]
-	if (now.Sub(a.good) >= refreshAfter || !known) && (a.fetched.IsZero() || now.Sub(a.fetched) >= unknownKidWait) {
-		_ = a.fetch(now)
+	if (now.Sub(a.good) >= refreshAfter || !known) && (a.fetched.IsZero() || now.Sub(a.fetched) >= unknownKidWait) && a.inflight == nil {
+		done := make(chan struct{})
+		a.inflight, a.fetched = done, now
+		a.mu.Unlock()
+		keys, err := a.fetch()
+		a.mu.Lock()
+		if err == nil {
+			a.keys, a.good = keys, now
+		}
+		a.inflight = nil
+		close(done)
+		k, known = a.keys[kid]
+	} else if (!known || now.Sub(a.good) >= staleAfter) && a.inflight != nil {
+		done := a.inflight
+		a.mu.Unlock()
+		<-done
+		a.mu.Lock()
 		k, known = a.keys[kid]
 	}
-	if !known || now.Sub(a.good) >= refreshAfter {
+	stale := now.Sub(a.good) >= staleAfter
+	a.mu.Unlock()
+	if !known || stale {
 		return nil, errors.New("unknown or stale key")
 	}
 	return k, nil
@@ -215,15 +251,14 @@ func (a *Authenticator) getJSON(url string, v any) error {
 	return json.NewDecoder(http.MaxBytesReader(nil, resp.Body, keysMax)).Decode(v)
 }
 
-func (a *Authenticator) fetch(now time.Time) error {
-	a.fetched = now
+func (a *Authenticator) fetch() (map[string]crypto.PublicKey, error) {
 	url := a.cfg.KeysURL
 	if url == "" {
 		var doc struct {
 			JWKSURI string `json:"jwks_uri"`
 		}
 		if err := a.getJSON(strings.TrimSuffix(a.cfg.Issuer, "/")+"/.well-known/openid-configuration", &doc); err != nil || doc.JWKSURI == "" {
-			return fmt.Errorf("discovery: %v", err)
+			return nil, fmt.Errorf("discovery: %v", err)
 		}
 		url = doc.JWKSURI
 	}
@@ -231,7 +266,7 @@ func (a *Authenticator) fetch(now time.Time) error {
 		Keys []struct{ Kid, Kty, N, E, Crv, X, Y string } `json:"keys"`
 	}
 	if err := a.getJSON(url, &set); err != nil {
-		return fmt.Errorf("key set: %w", err)
+		return nil, fmt.Errorf("key set: %w", err)
 	}
 	keys := map[string]crypto.PublicKey{}
 	for _, k := range set.Keys {
@@ -243,10 +278,9 @@ func (a *Authenticator) fetch(now time.Time) error {
 		}
 	}
 	if len(keys) == 0 {
-		return errors.New("key set: no usable key")
+		return nil, errors.New("key set: no usable key")
 	}
-	a.keys, a.good = keys, now
-	return nil
+	return keys, nil
 }
 
 func parseKey(kty, n, e, crv, x, y string) crypto.PublicKey {
