@@ -124,6 +124,10 @@ func logSafe(err error) string {
 	if _, ok := root.(syscall.Errno); ok {
 		return fmt.Sprintf("%T: %v", err, root)
 	}
+	var sql interface{ SQLState() string }
+	if errors.As(err, &sql) {
+		return fmt.Sprintf("%T: %T: SQLSTATE %s", err, root, sql.SQLState())
+	}
 	for _, k := range knownCauses {
 		if errors.Is(err, k.err) {
 			return fmt.Sprintf("%T: %T: %s", err, root, k.name)

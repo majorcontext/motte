@@ -160,6 +160,7 @@ func TestLogSafeNamesAKnownCauseAndHidesTextBuiltFromData(t *testing.T) {
 	}{
 		{"a known sentinel under a wrapper", fmt.Errorf("read /secret/path: %w", context.Canceled), "context canceled", "/secret/path"},
 		{"text built from data", fmt.Errorf("redirect to %s", "https://host/token"), "", "https://host/token"},
+		{"a database error", fmt.Errorf("retire: %w", sqlStateError{"21000", "row a second time"}), "SQLSTATE 21000", "row a second time"},
 	} {
 		got := logSafe(tc.err)
 		if !strings.Contains(got, tc.want) || strings.Contains(got, tc.deny) {
@@ -237,3 +238,8 @@ func TestThePackWriteReservationGrowsWithTheLargestObjectItFindsWhileWriting(t *
 		t.Errorf("a larger object raised the reservation of the pack write by %d, want %d (3 times the growth)", got, want)
 	}
 }
+
+type sqlStateError struct{ code, msg string }
+
+func (e sqlStateError) Error() string    { return e.msg }
+func (e sqlStateError) SQLState() string { return e.code }
