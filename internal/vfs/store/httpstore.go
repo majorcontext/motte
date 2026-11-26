@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -111,6 +112,8 @@ type call struct {
 	span    trace.Span
 	route   string
 	started time.Time
+	// done counts the request in the recorder of the control call that made it, if any.
+	done func()
 	// status, in and out are set by the transport: the HTTP status, and the bytes of the answer and of the request.
 	status, in, out atomic.Int64
 }
@@ -119,12 +122,14 @@ type call struct {
 func (s *HTTPStore) begin(ctx context.Context, name, route string) (context.Context, *call) {
 	ctx, span := s.Tel.Start(ctx, name, attribute.String("http.route", route), attribute.String("tier", "store"))
 	cl := &call{s: s, span: span, route: route, started: time.Now()}
+	cl.done = tel.CallsFrom(ctx).Begin("store_" + strings.ReplaceAll(strings.TrimPrefix(name, "vcs.client."), ".", "_"))
 	return context.WithValue(ctx, callKey{}, cl), cl
 }
 
 // end closes the span with the figures of the request, logs a failure once and returns err, with a refused grant
 // marked as ErrGrantRefused.
 func (c *call) end(ctx context.Context, objects int, err error) error {
+	c.done()
 	status := int(c.status.Load())
 	c.span.SetAttributes(attribute.Int("objects", objects), attribute.Int64("bytes_in", c.in.Load()), attribute.Int64("bytes_out", c.out.Load()),
 		attribute.Int("http.response.status_code", status), attribute.Int("retries", 0))

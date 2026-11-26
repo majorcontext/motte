@@ -59,6 +59,7 @@ func open(ctx context.Context, cfg Config) (*VFS, error) {
 	}
 	v := &VFS{cfg: cfg, c: cfg.Cache, statMemo: map[gitpack.SHA]subStats{}}
 	v.tel, v.clk = cfg.Telemetry, clock.Or(cfg.Clock)
+	v.calls = tel.NewCallStats(v.clk)
 	v.published = v.clk.Now()
 	if v.published.IsZero() {
 		v.published = time.Now()

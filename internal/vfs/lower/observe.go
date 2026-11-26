@@ -98,8 +98,12 @@ func (v *VFS) startStats(ctx context.Context) {
 func (v *VFS) emitStats(final bool) {
 	var x extraStats
 	x.cache = v.cacheShare()
+	x.calls = v.calls.Take()
 	emitStats(v.tel, context.Background(), &v.ms, x, final)
 }
+
+// CallStats is the recorder of the control calls and of the store calls that they make.
+func (v *VFS) CallStats() *tel.CallStats { return v.calls }
 
 // cacheShare returns the tree and blob reads that each tier served since the last call.
 func (v *VFS) cacheShare() cacheShare {
@@ -116,6 +120,7 @@ func (v *VFS) cacheShare() cacheShare {
 // statsState holds the fields of VFS that the observability code owns.
 type statsState struct {
 	ms        mountStats
+	calls     *tel.CallStats
 	firstRead atomic.Bool
 	published time.Time
 	shareMu   sync.Mutex

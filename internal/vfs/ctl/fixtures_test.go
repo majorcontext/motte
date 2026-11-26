@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	"github.com/majorcontext/motte/internal/vfs/ctl"
 	"github.com/majorcontext/motte/internal/vfs/lower"
 	"github.com/majorcontext/motte/internal/vfs/store"
+	"github.com/majorcontext/motte/internal/vfs/tel"
 	"github.com/majorcontext/motte/internal/vfs/upperdir"
 	"github.com/majorcontext/motte/testserver"
 )
@@ -43,7 +45,9 @@ type daemon struct {
 	stop context.CancelFunc
 }
 
-func startDaemon(t *testing.T, maxLine int) *daemon {
+func startDaemon(t *testing.T, maxLine int) *daemon { return startDaemonLogged(t, maxLine, nil) }
+
+func startDaemonLogged(t *testing.T, maxLine int, log *slog.Logger) *daemon {
 	t.Helper()
 	const repo = "gh:acme/widgets"
 	srv := testserver.Start(t, "")
@@ -63,7 +67,7 @@ func startDaemon(t *testing.T, maxLine int) *daemon {
 		t.Fatal(err)
 	}
 	up := upperdir.NewMemFS()
-	v, err := lower.New(t.Context(), lower.Config{Store: st, CacheDir: t.TempDir(), Base: gitpack.Hash(commit.Type, commit.Data), UpperFS: up})
+	v, err := lower.New(t.Context(), lower.Config{Telemetry: tel.Telemetry{Logger: log}, Store: st, CacheDir: t.TempDir(), Base: gitpack.Hash(commit.Type, commit.Data), UpperFS: up})
 	if err != nil {
 		t.Fatal(err)
 	}

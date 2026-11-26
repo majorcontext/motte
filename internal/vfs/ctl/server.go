@@ -143,8 +143,33 @@ func (s *Server) tokenAnswer(tok upperdir.Token) tokenAnswer {
 	return tokenAnswer{Boot: bootID, Token: tok.String(bootID), BaseTree: s.Workspace.BaseTree()}
 }
 
-// handle serves one request and returns the answer to encode.
+// callStatser is an optional part of Workspace: the recorder of the calls that the workspace reports in its
+// vfs.stats record.
+type callStatser interface{ CallStats() *tel.CallStats }
+
+// handle serves one request, counts it by op, and returns the answer to encode. The store calls that the request
+// makes count under the recorder of the workspace too.
 func (s *Server) handle(ctx context.Context, rq request) any {
+	cs, _ := s.Workspace.(callStatser)
+	if cs == nil || cs.CallStats() == nil {
+		return s.dispatch(ctx, rq)
+	}
+	calls := cs.CallStats()
+	kind := rq.Op
+	if !knownOps[kind] {
+		kind = "unknown"
+	}
+	defer calls.Begin("ctl_" + kind)()
+	return s.dispatch(tel.WithCalls(ctx, calls), rq)
+}
+
+var knownOps = map[string]bool{
+	"token": true, "dirty": true, "changes": true, "stats": true, "getbatch": true, "get": true, "put": true,
+	"putbatch": true, "opheads": true, "refs": true, "swapref": true, "putop": true, "getop": true, "has": true,
+	"workspace": true,
+}
+
+func (s *Server) dispatch(ctx context.Context, rq request) any {
 	ctx = tel.WithTraceparent(ctx, rq.Traceparent)
 	switch rq.Op {
 	case "token":

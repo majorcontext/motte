@@ -183,6 +183,7 @@ func errnoName(e syscall.Errno) string {
 // extraStats are the figures a mount adds to its vfs.stats record besides the operations.
 type extraStats struct {
 	cache cacheShare
+	calls []tel.CallWindow
 }
 
 // cacheShare is the number of tree and blob reads that each tier served in an interval.
@@ -206,6 +207,11 @@ func emitStats(t tel.Telemetry, ctx context.Context, m *mountStats, x extraStats
 		if len(w.errs) > 0 {
 			args = append(args, slog.String(n+"_errors", errnoList(w.errs)))
 		}
+	}
+	for _, w := range x.calls {
+		active = true
+		args = append(args, slog.Uint64(w.Kind+"_count", w.Count),
+			slog.Float64(w.Kind+"_total_us", us(uint64(w.Total))), slog.Float64(w.Kind+"_max_us", us(uint64(w.Max))))
 	}
 	drops := m.slowDrops.Swap(0)
 	m.slowTokens.Store(slowSpansPerInterval)
