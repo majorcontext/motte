@@ -11,20 +11,12 @@ import (
 	"syscall"
 	"time"
 
-	"cloud.google.com/go/storage"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 
 	"github.com/majorcontext/motte/grant"
 	"github.com/majorcontext/motte/identity/oidc"
-	"github.com/majorcontext/motte/internal/bucket"
-	"github.com/majorcontext/motte/internal/bucket/fs"
-	"github.com/majorcontext/motte/internal/bucket/gcs"
-	"github.com/majorcontext/motte/internal/bucket/s3"
-	"github.com/majorcontext/motte/internal/meta/postgres"
 	"github.com/majorcontext/motte/internal/server"
-	"github.com/majorcontext/motte/meta"
-	"github.com/majorcontext/motte/meta/sqlite"
 )
 
 func main() {
@@ -38,60 +30,6 @@ func main() {
 		log.Error("motte stopped", "error", err)
 		os.Exit(1)
 	}
-}
-
-// gcsClients is how many Cloud Storage clients share the reads. One client funnels every read through the connections
-// of one HTTP/2 transport, whose pool and stream locks then serialize the readers.
-const gcsClients = 8
-
-// hedgeConfig bounds the duplicate reads of a hedged bucket: at most 5 percent of the reads, after 20 ms to 2 s.
-var hedgeConfig = bucket.HedgeConfig{Ratio: 0.05, Min: 20 * time.Millisecond, Max: 2 * time.Second}
-
-func openBucket(ctx context.Context, c config) (bucket.Store, error) {
-	if c.bucketKind == "fs" {
-		root, err := fs.New(c.bucket)
-		if err != nil {
-			return nil, err
-		}
-		return root.Bucket("motte"), nil
-	}
-	if c.bucketKind == "s3" {
-		client, err := s3.NewClient(ctx, c.s3)
-		if err != nil {
-			return nil, err
-		}
-		return s3.New(client, c.bucket), nil
-	}
-	clients := make([]*storage.Client, gcsClients+1)
-	if !c.hedge {
-		clients = clients[:gcsClients]
-	}
-	for i := range clients {
-		var err error
-		if clients[i], err = storage.NewClient(ctx); err != nil {
-			return nil, err
-		}
-	}
-	primary, err := gcs.NewPool(clients[:gcsClients], c.bucket)
-	if err != nil || !c.hedge {
-		return primary, err
-	}
-	return bucket.Hedge(primary, gcs.New(clients[gcsClients], c.bucket), hedgeConfig), nil
-}
-
-func openMeta(ctx context.Context, c config) (meta.Store, func(), error) {
-	if c.meta == "sqlite" {
-		db, err := sqlite.Open(ctx, c.sqlitePath)
-		if err != nil {
-			return nil, nil, err
-		}
-		return db, func() { _ = db.Close() }, nil
-	}
-	db, err := postgres.Open(ctx, c.databaseURL)
-	if err != nil {
-		return nil, nil, err
-	}
-	return db, db.Close, nil
 }
 
 func run(log *slog.Logger) error {

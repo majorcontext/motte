@@ -68,3 +68,39 @@ func TestLoadConfigChoosesBackendsAndRefusesUnknownOnes(t *testing.T) {
 		}
 	}
 }
+
+func TestEachBucketVariableNeedsItsOwnKind(t *testing.T) {
+	t.Parallel()
+	keys := `[{"kid":"k","key":"` + strings.Repeat("A", 43) + `=","scopes":["node"]}]`
+	for _, b := range bucketBackends {
+		for _, v := range b.vars {
+			for _, other := range bucketBackends {
+				env := map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET": "d", "MOTTE_TRUSTED_KEYS": keys, "MOTTE_BUCKET_KIND": other.kind, v: "on"}
+				if _, err := loadConfig(func(k string) string { return env[k] }); (err != nil) == (other.kind == b.kind) && v == "MOTTE_GCS_HEDGE" || other.kind != b.kind && err == nil {
+					t.Errorf("%s with kind %s: error = %v", v, other.kind, err)
+				}
+			}
+		}
+	}
+}
+
+func TestBackendVariableErrorsKeepTheirMessages(t *testing.T) {
+	t.Parallel()
+	keys := `[{"kid":"k","key":"` + strings.Repeat("A", 43) + `=","scopes":["node"]}]`
+	for want, extra := range map[string]map[string]string{
+		"MOTTE_S3_PATH_STYLE must be true or false":      {"MOTTE_BUCKET_KIND": "fs", "MOTTE_S3_PATH_STYLE": "yes"},
+		"MOTTE_S3_* variables need MOTTE_BUCKET_KIND=s3": {"MOTTE_BUCKET_KIND": "fs", "MOTTE_S3_REGION": "auto"},
+		"MOTTE_GCS_HEDGE needs MOTTE_BUCKET_KIND=gcs":    {"MOTTE_BUCKET_KIND": "fs", "MOTTE_GCS_HEDGE": "on"},
+		"MOTTE_BUCKET_KIND must be gcs, s3 or fs":        {"MOTTE_BUCKET_KIND": "r2"},
+		"MOTTE_DATABASE_URL is required":                 {"MOTTE_BUCKET_KIND": "fs", "MOTTE_DATABASE_URL": ""},
+		"MOTTE_META must be postgres or sqlite":          {"MOTTE_BUCKET_KIND": "fs", "MOTTE_META": "spanner"},
+	} {
+		env := map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET": "d", "MOTTE_TRUSTED_KEYS": keys}
+		for k, v := range extra {
+			env[k] = v
+		}
+		if _, err := loadConfig(func(k string) string { return env[k] }); err == nil || err.Error() != want {
+			t.Errorf("error = %v, want %q", err, want)
+		}
+	}
+}

@@ -106,17 +106,16 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if c.meta == "" {
 		c.meta = "postgres"
 	}
+	mb, ok := metaBackendOf(c.meta)
 	switch {
-	case c.meta == "postgres" && c.databaseURL == "":
-		return config{}, errors.New("MOTTE_DATABASE_URL is required")
-	case c.meta == "sqlite" && c.sqlitePath == "":
-		return config{}, errors.New("MOTTE_SQLITE_PATH is required")
-	case c.meta != "postgres" && c.meta != "sqlite":
+	case !ok:
 		return config{}, errors.New("MOTTE_META must be postgres or sqlite")
+	case getenv(mb.required) == "":
+		return config{}, errors.New(mb.required + " is required")
 	case c.bucket == "":
 		return config{}, errors.New("MOTTE_BUCKET is required")
 	}
-	if c.bucketKind != "gcs" && c.bucketKind != "s3" && c.bucketKind != "fs" {
+	if _, ok := bucketBackendOf(c.bucketKind); !ok {
 		return config{}, errors.New("MOTTE_BUCKET_KIND must be gcs, s3 or fs")
 	}
 	if err := loadS3(getenv, &c); err != nil {
@@ -159,6 +158,13 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if c.pprof = getenv("MOTTE_PPROF"); c.pprof != "" && c.pprof == c.listen {
 		return config{}, errors.New("MOTTE_PPROF needs an address other than MOTTE_LISTEN")
 	}
+	for _, b := range bucketBackends {
+		for _, v := range b.vars {
+			if b.kind != c.bucketKind && getenv(v) != "" {
+				return config{}, errors.New(v + " needs MOTTE_BUCKET_KIND=" + b.kind)
+			}
+		}
+	}
 	hedge, err := loadHedge(getenv, &c)
 	if err != nil {
 		return config{}, err
@@ -196,9 +202,6 @@ var removedVariables = []struct{ name, use string }{
 // off for 0 and as on for the rest, with a warning, and never stops the server.
 func loadHedge(getenv func(string) string, c *config) (bool, error) {
 	text := getenv("MOTTE_GCS_HEDGE")
-	if text != "" && c.bucketKind != "gcs" {
-		return false, errors.New("MOTTE_GCS_HEDGE needs MOTTE_BUCKET_KIND=gcs")
-	}
 	switch text {
 	case "", "on":
 		return true, nil

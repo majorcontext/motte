@@ -32,7 +32,7 @@ Non-goals:
 | `internal/pktline`, `internal/gitproto` | The pkt-line framing, and the git smart HTTP protocol over an object reader: advertisement, v2 fetch and ls-refs, receive-pack. | M6 |
 | `internal/land` | Pure rebase of a linear range of commits onto a tip: tree diff, tree apply and the file-level conflict check. | M7 |
 | `meta` | Metadata seam: repositories, workspaces and the epoch fence, op heads, refs, protected ref patterns, ref events, event subscriptions, the land queue, lease and log, pack listing, pack manifest. Backends `internal/meta/postgres` and `meta/sqlite`, and the suite `internal/meta/metatest`. Public package; only `meta` and `meta/sqlite` are public. | M2 |
-| `internal/meta/sqlcore` | The checks that both SQL backends run after a write changed no row (lost fence, flush, ref, op heads, event lease and land lease), over a small `Probe` interface. Each backend keeps its SQL and migrations. | M2 |
+| `internal/meta/sqlcore` | The checks that both SQL backends run after a write changed no row (lost claim, fence, flush, ref, op heads, event lease, land ack and land lease), over a small `Probe` interface. Each backend keeps its SQL and migrations. | M2 |
 | Store service | HTTP service over a `meta` store and a `bucket` store, and the epoch fence. | M2 |
 | `client` | Typed Go client for callers. Public package. | M3 |
 | `devicelogin` | Signs a person in with the OAuth device authorization grant against an OIDC issuer and keeps the token in a private file. Public package. | M3 |
@@ -56,7 +56,7 @@ The store plane serves the node daemon and the jj backend. The control plane ser
 | `MOTTE_META` | Metadata backend: `postgres` or `sqlite`. Default `postgres`. |
 | `MOTTE_DATABASE_URL` | PostgreSQL DSN. Required for `postgres`. |
 | `MOTTE_SQLITE_PATH` | SQLite database file. Required for `sqlite`. |
-| `MOTTE_BUCKET_KIND` | `gcs`, `s3` or `fs`. |
+| `MOTTE_BUCKET_KIND` | `gcs`, `s3` or `fs`. `cmd/motte` keeps one table of kinds, each with its own variables and its open function, and refuses a variable of one kind while another kind is set. |
 | `MOTTE_BUCKET` | Bucket name for `gcs` and `s3`, directory for `fs`. |
 | `MOTTE_S3_ENDPOINT` | Optional, `s3` only. Base URL of an S3-compatible service, such as R2 or MinIO. Default: the AWS endpoint of the region. |
 | `MOTTE_S3_REGION` | `s3` only. Region of the bucket. Default: the region of the AWS SDK default chain. Use `auto` for R2. |
