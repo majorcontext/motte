@@ -85,11 +85,18 @@ func (s *Server) land(w http.ResponseWriter, r *http.Request, c call) error {
 	if !refname.Valid(req.Ref) || !lowerHex(req.Base, 40, 40) || !lowerHex(req.Head, 40, 40) || req.ID != "" && !landID.MatchString(req.ID) || req.ExpectTree != "" && !lowerHex(req.ExpectTree, 40, 40) {
 		return errBody
 	}
-	if err := s.refProtected(r.Context(), c.claims.Scope, repo, req.Ref); err != nil {
-		return err
-	}
+	known := false
 	if req.ID == "" {
 		req.ID = rand.Text()
+	} else if _, err := s.index.LandItem(r.Context(), repo, req.ID); err == nil {
+		known = true
+	} else if !errors.Is(err, meta.ErrNotFound) {
+		return err
+	}
+	if !known {
+		if err := s.refProtected(r.Context(), c.claims.Scope, repo, req.Ref); err != nil {
+			return err
+		}
 	}
 	out, err := s.enqueueAndWait(r.Context(), meta.LandRequest{ID: req.ID, Repo: repo, Ref: req.Ref, Base: req.Base, Head: req.Head, ExpectTree: req.ExpectTree, Kind: scopeKind(c.claims.Scope)})
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -165,6 +166,21 @@ func TestLandBatchRefusesALaterLandThatClashesWithAnEarlierOne(t *testing.T) {
 		}
 		if main != 2 {
 			t.Errorf("main has %d events, want the create and one for the batch", main)
+		}
+	})
+}
+
+func TestLandRepeatOfAnAcceptedIDAnswersAfterProtectionChanges(t *testing.T) {
+	eachBackend(t, func(t *testing.T, l *landEnv) {
+		var o objSet
+		req := api.LandRequest{ID: "repeat-protect", Ref: "main", Base: l.root, Head: o.commit(map[string]string{"f": "1"}, "", "c", l.root)}
+		o.upload(t, l.env, l.repo)
+		first, err := l.write.Land(context.Background(), l.repo, req)
+		if err == nil {
+			err = l.Client(l.operator()).SetProtectedRefs(context.Background(), l.repo, []string{"main"})
+		}
+		if again, err2 := l.write.Land(context.Background(), l.repo, req); err != nil || err2 != nil || !reflect.DeepEqual(again, first) {
+			t.Errorf("repeat = %+v, %v, %v, want %+v", again, err, err2, first)
 		}
 	})
 }
