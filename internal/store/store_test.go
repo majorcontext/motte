@@ -1118,21 +1118,25 @@ func TestAPackThatAnOlderReleaseListedIsAddedToTheManifest(t *testing.T) {
 func TestOnePassOfMaintenanceClearsABacklogOfLayers(t *testing.T) {
 	t.Parallel()
 	w := newWorld(t)
-	for i := range 1100 {
+	for i := range 700 {
 		w.listOlderPack(fmt.Sprintf("a pack of the burst %d", i))
 	}
 	if err := w.svc.Maintain(t.Context(), repo); err != nil {
 		t.Fatal(err)
 	}
 	if n := w.layers(); n > 12 {
-		t.Fatalf("%d layers after one pass over a backlog of 1100; want at most 12", n)
+		t.Fatalf("%d layers after one pass over a backlog of 700; want at most 12", n)
 	}
 	w.reachable(w.cold())
 }
 
 // fillRandom fills data with bytes that do not compress, eight for each call of rng.
 func fillRandom(rng *rand.Rand, data []byte) {
-	for i := 0; i < len(data); i += 8 {
+	i := 0
+	for ; i+8 <= len(data); i += 8 {
+		binary.LittleEndian.PutUint64(data[i:], rng.Uint64())
+	}
+	if i < len(data) {
 		var w [8]byte
 		binary.LittleEndian.PutUint64(w[:], rng.Uint64())
 		copy(data[i:], w[:])

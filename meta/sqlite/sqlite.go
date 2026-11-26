@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"modernc.org/sqlite"
@@ -29,6 +30,24 @@ const Memory = ":memory:"
 
 // Open opens the database file at path, or creates it, and applies the migrations.
 func Open(ctx context.Context, path string) (*Store, error) {
+	db, err := open(path)
+	if err != nil {
+		return nil, err
+	}
+	if path == Memory {
+		err = restoreMemoryImage(ctx, db)
+	}
+	if err == nil {
+		err = migrate(ctx, db)
+	}
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return &Store{db: db}, nil
+}
+
+func open(path string) (*sql.DB, error) {
 	escaped := strings.NewReplacer("%", "%25", "?", "%3f", "#", "%23").Replace(path)
 	db, err := sql.Open("sqlite", "file:"+escaped+"?_txlock=immediate&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)")
 	if err != nil {
@@ -36,11 +55,52 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	}
 	// One connection orders every write, and keeps an in-memory database alive.
 	db.SetMaxOpenConns(1)
-	if err := migrate(ctx, db); err != nil {
-		_ = db.Close()
+	return db, nil
+}
+
+type serializer interface {
+	Serialize() ([]byte, error)
+	Deserialize([]byte) error
+}
+
+// memoryImage is a migrated empty database. A new in-memory database copies it, because the parse of the migrations
+// costs much more than the copy, and tests open many in-memory databases.
+var memoryImage = sync.OnceValues(func() ([]byte, error) {
+	ctx := context.Background()
+	db, err := open(Memory)
+	if err != nil {
 		return nil, err
 	}
-	return &Store{db: db}, nil
+	defer db.Close()
+	if err := migrate(ctx, db); err != nil {
+		return nil, err
+	}
+	var img []byte
+	err = rawConn(ctx, db, func(c serializer) (err error) { img, err = c.Serialize(); return err })
+	return img, err
+})
+
+func restoreMemoryImage(ctx context.Context, db *sql.DB) error {
+	img, err := memoryImage()
+	if err != nil {
+		return err
+	}
+	return rawConn(ctx, db, func(c serializer) error { return c.Deserialize(img) })
+}
+
+func rawConn(ctx context.Context, db *sql.DB, fn func(serializer) error) error {
+	c, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("sqlite: open: %w", err)
+	}
+	defer c.Close()
+	return c.Raw(func(dc any) error {
+		s, ok := dc.(serializer)
+		if !ok {
+			return fmt.Errorf("sqlite: driver connection %T cannot serialize", dc)
+		}
+		return fn(s)
+	})
 }
 
 func (s *Store) Close() error { return s.db.Close() }
