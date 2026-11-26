@@ -4,7 +4,29 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/majorcontext/motte/grant"
 )
+
+func TestGitPushMovesOnlyTheRefsOfAMergeGrantThatNamesRefs(t *testing.T) {
+	g := newGitEnv(t)
+	named := g.remote(g.path, g.Mint(t, g.Operator, grant.Claims{Scope: grant.ScopeMerge, Repo: g.text, Refs: []string{"feature/*"}}))
+	w := g.clone(g.WriteGrant(t, g.text))
+	g.commit(w, "w.txt", "w")
+	before := g.git(w, true, "ls-remote", "origin", "refs/heads/main")
+	g.git(w, true, "push", "-q", named, "HEAD:refs/heads/feature/a")
+	for _, args := range [][]string{{"HEAD:refs/heads/main"}, {":refs/heads/main"}, {"HEAD:refs/heads/feature/b", "HEAD:refs/heads/main"}} {
+		if out := g.git(w, false, append([]string{"push", named}, args...)...); !strings.Contains(out, "not in the grant") {
+			t.Errorf("push %v: %q, want a per-ref refusal that says not in the grant", args, out)
+		}
+	}
+	if got := g.git(w, true, "ls-remote", "origin", "refs/heads/feature/b"); got == "" {
+		t.Errorf("feature/b missing: a refused ref does not stop the other commands of the push")
+	}
+	if got := g.git(w, true, "ls-remote", "origin", "refs/heads/main"); got != before {
+		t.Errorf("main = %q, want %q: a ref that the grant does not name never moves", got, before)
+	}
+}
 
 func TestGitPushHonorsProtectedRefsAndRecordsEvents(t *testing.T) {
 	g := newGitEnv(t)

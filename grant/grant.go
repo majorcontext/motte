@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/majorcontext/motte/internal/refname"
 )
 
 // ErrGrant is the one error of a rejected grant. It never says why.
@@ -46,10 +48,25 @@ type Claims struct {
 	Repo    string `json:"repo,omitempty"`
 	Owner   string `json:"owner,omitempty"`
 	Subject string `json:"subject,omitempty"`
-	Exp     int64  `json:"exp"`
+	// Refs are the ref patterns that a merge grant may move: a ref name, or a prefix that ends in "*". A merge grant
+	// with Refs moves only the refs that a pattern matches. A merge grant without Refs moves any ref, until a later
+	// release refuses it. No other scope carries Refs.
+	Refs []string `json:"refs,omitempty"`
+	Exp  int64    `json:"exp"`
+}
+
+// MaxRefs is the most patterns that a grant holds.
+const MaxRefs = 64
+
+// MovesRef reports whether the grant may move the ref name. It is true for a grant with no Refs.
+func (c Claims) MovesRef(name string) bool {
+	return len(c.Refs) == 0 || slices.ContainsFunc(c.Refs, func(p string) bool { return refname.Match(p, name) })
 }
 
 func (c Claims) valid() bool {
+	if len(c.Refs) > 0 && (c.Scope != ScopeMerge || len(c.Refs) > MaxRefs || slices.ContainsFunc(c.Refs, func(p string) bool { return !refname.ValidPattern(p) })) {
+		return false
+	}
 	switch c.Scope {
 	case ScopeNode:
 		return c.WS != "" && c.Epoch != 0 && c.Repo != ""

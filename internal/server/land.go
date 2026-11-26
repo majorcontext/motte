@@ -85,6 +85,9 @@ func (s *Server) land(w http.ResponseWriter, r *http.Request, c call) error {
 	if !refname.Valid(req.Ref) || !lowerHex(req.Base, 40, 40) || !lowerHex(req.Head, 40, 40) || req.ID != "" && !landID.MatchString(req.ID) || req.ExpectTree != "" && !lowerHex(req.ExpectTree, 40, 40) {
 		return errBody
 	}
+	if c.claims.Scope == grant.ScopeMerge && !c.claims.MovesRef(req.Ref) {
+		return errRefNotGranted
+	}
 	known := false
 	if req.ID == "" {
 		req.ID = rand.Text()

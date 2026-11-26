@@ -67,6 +67,25 @@ func TestMintRejectsIncompleteClaims(t *testing.T) {
 	}
 }
 
+func TestRefsBelongToMergeGrantsAndMustBePatterns(t *testing.T) {
+	t.Parallel()
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	s, v := Signer{Kid: "k", Key: priv}, NewVerifier(Key{"k", pub, []Scope{ScopeMerge}})
+	for _, c := range []Claims{{Scope: ScopeRead, Repo: "n:a", Refs: []string{"main"}}, {Scope: ScopeMerge, Repo: "n:a", Refs: []string{"a b"}}, {Scope: ScopeMerge, Repo: "n:a", Refs: make([]string, MaxRefs+1)}} {
+		if _, err := s.Mint(c); err == nil {
+			t.Errorf("Mint(%+v) accepted", c)
+		}
+	}
+	tok, err := s.Mint(Claims{Scope: ScopeMerge, Repo: "n:a", Refs: []string{"main", "feature/*"}, Exp: 2000})
+	got, verr := v.Verify(tok, time.Unix(1000, 0))
+	if err != nil || verr != nil || !got.MovesRef("main") || !got.MovesRef("feature/x") || got.MovesRef("release/1") || got.MovesRef("mainx") {
+		t.Errorf("claims = %+v, %v, %v: want main and feature/* only", got, err, verr)
+	}
+	if !(Claims{Scope: ScopeMerge}).MovesRef("any") {
+		t.Error("a merge grant with no Refs moves no ref, want it to move any until a later release refuses it")
+	}
+}
+
 func TestRotation(t *testing.T) {
 	t.Parallel()
 	pubOld, privOld, _ := ed25519.GenerateKey(nil)

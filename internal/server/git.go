@@ -477,6 +477,8 @@ func (s *Server) applyCommand(ctx context.Context, c call, cmd gitproto.Command,
 		return "stale info", nil
 	case errors.Is(err, errProtected):
 		return "protected", nil
+	case errors.Is(err, errRefNotGranted):
+		return "not in the grant", nil
 	}
 	return "", err
 }
