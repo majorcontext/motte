@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"go.opentelemetry.io/otel/trace"
 	"io"
+	"log/slog"
 	"maps"
 	"regexp"
 	"slices"
@@ -126,10 +127,11 @@ var (
 
 // Service stores the objects of every repo and workspace in one object store.
 type Service struct {
-	st    bucket.Store
-	index PackIndex
-	clk   clock.Clock
-	grace time.Duration
+	st     bucket.Store
+	index  PackIndex
+	clk    clock.Clock
+	grace  time.Duration
+	logger *slog.Logger
 
 	budget *semaphore.Weighted
 	inline *semaphore.Weighted
@@ -219,6 +221,15 @@ type Option func(*Service)
 // WithClock sets the clock that stamps retired files. It defaults to the real clock.
 func WithClock(c clock.Clock) Option { return func(s *Service) { s.clk = c } }
 
+// WithLogger sets the logger of the warnings of maintenance. It defaults to the default logger.
+func WithLogger(l *slog.Logger) Option {
+	return func(s *Service) {
+		if l != nil {
+			s.logger = l
+		}
+	}
+}
+
 // WithGrace sets how long a retired file stays before Maintain deletes it. A request that began within the grace
 // reads a consistent set. A value of zero or less keeps DefaultGrace.
 func WithGrace(d time.Duration) Option {
@@ -265,7 +276,7 @@ func (s *Service) tryReserveInline(bytes int64) (release func()) {
 }
 
 func New(st bucket.Store, index PackIndex, opts ...Option) *Service {
-	s := &Service{st: st, index: index, clk: clock.Real(), grace: DefaultGrace, open: map[string]*openPack{}, budget: semaphore.NewWeighted(MemoryBudget), inline: semaphore.NewWeighted(inlineBudget), landed: semaphore.NewWeighted(LandBudget), icache: newClockCache(maxIndexBytes), ocache: newClockCache(maxObjectCacheBytes), rcache: newRangeCache(DefaultRangeCacheBytes), rflight: semaphore.NewWeighted(DefaultReadBudget), readBudget: DefaultReadBudget, slowAfter: slowReadAfter, graphCap: midx.MaxGraphCommits}
+	s := &Service{st: st, index: index, clk: clock.Real(), logger: slog.Default(), grace: DefaultGrace, open: map[string]*openPack{}, budget: semaphore.NewWeighted(MemoryBudget), inline: semaphore.NewWeighted(inlineBudget), landed: semaphore.NewWeighted(LandBudget), icache: newClockCache(maxIndexBytes), ocache: newClockCache(maxObjectCacheBytes), rcache: newRangeCache(DefaultRangeCacheBytes), rflight: semaphore.NewWeighted(DefaultReadBudget), readBudget: DefaultReadBudget, slowAfter: slowReadAfter, graphCap: midx.MaxGraphCommits}
 	for _, o := range opts {
 		o(s)
 	}

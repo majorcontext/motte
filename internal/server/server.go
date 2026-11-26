@@ -99,7 +99,7 @@ func New(cfg Config) *Server {
 		}
 	})
 	limits := cfg.Limits.withDefaults()
-	s := &Server{limits: limits, index: cfg.Meta, objects: store.New(metered, cfg.Meta, store.WithClock(clock.Or(cfg.Clock)), store.WithGrace(cfg.Compaction.withDefaults().Grace), store.WithRangeCache(cfg.RangeCacheBytes)), compaction: cfg.Compaction.withDefaults(), logger: cfg.Logger, now: cfg.Now, readers: make(chan struct{}, uploadReaders), largeFetches: make(chan struct{}, limits.FetchSlots), warmers: make(chan struct{}, landWarmers), wake: make(chan struct{}, 1), clock: clock.Or(cfg.Clock)}
+	s := &Server{limits: limits, index: cfg.Meta, objects: store.New(metered, cfg.Meta, store.WithClock(clock.Or(cfg.Clock)), store.WithGrace(cfg.Compaction.withDefaults().Grace), store.WithRangeCache(cfg.RangeCacheBytes), store.WithLogger(cfg.Logger)), compaction: cfg.Compaction.withDefaults(), logger: cfg.Logger, now: cfg.Now, readers: make(chan struct{}, uploadReaders), largeFetches: make(chan struct{}, limits.FetchSlots), warmers: make(chan struct{}, landWarmers), wake: make(chan struct{}, 1), clock: clock.Or(cfg.Clock)}
 	s.cold.Store(cfg.Warm)
 	if s.now == nil {
 		s.now = time.Now

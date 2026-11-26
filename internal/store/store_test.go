@@ -1076,6 +1076,25 @@ func TestAPackThatAnOlderReleaseListedIsAddedToTheManifest(t *testing.T) {
 	w.reachable(w.cold())
 }
 
+func TestAPackRowWhoseFilesAreMissingDoesNotFailMaintenance(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	w.push(2)
+	if err := w.meta.AddPack(t.Context(), repo.String(), strings.Repeat("ab", 32), 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.svc.Maintain(t.Context(), repo); err != nil {
+		t.Fatal(err)
+	}
+	rows, _ := w.meta.Packs(t.Context(), repo.String())
+	for _, p := range rows {
+		if p.ID == strings.Repeat("ab", 32) {
+			t.Fatal("the row without files is still listed")
+		}
+	}
+	w.reachable(w.cold())
+}
+
 func TestOnePassOfMaintenanceClearsABacklogOfLayers(t *testing.T) {
 	t.Parallel()
 	w := newWorld(t)

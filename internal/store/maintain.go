@@ -770,6 +770,41 @@ func (s *Service) collect(ctx context.Context, repo Repo) (err error) {
 	return s.index.ForgetRetired(ctx, repo.String(), done)
 }
 
+// dropGonePacks removes the pack rows of packs that the manifest does not name and whose files do not exist. A write
+// stores the files and swaps the manifest before it adds the row, so no ref reaches the objects of such a row. The
+// manifest is read again first, so a row that a concurrent write just added with unique keys stays.
+func (s *Service) dropGonePacks(ctx context.Context, repo Repo, gone []meta.Pack) error {
+	if len(gone) == 0 {
+		return nil
+	}
+	prefix, err := repoPrefix(repo)
+	if err != nil {
+		return err
+	}
+	m, _, err := s.loadManifest(ctx, repo)
+	if err != nil {
+		return err
+	}
+	held, err := s.heldPacks(ctx, prefix, m.Layers)
+	if err != nil {
+		return err
+	}
+	named := map[string]bool{}
+	for _, p := range held {
+		named[p.ID] = true
+	}
+	for _, p := range gone {
+		if named[p.ID] {
+			continue
+		}
+		s.logger.WarnContext(ctx, "pack row without files dropped", "repo", repo.String(), "pack", p.ID)
+		if err := s.index.RemovePack(ctx, repo.String(), p.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // reconcile adds an index layer for each pack that the pack list has and the manifest lacks. A writer of an older
 // release adds packs to the list only.
 func (s *Service) reconcile(ctx context.Context, repo Repo) error {
@@ -820,9 +855,15 @@ func (s *Service) reconcile(ctx context.Context, repo Repo) error {
 	if len(missing) == 0 {
 		return nil
 	}
-	layers, err := s.indexLayers(ctx, repo, missing)
+	layers, gone, err := s.indexLayers(ctx, repo, missing)
 	if err != nil {
 		return err
+	}
+	if err := s.dropGonePacks(ctx, repo, gone); err != nil {
+		return err
+	}
+	if len(layers) == 0 {
+		return nil
 	}
 	return s.updateManifest(ctx, repo, func(m *midx.Manifest) (bool, error) {
 		have := map[string]bool{}

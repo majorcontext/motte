@@ -10,6 +10,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/majorcontext/motte/internal/bucket"
 	"github.com/majorcontext/motte/internal/gitpack"
 	"github.com/majorcontext/motte/internal/midx"
 	"github.com/majorcontext/motte/meta"
@@ -275,7 +276,7 @@ func (s *Service) bootstrap(ctx context.Context, repo Repo) (midx.Manifest, int6
 		if err != nil || len(packs) == 0 {
 			return result{}, err
 		}
-		layers, err := s.indexLayers(ctx, repo, packs)
+		layers, _, err := s.indexLayers(ctx, repo, packs)
 		if err != nil {
 			return nil, err
 		}
@@ -302,20 +303,26 @@ func (s *Service) bootstrap(ctx context.Context, repo Repo) (midx.Manifest, int6
 	return r.m, r.gen, nil
 }
 
-// indexLayers makes an index layer for each pack, reading only the header of its index.
-func (s *Service) indexLayers(ctx context.Context, repo Repo, packs []meta.Pack) ([]midx.Entry, error) {
+// indexLayers makes an index layer for each pack, reading only the header of its index. A pack whose index file does
+// not exist gets no layer and is returned in gone.
+func (s *Service) indexLayers(ctx context.Context, repo Repo, packs []meta.Pack) (layers []midx.Entry, gone []meta.Pack, err error) {
 	prefix, err := repoPrefix(repo)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	out := make([]midx.Entry, len(packs))
+	missing := make([]bool, len(packs))
 	var g errgroup.Group
 	g.SetLimit(16)
 	for i, p := range packs {
 		g.Go(func() error {
 			head, err := s.st.GetRange(ctx, prefix+"/"+p.ID+".idx", 0, gitpack.IdxHeadBytes)
+			if errors.Is(err, bucket.ErrNotFound) {
+				missing[i] = true
+				return nil
+			}
 			if err != nil {
-				return fmt.Errorf("store: index of pack %s: %w", p.ID, mapNotFound(err))
+				return fmt.Errorf("store: index of pack %s: %w", p.ID, err)
 			}
 			s.idxBytes.Add(int64(len(head)))
 			n, err := gitpack.IdxCount(head)
@@ -326,7 +333,17 @@ func (s *Service) indexLayers(ctx context.Context, repo Repo, packs []meta.Pack)
 			return nil
 		})
 	}
-	return out, g.Wait()
+	if err := g.Wait(); err != nil {
+		return nil, nil, err
+	}
+	for i, p := range packs {
+		if missing[i] {
+			gone = append(gone, p)
+		} else {
+			layers = append(layers, out[i])
+		}
+	}
+	return layers, gone, nil
 }
 
 func indexEntry(p midx.Pack, objects int) midx.Entry {
