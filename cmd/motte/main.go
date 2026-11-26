@@ -123,6 +123,7 @@ func run(log *slog.Logger) error {
 		}
 	}
 	srv := server.New(scfg)
+	defer srv.Close()
 	if cfg.otlp {
 		shutdown, err := startMetrics(ctx, srv.Registry())
 		if err != nil {

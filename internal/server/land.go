@@ -65,7 +65,6 @@ type landWaiter struct{ repo, id string }
 
 type landing struct {
 	mu      sync.Mutex
-	leaders map[meta.LandKey]*leader
 	waiters map[landWaiter][]chan landOutcome
 }
 

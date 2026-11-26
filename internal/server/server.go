@@ -65,6 +65,7 @@ type Server struct {
 	lands      LandsConfig
 	compaction CompactionConfig
 	landing    landing
+	hub        *landHub
 	wake       chan struct{}
 	clock      clock.Clock
 	cold       atomic.Bool
@@ -107,7 +108,8 @@ func New(cfg Config) *Server {
 	s.adminHuman = identity.Chain(cfg.Identity, usertoken.Authenticator{Store: cfg.Meta, Now: s.now, Token: bearerToken})
 	s.events = cfg.Events.withDefaults()
 	s.lands = cfg.Lands.withDefaults()
-	s.landing = landing{leaders: map[meta.LandKey]*leader{}, waiters: map[landWaiter][]chan landOutcome{}}
+	s.hub = newLandHub()
+	s.landing = landing{waiters: map[landWaiter][]chan landOutcome{}}
 	if s.logger == nil {
 		s.logger = slog.New(slog.DiscardHandler)
 	}

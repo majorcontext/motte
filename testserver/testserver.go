@@ -167,6 +167,7 @@ func run(t testing.TB, store meta.Store, change func(*server.Config)) *Server {
 	}
 	srv := server.New(cfg)
 	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(srv.Close)
 	t.Cleanup(ts.Close)
 	return &Server{
 		URL: ts.URL, Meta: store, Bucket: bkt, Verifier: verifier, Operator: grant.Signer{Kid: "cp", Key: cpKey}, Node: grant.Signer{Kid: "node", Key: nodeKey},

@@ -1,12 +1,17 @@
 package server_test
 
 import (
+	"context"
 	"fmt"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/majorcontext/motte/api"
 	"github.com/majorcontext/motte/client"
+	"github.com/majorcontext/motte/internal/server"
 )
 
 func tenLines(edits map[int]string) string {
@@ -44,4 +49,26 @@ func landMergesLinesThatTwoLandsChangeApart(t *testing.T, l *landEnv) {
 	if got := client.ConflictPaths(err); !slices.Equal(got, []string{"f"}) || l.tip("main") != at {
 		t.Errorf("same lines: paths = %v, main = %+v, want [f] and %+v", got, l.tip("main"), at)
 	}
+}
+
+func TestCloseEndsALeaderThatWaitsForAnotherLease(t *testing.T) {
+	eachBackend(t, func(t *testing.T, l *landEnv) {
+		ctx := context.Background()
+		now := time.Now()
+		if err := l.Meta.AcquireLandLease(ctx, l.repo, "main", "other-replica", now, now.Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		replica := server.New(server.Config{Meta: l.Meta, Bucket: l.Bucket, Verifier: l.Verifier, Events: server.EventsConfig{Instance: "replica-3"},
+			Lands: server.LandsConfig{Lease: time.Hour, Poll: time.Millisecond, Timeout: 50 * time.Millisecond}})
+		ts := httptest.NewServer(replica.Handler())
+		defer ts.Close()
+		var o objSet
+		c1 := o.commit(map[string]string{"a": "1"}, "", "c1", l.root)
+		o.upload(t, l.env, l.repo)
+		_, err := client.New(ts.URL, client.StaticGrant(l.MergeGrant(t, l.repo))).Land(ctx, l.repo, api.LandRequest{Ref: "main", Base: l.root, Head: c1})
+		refuses(t, err, client.ErrLandTimeout, 504)
+		closed := make(chan struct{})
+		go func() { replica.Close(); close(closed) }()
+		<-closed
+	})
 }

@@ -337,7 +337,9 @@ func TestLandRecoversAClaimedItemAndLeadsAcrossReplicas(t *testing.T) {
 	eachBackend(t, func(t *testing.T, l *landEnv) {
 		cfg := server.Config{Meta: l.Meta, Bucket: l.Bucket, Verifier: l.Verifier, Events: server.EventsConfig{Instance: "replica-2"},
 			Lands: server.LandsConfig{Lease: 300 * time.Millisecond, Poll: 5 * time.Millisecond}}
-		second := httptest.NewServer(server.New(cfg).Handler())
+		replica := server.New(cfg)
+		t.Cleanup(replica.Close)
+		second := httptest.NewServer(replica.Handler())
 		t.Cleanup(second.Close)
 		other := client.New(second.URL, client.StaticGrant(l.MergeGrant(t, l.repo)))
 
@@ -473,7 +475,7 @@ func TestLandRetriesWhenTheProtectedListCannotBeRead(t *testing.T) {
 	})
 }
 
-func TestLandLeaderRestartsAfterItLosesTheLeaseToAnotherOwner(t *testing.T) {
+func TestLandLeaderWaitsForTheLeaseOfAnotherOwnerAndThenLands(t *testing.T) {
 	eachBackend(t, func(t *testing.T, l *landEnv) {
 		var o objSet
 		heads := make([]string, 20)
@@ -486,7 +488,7 @@ func TestLandLeaderRestartsAfterItLosesTheLeaseToAnotherOwner(t *testing.T) {
 			t.Fatal(err)
 		}
 		srv := httptest.NewServer(server.New(server.Config{Meta: l.Meta, Bucket: l.Bucket, Verifier: l.Verifier,
-			Lands: server.LandsConfig{Poll: time.Millisecond, Timeout: 5 * time.Second}}).Handler())
+			Lands: server.LandsConfig{Lease: 200 * time.Millisecond, Poll: time.Millisecond, Timeout: 5 * time.Second}}).Handler())
 		t.Cleanup(srv.Close)
 		c := client.New(srv.URL, client.StaticGrant(l.MergeGrant(t, l.repo)))
 		var wg sync.WaitGroup

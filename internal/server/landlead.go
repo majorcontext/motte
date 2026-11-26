@@ -37,12 +37,13 @@ type leader struct {
 	holding atomic.Bool
 }
 
-// kickLeader makes sure that this replica works for the ref. It wakes the leader that runs here, or starts one. The
-// leader gives up at once when another replica holds the lease, and the waiting requests find it again by their poll.
+// kickLeader makes sure that this replica works for the ref. It wakes the leader that runs here, or starts one. A
+// leader that finds another replica holding the lease waits for the rest of the lease and then claims again.
 func (s *Server) kickLeader(key meta.LandKey) {
-	s.landing.mu.Lock()
-	defer s.landing.mu.Unlock()
-	if l, ok := s.landing.leaders[key]; ok {
+	h := s.hub
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if l, ok := h.leaders[key]; ok {
 		select {
 		case l.wake <- struct{}{}:
 		default:
@@ -50,42 +51,40 @@ func (s *Server) kickLeader(key meta.LandKey) {
 		return
 	}
 	l := &leader{wake: make(chan struct{}, 1)}
-	s.landing.leaders[key] = l
-	go s.lead(key, l)
+	h.start(key, l, func(ctx context.Context) { s.lead(ctx, key, l) })
 }
 
 // leadingHere reports whether a leader of this replica holds the lease of the ref. Such a leader hands each result to
 // its waiting request, so the request needs no poll of the store.
 func (s *Server) leadingHere(key meta.LandKey) bool {
-	s.landing.mu.Lock()
-	defer s.landing.mu.Unlock()
-	l, ok := s.landing.leaders[key]
+	s.hub.mu.Lock()
+	defer s.hub.mu.Unlock()
+	l, ok := s.hub.leaders[key]
 	return ok && l.holding.Load()
 }
 
 // dropLead unregisters l at a terminal exit. A pending wake is dropped with it: the next poll of a waiting request
 // starts a new leader.
 func (s *Server) dropLead(key meta.LandKey, l *leader) {
-	s.landing.mu.Lock()
-	defer s.landing.mu.Unlock()
-	if s.landing.leaders[key] == l {
-		delete(s.landing.leaders, key)
+	s.hub.mu.Lock()
+	defer s.hub.mu.Unlock()
+	if s.hub.leaders[key] == l {
+		delete(s.hub.leaders, key)
 	}
 }
 
-// stopLead unregisters a kick came in since the last claim.
+// stopLead unregisters l unless a kick came in since the last claim.
 func (s *Server) stopLead(key meta.LandKey, l *leader) bool {
-	s.landing.mu.Lock()
-	defer s.landing.mu.Unlock()
+	s.hub.mu.Lock()
+	defer s.hub.mu.Unlock()
 	if len(l.wake) > 0 {
 		return false
 	}
-	delete(s.landing.leaders, key)
+	delete(s.hub.leaders, key)
 	return true
 }
 
-func (s *Server) lead(key meta.LandKey, l *leader) {
-	ctx := context.Background()
+func (s *Server) lead(ctx context.Context, key meta.LandKey, l *leader) {
 	owner := s.events.Instance
 	fails := 0
 	defer l.holding.Store(false)
@@ -93,8 +92,15 @@ func (s *Server) lead(key meta.LandKey, l *leader) {
 		now := s.events.Clock.Now()
 		items, err := s.claimLands(ctx, key, owner, now)
 		l.holding.Store(err == nil)
+		if errors.Is(err, meta.ErrLeaseHeld) {
+			if !s.sleepLead(ctx, s.lands.Lease) {
+				s.dropLead(key, l)
+				return
+			}
+			continue
+		}
 		if err != nil {
-			if !errors.Is(err, meta.ErrLeaseHeld) {
+			if ctx.Err() == nil {
 				s.logger.ErrorContext(ctx, "land claim failed", "error", logSafe(err))
 			}
 			s.dropLead(key, l)
@@ -110,11 +116,15 @@ func (s *Server) lead(key meta.LandKey, l *leader) {
 				idle = 0
 				continue
 			}
-			s.idleLead(l)
+			s.idleLead(ctx, l)
 			continue
 		}
 		idle = 0
 		err = s.landBatch(ctx, key, owner, items)
+		if err != nil && ctx.Err() != nil {
+			s.dropLead(key, l)
+			return
+		}
 		switch {
 		case errors.Is(err, errLeaseLost):
 			s.dropLead(key, l)
@@ -125,19 +135,33 @@ func (s *Server) lead(key meta.LandKey, l *leader) {
 		case err != nil:
 			fails++
 			s.logger.ErrorContext(ctx, "land batch failed", "error", logSafe(err))
-			s.idleLead(l)
+			s.idleLead(ctx, l)
 		default:
 			fails = 0
 		}
 	}
 }
 
-func (s *Server) idleLead(l *leader) {
+func (s *Server) idleLead(ctx context.Context, l *leader) {
 	t := s.events.Clock.NewTimer(s.lands.Poll)
 	defer t.Stop()
 	select {
 	case <-t.C:
 	case <-l.wake:
+	case <-ctx.Done():
+	}
+}
+
+// sleepLead waits for d, the longest that a lease of another replica can still run, and reports false when the hub
+// closed first.
+func (s *Server) sleepLead(ctx context.Context, d time.Duration) bool {
+	t := s.events.Clock.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 
