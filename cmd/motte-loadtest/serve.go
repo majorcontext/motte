@@ -14,6 +14,7 @@ import (
 	"github.com/majorcontext/motte/internal/bucket"
 	"github.com/majorcontext/motte/internal/bucket/fs"
 	"github.com/majorcontext/motte/internal/server"
+	mstore "github.com/majorcontext/motte/internal/store"
 	"github.com/majorcontext/motte/meta/sqlite"
 )
 
@@ -88,7 +89,7 @@ func runServe(ctx context.Context, args []string) error {
 	pub := priv.Key.Public().(ed25519.PublicKey)
 	scopes := []grant.Scope{grant.ScopeNode, grant.ScopeRead, grant.ScopeWrite, grant.ScopeImport, grant.ScopeOperator, grant.ScopeMerge}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	srv := server.New(server.Config{Meta: meta, Bucket: store, Verifier: grant.NewVerifier(grant.Key{Kid: *kid, Public: pub, Scopes: scopes}), Logger: log, Warm: true})
+	srv := server.New(server.Config{Meta: meta, Bucket: store, Verifier: grant.NewVerifier(grant.Key{Kid: *kid, Public: pub, Scopes: scopes}), Logger: log, Warm: true, RangeCacheBytes: mstore.DefaultRangeCacheBytes})
 	go func() { _ = srv.Run(ctx) }()
 	go srv.Warm(ctx)
 	if *compaction {

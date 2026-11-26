@@ -14,7 +14,6 @@ import (
 	"github.com/majorcontext/motte/grant"
 	"github.com/majorcontext/motte/identity"
 	"github.com/majorcontext/motte/identity/oidc"
-	"github.com/majorcontext/motte/internal/bucket"
 	"github.com/majorcontext/motte/internal/bucket/s3"
 	"github.com/majorcontext/motte/internal/store"
 )
@@ -35,10 +34,6 @@ func loadS3(getenv func(string) string, c *config) error {
 	return nil
 }
 
-// defaultGCSClients is how many Cloud Storage clients share the reads. One client funnels every read through the
-// connections of one HTTP/2 transport, whose pool and stream locks then serialize the readers.
-const defaultGCSClients = 8
-
 type config struct {
 	listen       string
 	meta         string
@@ -58,9 +53,10 @@ type config struct {
 	compactEvery time.Duration
 	compactGrace time.Duration
 	pprof        string
-	gcsClients   int
-	// hedge tunes the duplicate reads of the gcs backend; a zero Ratio turns them off.
-	hedge bucket.HedgeConfig
+	// hedge starts a duplicate of a slow read; the gcs backend only.
+	hedge bool
+	// warnings name each variable that is set and that this release ignores or reads differently.
+	warnings []string
 	// rangeCacheMiB is the memory of the range cache in MiB; 0 turns it off.
 	rangeCacheMiB int
 }
@@ -91,11 +87,8 @@ type config struct {
 //	MOTTE_COMPACTION_INTERVAL  wait between maintenance passes, a Go duration, default 30s
 //	MOTTE_COMPACTION_GRACE     how long a retired file stays before deletion, a Go duration, default 1h
 //	MOTTE_RANGE_CACHE_MIB      memory of the cache of pack ranges that requests share, in MiB, default 256; 0 turns it off
-//	MOTTE_PPROF                optional; address of a listener that serves /debug/pprof, apart from MOTTE_LISTEN; MOTTE_PPROF_CONTENTION=1 adds the mutex and block profiles
-//	MOTTE_GCS_CLIENTS          gcs only: how many Cloud Storage clients, each with its own HTTP/2 connections, read in turn, from 1 to 64, default 8
-//	MOTTE_GCS_HEDGE            gcs only: the most reads, in percent from 0 to 50, that may start a duplicate when they are slow, default 5; 0 turns hedging off
-//	MOTTE_GCS_HEDGE_MIN        gcs only: the least wait before a duplicate, a Go duration, default 20ms
-//	MOTTE_GCS_HEDGE_MAX        gcs only: the most wait before a duplicate, a Go duration, default 2s
+//	MOTTE_PPROF                optional; address of a listener that serves /debug/pprof with the mutex and block profiles, apart from MOTTE_LISTEN
+//	MOTTE_GCS_HEDGE            gcs only: on (default) or off; on starts a duplicate of a slow range read
 //	OTEL_EXPORTER_OTLP_ENDPOINT  optional; enables trace export
 func loadConfig(getenv func(string) string) (config, error) {
 	c := config{
@@ -166,19 +159,16 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if c.pprof = getenv("MOTTE_PPROF"); c.pprof != "" && c.pprof == c.listen {
 		return config{}, errors.New("MOTTE_PPROF needs an address other than MOTTE_LISTEN")
 	}
-	c.gcsClients = defaultGCSClients
-	if text := getenv("MOTTE_GCS_CLIENTS"); text != "" {
-		n, err := strconv.Atoi(text)
-		if err != nil || n < 1 || n > 64 || c.bucketKind != "gcs" {
-			return config{}, errors.New("MOTTE_GCS_CLIENTS must be a number from 1 to 64 and needs MOTTE_BUCKET_KIND=gcs")
-		}
-		c.gcsClients = n
-	}
-	hedge, err := loadHedge(getenv, c.bucketKind == "gcs")
+	hedge, err := loadHedge(getenv, &c)
 	if err != nil {
 		return config{}, err
 	}
 	c.hedge = hedge
+	for _, r := range removedVariables {
+		if getenv(r.name) != "" {
+			c.warnings = append(c.warnings, r.name+" is no longer read: "+r.use)
+		}
+	}
 	keys, err := parseKeys(getenv("MOTTE_TRUSTED_KEYS"))
 	if err != nil {
 		return config{}, err
@@ -194,32 +184,33 @@ func loadConfig(getenv func(string) string) (config, error) {
 	return c, nil
 }
 
-func loadHedge(getenv func(string) string, gcs bool) (bucket.HedgeConfig, error) {
-	h := bucket.HedgeConfig{Ratio: 0.05, Min: 20 * time.Millisecond, Max: 2 * time.Second}
-	bad := errors.New("MOTTE_GCS_HEDGE is a percent from 0 to 50, MOTTE_GCS_HEDGE_MIN and MOTTE_GCS_HEDGE_MAX are durations with MIN at most MAX, and all need MOTTE_BUCKET_KIND=gcs")
-	for _, v := range []struct {
-		name string
-		set  func(string) error
-	}{
-		{"MOTTE_GCS_HEDGE", func(t string) error {
-			n, err := strconv.Atoi(t)
-			h.Ratio = float64(n) / 100
-			if err == nil && (n < 0 || n > 50) {
-				err = bad
-			}
-			return err
-		}},
-		{"MOTTE_GCS_HEDGE_MIN", func(t string) (err error) { h.Min, err = time.ParseDuration(t); return }},
-		{"MOTTE_GCS_HEDGE_MAX", func(t string) (err error) { h.Max, err = time.ParseDuration(t); return }},
-	} {
-		if t := getenv(v.name); t != "" && (!gcs || v.set(t) != nil) {
-			return h, bad
-		}
+// removedVariables are the variables of earlier releases that nothing reads now.
+var removedVariables = []struct{ name, use string }{
+	{"MOTTE_GCS_CLIENTS", "the pool of 8 clients is fixed, and MOTTE_GCS_HEDGE is on or off"},
+	{"MOTTE_GCS_HEDGE_MIN", "the hedge delays are fixed; MOTTE_GCS_HEDGE is on or off"},
+	{"MOTTE_GCS_HEDGE_MAX", "the hedge delays are fixed; MOTTE_GCS_HEDGE is on or off"},
+	{"MOTTE_PPROF_CONTENTION", "MOTTE_PPROF always serves the mutex and block profiles"},
+}
+
+// loadHedge reads MOTTE_GCS_HEDGE. Hedging is on by default. A number from an earlier release, a percent, is read as
+// off for 0 and as on for the rest, with a warning, and never stops the server.
+func loadHedge(getenv func(string) string, c *config) (bool, error) {
+	text := getenv("MOTTE_GCS_HEDGE")
+	if text != "" && c.bucketKind != "gcs" {
+		return false, errors.New("MOTTE_GCS_HEDGE needs MOTTE_BUCKET_KIND=gcs")
 	}
-	if h.Min > h.Max {
-		return h, bad
+	switch text {
+	case "", "on":
+		return true, nil
+	case "off":
+		return false, nil
 	}
-	return h, nil
+	n, err := strconv.Atoi(text)
+	if err != nil {
+		return false, errors.New("MOTTE_GCS_HEDGE must be on or off")
+	}
+	c.warnings = append(c.warnings, "MOTTE_GCS_HEDGE is no longer a percent: use on or off; "+text+" is read as "+map[bool]string{true: "on", false: "off"}[n != 0])
+	return n != 0, nil
 }
 
 func loadOIDC(getenv func(string) string) (*oidc.Config, identity.Rules, error) {

@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/pprof"
-	"os"
 	"runtime"
 	"time"
 
@@ -52,12 +51,10 @@ func flush(shutdown func(context.Context) error) {
 }
 
 // servePprof serves the profiles on addr, a listener of its own: the public handler never carries them.
-// MOTTE_PPROF_CONTENTION=1 turns on the mutex and block profiles.
+// It also turns on the mutex and block profiles.
 func servePprof(log *slog.Logger, addr string) {
-	if os.Getenv("MOTTE_PPROF_CONTENTION") == "1" {
-		runtime.SetMutexProfileFraction(100)
-		runtime.SetBlockProfileRate(1000000)
-	}
+	runtime.SetMutexProfileFraction(100)
+	runtime.SetBlockProfileRate(1000000)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/debug/pprof/", pprof.Index)
 	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)

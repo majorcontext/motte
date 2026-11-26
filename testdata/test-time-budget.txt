@@ -23,7 +23,7 @@ calibrate 0.037
 
 # Each limit is the measured count plus a small margin. Servers and schemas are the contract tests, which start a
 # server on a PostgreSQL schema or a SQLite file each. Processes are the git commands of the test helpers.
-count internal/server servers 107
+count internal/server servers 108
 count internal/server schemas 63
 count internal/server processes 168
 count cmd/motte servers 1

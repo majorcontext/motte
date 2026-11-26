@@ -40,6 +40,13 @@ func main() {
 	}
 }
 
+// gcsClients is how many Cloud Storage clients share the reads. One client funnels every read through the connections
+// of one HTTP/2 transport, whose pool and stream locks then serialize the readers.
+const gcsClients = 8
+
+// hedgeConfig bounds the duplicate reads of a hedged bucket: at most 5 percent of the reads, after 20 ms to 2 s.
+var hedgeConfig = bucket.HedgeConfig{Ratio: 0.05, Min: 20 * time.Millisecond, Max: 2 * time.Second}
+
 func openBucket(ctx context.Context, c config) (bucket.Store, error) {
 	if c.bucketKind == "fs" {
 		root, err := fs.New(c.bucket)
@@ -55,9 +62,9 @@ func openBucket(ctx context.Context, c config) (bucket.Store, error) {
 		}
 		return s3.New(client, c.bucket), nil
 	}
-	clients := make([]*storage.Client, c.gcsClients+1)
-	if c.hedge.Ratio == 0 {
-		clients = clients[:c.gcsClients]
+	clients := make([]*storage.Client, gcsClients+1)
+	if !c.hedge {
+		clients = clients[:gcsClients]
 	}
 	for i := range clients {
 		var err error
@@ -65,11 +72,11 @@ func openBucket(ctx context.Context, c config) (bucket.Store, error) {
 			return nil, err
 		}
 	}
-	primary, err := gcs.NewPool(clients[:c.gcsClients], c.bucket)
-	if err != nil || c.hedge.Ratio == 0 {
+	primary, err := gcs.NewPool(clients[:gcsClients], c.bucket)
+	if err != nil || !c.hedge {
 		return primary, err
 	}
-	return bucket.Hedge(primary, gcs.New(clients[c.gcsClients], c.bucket), c.hedge), nil
+	return bucket.Hedge(primary, gcs.New(clients[gcsClients], c.bucket), hedgeConfig), nil
 }
 
 func openMeta(ctx context.Context, c config) (meta.Store, func(), error) {
@@ -103,6 +110,9 @@ func run(log *slog.Logger) error {
 		defer shutdown()
 	}
 	otel.SetTextMapPropagator(propagation.TraceContext{})
+	for _, w := range cfg.warnings {
+		log.Warn(w)
+	}
 	if cfg.pprof != "" {
 		go servePprof(log, cfg.pprof)
 	}
@@ -163,10 +173,4 @@ func run(log *slog.Logger) error {
 	return nil
 }
 
-// rangeCacheBytes maps the setting in MiB to Config.RangeCacheBytes: a negative value turns the cache off.
-func rangeCacheBytes(mib int) int64 {
-	if mib == 0 {
-		return -1
-	}
-	return int64(mib) << 20
-}
+func rangeCacheBytes(mib int) int64 { return int64(mib) << 20 }

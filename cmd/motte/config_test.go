@@ -20,8 +20,8 @@ func TestLoadConfigChoosesBackendsAndRefusesUnknownOnes(t *testing.T) {
 	t.Parallel()
 	keys := `[{"kid":"k","key":"` + strings.Repeat("A", 43) + `=","scopes":["node"]}]`
 	rangeCacheMiB := map[string]int{"postgres by default": 256, "range cache set": 512}
-	gcsClients := map[string]int{"postgres by default": 8, "gcs clients set": 3}
-	hedge := map[string]float64{"postgres by default": 0.05, "hedge set": 0.1, "hedge off": 0}
+	hedge := map[string]bool{"postgres by default": true, "hedge on": true, "hedge off": false, "hedge old percent": true, "hedge old zero": false}
+	warned := map[string]int{"gcs clients set": 1, "hedge old percent": 1, "hedge old zero": 1, "hedge delays set": 2, "pprof contention set": 1}
 	for name, c := range map[string]struct {
 		env map[string]string
 		ok  bool
@@ -41,14 +41,15 @@ func TestLoadConfigChoosesBackendsAndRefusesUnknownOnes(t *testing.T) {
 		"range cache set":      {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_RANGE_CACHE_MIB": "512"}, true},
 		"range cache off":      {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_RANGE_CACHE_MIB": "0"}, true},
 		"bad range cache size": {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_RANGE_CACHE_MIB": "-5"}, false},
-		"gcs clients set":      {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "gcs", "MOTTE_BUCKET": "b", "MOTTE_GCS_CLIENTS": "3"}, true},
-		"no gcs clients":       {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "gcs", "MOTTE_BUCKET": "b", "MOTTE_GCS_CLIENTS": "0"}, false},
-		"gcs clients need gcs": {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_GCS_CLIENTS": "2"}, false},
-		"hedge set":            {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "gcs", "MOTTE_BUCKET": "b", "MOTTE_GCS_HEDGE": "10", "MOTTE_GCS_HEDGE_MAX": "1s"}, true},
-		"hedge off":            {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "gcs", "MOTTE_BUCKET": "b", "MOTTE_GCS_HEDGE": "0"}, true},
-		"hedge too much":       {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "gcs", "MOTTE_BUCKET": "b", "MOTTE_GCS_HEDGE": "80"}, false},
-		"hedge min above max":  {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "gcs", "MOTTE_BUCKET": "b", "MOTTE_GCS_HEDGE_MIN": "5s"}, false},
-		"hedge needs gcs":      {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_GCS_HEDGE": "5"}, false},
+		"gcs clients set":      {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_GCS_CLIENTS": "3"}, true},
+		"hedge on":             {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "gcs", "MOTTE_BUCKET": "b", "MOTTE_GCS_HEDGE": "on"}, true},
+		"hedge off":            {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "gcs", "MOTTE_BUCKET": "b", "MOTTE_GCS_HEDGE": "off"}, true},
+		"hedge old percent":    {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "gcs", "MOTTE_BUCKET": "b", "MOTTE_GCS_HEDGE": "10"}, true},
+		"hedge old zero":       {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "gcs", "MOTTE_BUCKET": "b", "MOTTE_GCS_HEDGE": "0"}, true},
+		"hedge unknown word":   {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "gcs", "MOTTE_BUCKET": "b", "MOTTE_GCS_HEDGE": "maybe"}, false},
+		"hedge delays set":     {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "gcs", "MOTTE_BUCKET": "b", "MOTTE_GCS_HEDGE_MIN": "5s", "MOTTE_GCS_HEDGE_MAX": "1s"}, true},
+		"hedge needs gcs":      {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_GCS_HEDGE": "on"}, false},
+		"pprof contention set": {map[string]string{"MOTTE_DATABASE_URL": "x", "MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d", "MOTTE_PPROF_CONTENTION": "1"}, true},
 		"postgres needs a DSN": {map[string]string{"MOTTE_BUCKET_KIND": "fs", "MOTTE_BUCKET": "d"}, false},
 	} {
 		c.env["MOTTE_TRUSTED_KEYS"] = keys
@@ -59,11 +60,11 @@ func TestLoadConfigChoosesBackendsAndRefusesUnknownOnes(t *testing.T) {
 		if want, ok := rangeCacheMiB[name]; ok && cfg.rangeCacheMiB != want {
 			t.Errorf("%s: range cache = %d MiB, want %d", name, cfg.rangeCacheMiB, want)
 		}
-		if want, ok := gcsClients[name]; ok && cfg.gcsClients != want {
-			t.Errorf("%s: gcs clients = %d, want %d", name, cfg.gcsClients, want)
+		if want, ok := hedge[name]; ok && cfg.hedge != want {
+			t.Errorf("%s: hedge = %v, want %v", name, cfg.hedge, want)
 		}
-		if want, ok := hedge[name]; ok && cfg.hedge.Ratio != want {
-			t.Errorf("%s: hedge ratio = %v, want %v", name, cfg.hedge.Ratio, want)
+		if len(cfg.warnings) != warned[name] {
+			t.Errorf("%s: warnings = %q, want %d", name, cfg.warnings, warned[name])
 		}
 	}
 }

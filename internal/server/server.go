@@ -44,8 +44,7 @@ type Config struct {
 	Lands LandsConfig
 	// Compaction tunes Compact. Zero values take the defaults.
 	Compaction CompactionConfig
-	// RangeCacheBytes is the memory of the cache of pack ranges that requests share. Zero takes the default, and a
-	// negative value turns the cache off.
+	// RangeCacheBytes is the memory of the cache of pack ranges that requests share. Zero turns the cache off.
 	RangeCacheBytes int64
 	// Limits are the size limits of the requests. Zero fields take the defaults.
 	Limits Limits
@@ -100,7 +99,7 @@ func New(cfg Config) *Server {
 		}
 	})
 	limits := cfg.Limits.withDefaults()
-	s := &Server{limits: limits, index: cfg.Meta, objects: store.New(metered, cfg.Meta, store.WithClock(clock.Or(cfg.Clock)), store.WithGrace(cfg.Compaction.withDefaults().Grace), rangeCacheOption(cfg.RangeCacheBytes)), compaction: cfg.Compaction.withDefaults(), logger: cfg.Logger, now: cfg.Now, readers: make(chan struct{}, uploadReaders), largeFetches: make(chan struct{}, limits.FetchSlots), warmers: make(chan struct{}, landWarmers), wake: make(chan struct{}, 1), clock: clock.Or(cfg.Clock)}
+	s := &Server{limits: limits, index: cfg.Meta, objects: store.New(metered, cfg.Meta, store.WithClock(clock.Or(cfg.Clock)), store.WithGrace(cfg.Compaction.withDefaults().Grace), store.WithRangeCache(cfg.RangeCacheBytes)), compaction: cfg.Compaction.withDefaults(), logger: cfg.Logger, now: cfg.Now, readers: make(chan struct{}, uploadReaders), largeFetches: make(chan struct{}, limits.FetchSlots), warmers: make(chan struct{}, landWarmers), wake: make(chan struct{}, 1), clock: clock.Or(cfg.Clock)}
 	s.cold.Store(cfg.Warm)
 	if s.now == nil {
 		s.now = time.Now
@@ -251,12 +250,4 @@ func (s *Server) registerCacheMetrics() {
 	mgauge("motte_manifest_layers_max", "Most layers of any repository that maintenance has seen.", func(m store.MaintStats) int64 { return m.LayersMax })
 	mgauge("motte_manifest_layers_sum", "Layers of all repositories that maintenance has seen.", func(m store.MaintStats) int64 { return m.LayersSum })
 	mgauge("motte_manifest_repos", "Repositories that maintenance has seen.", func(m store.MaintStats) int64 { return m.Repos })
-}
-
-// rangeCacheOption maps Config.RangeCacheBytes to the option of the store: zero keeps the default.
-func rangeCacheOption(n int64) store.Option {
-	if n == 0 {
-		return func(*store.Service) {}
-	}
-	return store.WithRangeCache(max(n, 0))
 }

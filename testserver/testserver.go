@@ -22,6 +22,7 @@ import (
 	"github.com/majorcontext/motte/internal/meta/postgres"
 	"github.com/majorcontext/motte/internal/pgtest"
 	"github.com/majorcontext/motte/internal/server"
+	mstore "github.com/majorcontext/motte/internal/store"
 	"github.com/majorcontext/motte/meta"
 	"github.com/majorcontext/motte/meta/sqlite"
 	"github.com/majorcontext/tools/testcount"
@@ -190,7 +191,7 @@ func run(t testing.TB, store meta.Store, o options) *Server {
 		grant.Key{Kid: "node", Public: nodePub, Scopes: []grant.Scope{grant.ScopeNode}})
 	build := func(instance string) *httptest.Server {
 		testcount.Add(t, testcount.Servers)
-		cfg := server.Config{Meta: store, Bucket: bkt, Verifier: verifier, Events: server.EventsConfig{Instance: instance}}
+		cfg := server.Config{Meta: store, Bucket: bkt, Verifier: verifier, Events: server.EventsConfig{Instance: instance}, RangeCacheBytes: mstore.DefaultRangeCacheBytes}
 		if f := o.faults; f != nil {
 			cfg.Meta, cfg.Bucket = faultMeta{store, *f}, faultBucket{bkt, *f}
 		}
