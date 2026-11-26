@@ -6,16 +6,16 @@ import (
 	"time"
 
 	"github.com/coder/quartz"
-	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 func TestSlowReadsGetASpanAtMostOnceASecond(t *testing.T) {
+	t.Parallel()
 	spans := tracetest.NewInMemoryExporter()
-	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSyncer(spans)))
 	clk := quartz.NewMock(t)
 	s := &Service{clk: clk, slowAfter: slowReadAfter}
+	WithTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSyncer(spans)))(s)
 	k := rangeKey{pack: "p", end: 10}
 	start := clk.Now()
 	for _, step := range []struct {

@@ -2,4 +2,3 @@
 # One line for each test: package TestName reason
 # package is the import path below the module path. The reason says what shared state the test writes.
 # A serial test runs before any parallel test of its package resumes, so no running test reads the state while it changes.
-internal/store TestSlowReadsGetASpanAtMostOnceASecond sets the global tracer provider

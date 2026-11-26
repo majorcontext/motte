@@ -247,7 +247,7 @@ func (s *Service) slowRead(ctx context.Context, k rangeKey, start time.Time, n i
 	if end.UnixNano()-last < int64(slowReadEvery) || !s.slowAt.CompareAndSwap(last, end.UnixNano()) {
 		return
 	}
-	_, sp := tracer.Start(ctx, "vcs.pack.read.slow", trace.WithTimestamp(start), trace.WithAttributes(attribute.Int64("offset", k.off), attribute.Int64("range_bytes", k.end-k.off), attribute.Int("bytes", n)))
+	_, sp := s.slowTracer().Start(ctx, "vcs.pack.read.slow", trace.WithTimestamp(start), trace.WithAttributes(attribute.Int64("offset", k.off), attribute.Int64("range_bytes", k.end-k.off), attribute.Int("bytes", n)))
 	if err != nil {
 		sp.AddEvent("exception", trace.WithAttributes(attribute.String("exception.type", fmt.Sprintf("%T", err))))
 		sp.SetStatus(codes.Error, "error")
@@ -369,4 +369,11 @@ func (b *packReader) plan(offs []int64, a *aheadBuf) []prefetchRun {
 		budget -= int64(i-i0) * minRead
 	}
 	return runs
+}
+
+func (s *Service) slowTracer() trace.Tracer {
+	if s.tracer != nil {
+		return s.tracer
+	}
+	return tracer
 }

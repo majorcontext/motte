@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"go.opentelemetry.io/otel/trace"
 	"io"
 	"maps"
 	"regexp"
@@ -155,6 +156,8 @@ type Service struct {
 	ihits, imisses                                 atomic.Int64
 
 	slowAfter time.Duration
+	// tracer records the slow read spans of this service; nil takes the global tracer.
+	tracer trace.Tracer
 	// graphCap is the most commits that the graph of an imported pack holds.
 	graphCap int
 	slowAt   atomic.Int64
@@ -241,6 +244,11 @@ func WithReadBudget(bytes int64) Option {
 		n := max(bytes, MinReadBudget)
 		s.rflight, s.readBudget = semaphore.NewWeighted(n), n
 	}
+}
+
+// WithTracerProvider makes the service record its slow read spans with tp, not with the global tracer provider.
+func WithTracerProvider(tp trace.TracerProvider) Option {
+	return func(s *Service) { s.tracer = tp.Tracer("github.com/majorcontext/motte/internal/store") }
 }
 
 // WithRangeCache sets the memory of the cache of pack ranges that requests share. A value of zero or less turns the
