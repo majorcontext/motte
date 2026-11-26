@@ -45,3 +45,34 @@ func landMergesLinesThatTwoLandsChangeApart(t *testing.T, l *landEnv) {
 		t.Errorf("same lines: paths = %v, main = %+v, want [f] and %+v", got, l.tip("main"), at)
 	}
 }
+
+func TestLandIgnoresAPathThatTheTargetAddedAndRemoved(t *testing.T) {
+	eachBackend(t, func(t *testing.T, l *landEnv) {
+		var o objSet
+		adds := o.commit(map[string]string{"x": "1"}, "", "add x", l.root)
+		removes := o.commit(nil, "", "remove x", adds)
+		mine := o.commit(map[string]string{"x": "1", "y": "2"}, "", "mine", l.root)
+		o.upload(t, l.env, l.repo)
+		for _, step := range [][2]string{{l.root, adds}, {adds, removes}} {
+			if _, err := l.land(l.merge, "main", step[0], step[1]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if r, err := l.land(l.merge, "main", l.root, mine); err != nil || !slices.Equal(l.files(r.Tip), []string{"x", "y"}) {
+			t.Fatalf("land of x = %+v, %v, want x and y", r, err)
+		}
+		start := l.tip("main").Commit
+		asFile := o.commit(map[string]string{"x": "1", "y": "2", "d": "1"}, "", "d as a file", start)
+		asDir := o.commit(map[string]string{"x": "1", "y": "2", "d/y": "1"}, "", "d as a directory", asFile)
+		beside := o.commit(map[string]string{"x": "1", "y": "2", "d/z": "1"}, "", "beside", start)
+		o.upload(t, l.env, l.repo)
+		for _, step := range [][2]string{{start, asFile}, {asFile, asDir}} {
+			if _, err := l.land(l.merge, "main", step[0], step[1]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if r, err := l.land(l.merge, "main", start, beside); err != nil || !slices.Contains(l.files(r.Tip), "d/") {
+			t.Fatalf("land beside a directory = %+v, %v, want d/z added", r, err)
+		}
+	})
+}
