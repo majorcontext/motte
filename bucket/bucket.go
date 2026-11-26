@@ -15,18 +15,50 @@ var ErrNotFound = errors.New("bucket: object not found")
 // ErrChanged is a Delete of an object whose version is not the one named.
 var ErrChanged = errors.New("bucket: object changed")
 
-// ConditionalDeleter is an optional method of a Store. ConditionalDelete reports whether Delete tests the version
-// atomically, so an object that is stored again is never removed by a Delete of the older version.
-type ConditionalDeleter interface {
-	ConditionalDelete() bool
+// Caps are the properties of a Store that a caller may depend on.
+type Caps struct {
+	// ConditionalDelete: Delete tests the version atomically, so an object that is stored again is never removed by a
+	// Delete of the older version.
+	ConditionalDelete bool
+	// Hedged: range reads have a duplicate on a second connection.
+	Hedged bool
 }
 
-// DeletesConditionally reports whether Delete of s tests the version. A Store that does not declare it answers false,
-// so a wrapper must forward the method.
-func DeletesConditionally(s Store) bool {
-	c, ok := s.(ConditionalDeleter)
-	return ok && c.ConditionalDelete()
+// Capable is an optional method of a Store, which declares its own Caps.
+type Capable interface {
+	Caps() Caps
 }
+
+// Wrapper is a Store that adds behavior to another one. CapsOf follows Unwrap through a Store that declares no Caps.
+type Wrapper interface {
+	Unwrap() Store
+}
+
+// CapsOf returns the Caps of s. It walks the wrappers of s through Unwrap: Hedged is true when any layer declares it,
+// and ConditionalDelete is the answer of the outermost layer that declares Caps. A layer that declares no Caps is
+// transparent, and a Store with no declaring layer has no capability.
+func CapsOf(s Store) Caps {
+	var caps Caps
+	declared := false
+	for s != nil {
+		if c, ok := s.(Capable); ok {
+			got := c.Caps()
+			caps.Hedged = caps.Hedged || got.Hedged
+			if !declared {
+				caps.ConditionalDelete, declared = got.ConditionalDelete, true
+			}
+		}
+		w, ok := s.(Wrapper)
+		if !ok {
+			break
+		}
+		s = w.Unwrap()
+	}
+	return caps
+}
+
+// DeletesConditionally reports whether Delete of s tests the version.
+func DeletesConditionally(s Store) bool { return CapsOf(s).ConditionalDelete }
 
 type Store interface {
 	// Create writes data when key is absent and reports whether it wrote. A

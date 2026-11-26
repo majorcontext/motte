@@ -252,4 +252,4 @@ func TestACopyOfManySmallRunsReadsAtMost64AtOnceAndOpensNoPack(t *testing.T) {
 	}
 }
 
-func (g *gatedStore) ConditionalDelete() bool { return bucket.DeletesConditionally(g.Store) }
+func (g *gatedStore) Unwrap() bucket.Store { return g.Store }

@@ -57,7 +57,7 @@ type observed struct {
 	fn func(op string, d time.Duration, err error)
 }
 
-func (o observed) ConditionalDelete() bool { return DeletesConditionally(o.Store) }
+func (o observed) Unwrap() Store { return o.Store }
 
 func (o observed) Get(ctx context.Context, key string) ([]byte, error) {
 	start := time.Now()

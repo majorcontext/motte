@@ -199,4 +199,4 @@ func TestAPushStoresItsPackIndexAndSizesTogetherAndItsTailMergeReadsNoSizeFile(t
 	}
 }
 
-func (k *keyBucket) ConditionalDelete() bool { return bucket.DeletesConditionally(k.Store) }
+func (k *keyBucket) Unwrap() bucket.Store { return k.Store }

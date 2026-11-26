@@ -67,8 +67,13 @@ func Hedge(primary, alt Store, cfg HedgeConfig) *Hedged {
 	return h
 }
 
-// ConditionalDelete forwards the answer of the primary store, which serves every Delete.
-func (h *Hedged) ConditionalDelete() bool { return DeletesConditionally(h.Store) }
+// Caps is Hedged, with the ConditionalDelete of the primary store, which serves every Delete.
+func (h *Hedged) Caps() Caps {
+	return Caps{ConditionalDelete: CapsOf(h.Store).ConditionalDelete, Hedged: true}
+}
+
+// Unwrap returns the primary store.
+func (h *Hedged) Unwrap() Store { return h.Store }
 
 // HedgeStats returns the counters of the duplicates.
 func (h *Hedged) HedgeStats() HedgeStats {
