@@ -14,8 +14,8 @@ import (
 	"github.com/majorcontext/motte/bucket"
 	"github.com/majorcontext/motte/bucket/s3"
 	"github.com/majorcontext/motte/grant"
-	"github.com/majorcontext/motte/internal/identity"
-	"github.com/majorcontext/motte/internal/identity/oidc"
+	"github.com/majorcontext/motte/identity"
+	"github.com/majorcontext/motte/identity/oidc"
 	"github.com/majorcontext/motte/internal/store"
 )
 
@@ -51,6 +51,7 @@ type config struct {
 	otlp         bool
 	retention    time.Duration
 	oidc         *oidc.Config
+	oidcRules    identity.Rules
 	tlsCert      string
 	tlsKey       string
 	compaction   bool
@@ -183,7 +184,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, err
 	}
 	c.keys = keys
-	if c.oidc, err = loadOIDC(getenv); err != nil {
+	if c.oidc, c.oidcRules, err = loadOIDC(getenv); err != nil {
 		return config{}, err
 	}
 	c.tlsCert, c.tlsKey = getenv("MOTTE_TLS_CERT"), getenv("MOTTE_TLS_KEY")
@@ -221,30 +222,32 @@ func loadHedge(getenv func(string) string, gcs bool) (bucket.HedgeConfig, error)
 	return h, nil
 }
 
-func loadOIDC(getenv func(string) string) (*oidc.Config, error) {
+func loadOIDC(getenv func(string) string) (*oidc.Config, identity.Rules, error) {
 	issuer := getenv("MOTTE_OIDC_ISSUER")
 	if issuer == "" {
 		for _, k := range []string{"AUDIENCE", "RULES", "KEYS_URL", "HEADER", "CLAIM", "ALGS"} {
 			if getenv("MOTTE_OIDC_"+k) != "" {
-				return nil, errors.New("MOTTE_OIDC_* variables need MOTTE_OIDC_ISSUER")
+				return nil, nil, errors.New("MOTTE_OIDC_* variables need MOTTE_OIDC_ISSUER")
 			}
 		}
-		return nil, nil
+		return nil, nil, nil
 	}
 	cfg := &oidc.Config{Issuer: issuer, Audience: getenv("MOTTE_OIDC_AUDIENCE"), KeysURL: getenv("MOTTE_OIDC_KEYS_URL"),
 		Header: getenv("MOTTE_OIDC_HEADER"), Claim: getenv("MOTTE_OIDC_CLAIM")}
 	if algs := getenv("MOTTE_OIDC_ALGS"); algs != "" {
 		cfg.Algs = strings.Split(algs, ",")
 	}
-	var rules []identity.Rule
+	var rules identity.Rules
 	if err := json.Unmarshal([]byte(getenv("MOTTE_OIDC_RULES")), &rules); err != nil || len(rules) == 0 {
-		return nil, errors.New("MOTTE_OIDC_RULES must be a non-empty JSON list")
+		return nil, nil, errors.New("MOTTE_OIDC_RULES must be a non-empty JSON list")
 	}
-	cfg.Rules = rules
+	if err := rules.Validate(); err != nil {
+		return nil, nil, fmt.Errorf("MOTTE_OIDC_RULES: %w", err)
+	}
 	if _, err := oidc.New(*cfg); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return cfg, nil
+	return cfg, rules, nil
 }
 
 func parseKeys(text string) ([]grant.Key, error) {

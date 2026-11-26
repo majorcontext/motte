@@ -35,6 +35,7 @@ Non-goals:
 | Store service | HTTP service over a `meta` store and a `bucket` store, and the epoch fence. | M2 |
 | `client` | Typed Go client for callers. Public package. | M3 |
 | `devicelogin` | Signs a person in with the OAuth device authorization grant against an OIDC issuer and keeps the token in a private file. Public package. | M3 |
+| `identity`, `identity/oidc`, `identity/usertoken` | Verifies the credential of a request into a `Principal`, matches rules, and keeps per-user token hashes. Public packages. `internal/access` turns a principal and a scope into claims. | M3 |
 | `testserver` | Starts a real server in a caller's test, on PostgreSQL (`Start`) or on SQLite and a temporary directory (`StartLocal`). Public package. | M3 |
 | `internal/testcount` | Counts the servers, PostgreSQL schemas and processes that the test helpers start, and prints the counts of a package at the end of its test run for `internal/testtime`. | M3 |
 | `internal/vfs/...`, `cmd/motte-vfsd`, `volume` | Node daemon that serves a virtual workspace, and its public volume attributes. | M4 |
@@ -497,7 +498,7 @@ Every external provider sits behind an interface that its consumer owns. A provi
 |---|---|---|---|---|
 | meta-store | `meta.Store` | `meta/metatest.Run` | `meta/postgres`, `meta/sqlite` | |
 | bucket-store | `bucket.Store` | `bucket/buckettest.Run` | `bucket/gcs`, `bucket/fs`, `bucket/s3` | |
-| identity | `internal/identity.Authenticator` | `internal/identity/identitytest.Run` | `internal/identity/token`, `internal/identity/oidc`, `internal/identity/usertoken` | |
+| identity | `identity.Verifier` | `identity/identitytest.Run` | `identity/oidc`, `identity/usertoken` | |
 | release-publisher | `internal/release/publish.Publisher` | `internal/release/publish/publishtest.Run` | `internal/release/publish/dir`, `internal/release/publish/github` | |
 
 - A cell that names Go code is `dir.Identifier`: the directory is relative to the module root.
@@ -572,16 +573,16 @@ The swaps are not atomic across refs: the first failure stops the push, and the 
 
 ### Human identities
 
-A person uses `git` on the git routes with no grant in one of two ways, and neither needs a vendor. Each is a `identity.Authenticator`, tried after the grant. The same rules apply to both: a person never holds `merge`, `operator`, `import` or `node`, never mints a grant and never reaches a route except git and repository creation. A `write` person pushes as a `write` grant does, so a protected ref refuses it (see Protected refs). A deployment that gives `write` protects the default branch of each repository, so that only the control plane lands it with a `merge` grant.
+A person uses `git` on the git routes with no grant in one of two ways, and neither needs a vendor. Each is an `identity.Verifier`, tried after the grant. A verifier gives an `identity.Principal` (`Subject`, `Email`, `EmailVerified`, `Exp`); `Rules.Match` or the record of a token gives the scope; the service turns the principal and the scope into the claims of a grant (`internal/access`). The packages `identity`, `identity/oidc` and `identity/usertoken` are public. The same rules apply to both: a person never holds `merge`, `operator`, `import` or `node`, never mints a grant and never reaches a route except git and repository creation. A `write` person pushes as a `write` grant does, so a protected ref refuses it (see Protected refs). A deployment that gives `write` protects the default branch of each repository, so that only the control plane lands it with a `merge` grant.
 
-OIDC identity (`internal/identity/oidc`). The service verifies a JWT from the issuer that `MOTTE_OIDC_ISSUER` names. It trusts no header that is not a valid JWT.
+OIDC identity (`identity/oidc`). The service verifies a JWT from the issuer that `MOTTE_OIDC_ISSUER` names. It trusts no header that is not a valid JWT.
 
 - The JWT must use an algorithm of `MOTTE_OIDC_ALGS`, be signed by a key of the key set (a request refreshes the cache when it is 45 minutes old, and a `kid` that the cache does not hold causes a fetch; there is at most one fetch at a time and one a minute, and a fetch holds no lock, so the cached keys serve until the fetch ends; a cache that is 1 hour past its last good fetch is refused, so a failed refresh has 15 minutes of retries before any sign-in is refused), with `iss` equal to the issuer, `aud` holding the audience, `now < exp`, `nbf <= now` and a non-empty value in the claim `MOTTE_OIDC_CLAIM`. When that claim is `email` and the token carries `email_verified` as false (the boolean, or the text `false`), the token is refused; a token with no `email_verified` is accepted, because an identity-aware proxy verifies the email itself. Any failure answers 401 like a refused grant.
-- The rules (`MOTTE_OIDC_RULES`) map the claim value to a scope on the repository of the URL. When several rules match, `write` wins. No matching rule answers 401.
+- The rules (`MOTTE_OIDC_RULES`) map the principal to a scope. The subject is the claim value and matches exactly; with the claim `email`, the verified email matches without case and a `@domain` principal matches its domain on the repository of the URL. When several rules match, `write` wins. No matching rule answers 401.
 - The result is the claims of a grant with the scope, the repository of the URL and the claim value as `subject`. It is never a signed grant.
 - Cloudflare Access is one configuration, not a separate implementation: `MOTTE_OIDC_HEADER=Cf-Access-Jwt-Assertion`, `MOTTE_OIDC_ISSUER=https://<team>.cloudflareaccess.com`, `MOTTE_OIDC_AUDIENCE=<AUD tag>` and `MOTTE_OIDC_KEYS_URL=https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`.
 
-Per-user tokens (`internal/identity/usertoken`). They need no issuer. An administrator with an `operator` grant issues one with `POST /v1/tokens`, or `motte token create --principal P --scope S [--repo R]... [--ttl D]`. A person cannot issue one, whatever the identity.
+Per-user tokens (`identity/usertoken`). They need no issuer. An administrator with an `operator` grant issues one with `POST /v1/tokens`, or `motte token create --principal P --scope S [--repo R]... [--ttl D]`. A person cannot issue one, whatever the identity.
 
 - A token is `mtu_` and 43 characters of base64url from 32 random bytes. The response shows it once. The service keeps the SHA-256 hex of it with the principal, the scope, the repositories, the expiry and the revocation time (`user_tokens`). The record has an ID `ut_<16 hex>`.
 - The scope is `read` or `write` with at least one repository, or `admin` with none. A token with `admin` creates a repository (`POST /v1/repos` accepts it as an `operator` grant) and nothing else. A token answers only for the repositories that it lists.

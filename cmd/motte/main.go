@@ -20,7 +20,7 @@ import (
 	"github.com/majorcontext/motte/bucket/gcs"
 	"github.com/majorcontext/motte/bucket/s3"
 	"github.com/majorcontext/motte/grant"
-	"github.com/majorcontext/motte/internal/identity/oidc"
+	"github.com/majorcontext/motte/identity/oidc"
 	"github.com/majorcontext/motte/internal/server"
 	"github.com/majorcontext/motte/meta"
 	"github.com/majorcontext/motte/meta/postgres"
@@ -121,6 +121,7 @@ func run(log *slog.Logger) error {
 		if scfg.Identity, err = oidc.New(*cfg.oidc); err != nil {
 			return err
 		}
+		scfg.Rules = cfg.oidcRules
 	}
 	srv := server.New(scfg)
 	defer srv.Close()

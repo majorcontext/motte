@@ -18,8 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/majorcontext/motte/grant"
-	"github.com/majorcontext/motte/internal/identity"
+	"github.com/majorcontext/motte/identity"
 )
 
 const (
@@ -48,13 +47,12 @@ type Config struct {
 	Claim string
 	// Algs lists the accepted signature algorithms: RS256, RS384, RS512, ES256 or ES384. Default RS256.
 	Algs   []string
-	Rules  []identity.Rule
 	Client *http.Client
 	Now    func() time.Time
 }
 
-// Authenticator verifies the JWT and applies the rules.
-type Authenticator struct {
+// Verifier verifies the JWT.
+type Verifier struct {
 	cfg Config
 
 	mu      sync.Mutex
@@ -67,13 +65,10 @@ type Authenticator struct {
 
 var hashes = map[string]crypto.Hash{"RS256": crypto.SHA256, "RS384": crypto.SHA384, "RS512": crypto.SHA512, "ES256": crypto.SHA256, "ES384": crypto.SHA384}
 
-// New checks cfg. A rule may give only read, write or admin: a human identity never mints a grant, and never merges.
-func New(cfg Config) (*Authenticator, error) {
+// New checks cfg.
+func New(cfg Config) (*Verifier, error) {
 	if cfg.Issuer == "" || cfg.Audience == "" {
 		return nil, errors.New("oidc: the issuer and the audience are required")
-	}
-	if err := identity.Validate(cfg.Rules); err != nil {
-		return nil, fmt.Errorf("oidc: %w", err)
 	}
 	if len(cfg.Algs) == 0 {
 		cfg.Algs = []string{"RS256"}
@@ -95,7 +90,7 @@ func New(cfg Config) (*Authenticator, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Authenticator{cfg: cfg}, nil
+	return &Verifier{cfg: cfg}, nil
 }
 
 type jwtClaims struct {
@@ -106,7 +101,7 @@ type jwtClaims struct {
 	Subject string
 }
 
-func (a *Authenticator) token(r *http.Request) string {
+func (a *Verifier) token(r *http.Request) string {
 	v := r.Header.Get(a.cfg.Header)
 	if !strings.EqualFold(a.cfg.Header, "Authorization") {
 		return v
@@ -120,19 +115,21 @@ func (a *Authenticator) token(r *http.Request) string {
 	return ""
 }
 
-func (a *Authenticator) Authenticate(r *http.Request, repo string) (grant.Claims, error) {
+// Verify checks the JWT of r. The subject is the claim that cfg.Claim names. A claim email is the email of the
+// principal, and the principal has a verified email only when that claim is the subject.
+func (a *Verifier) Verify(r *http.Request) (identity.Principal, error) {
 	jc, err := a.verify(a.token(r))
 	if err != nil {
-		return grant.Claims{}, grant.ErrGrant
+		return identity.Principal{}, err
 	}
-	scope := identity.ScopeFor(a.cfg.Rules, jc.Subject, repo, a.cfg.Claim == "email")
-	if scope == "" {
-		return grant.Claims{}, grant.ErrGrant
+	p := identity.Principal{Subject: jc.Subject, Exp: time.Unix(jc.Exp, 0)}
+	if a.cfg.Claim == "email" {
+		p.Email, p.EmailVerified = jc.Subject, true
 	}
-	return identity.Claims(scope, repo, jc.Subject, jc.Exp), nil
+	return p, nil
 }
 
-func (a *Authenticator) verify(token string) (jwtClaims, error) {
+func (a *Verifier) verify(token string) (jwtClaims, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return jwtClaims{}, errors.New("not a JWT")
@@ -209,7 +206,7 @@ func decode(part string, v any) error {
 // kid is unknown, at most once a minute and one at a time, and it holds no lock during the fetch. A request that
 // finds no usable key, or only a stale one, waits for the fetch in flight. It refuses a cache that staleAfter has
 // passed since the last good fetch.
-func (a *Authenticator) key(kid string) (crypto.PublicKey, error) {
+func (a *Verifier) key(kid string) (crypto.PublicKey, error) {
 	a.mu.Lock()
 	now := a.cfg.Now()
 	k, known := a.keys[kid]
@@ -240,7 +237,7 @@ func (a *Authenticator) key(kid string) (crypto.PublicKey, error) {
 	return k, nil
 }
 
-func (a *Authenticator) getJSON(url string, v any) error {
+func (a *Verifier) getJSON(url string, v any) error {
 	resp, err := a.cfg.Client.Get(url)
 	if err != nil {
 		return err
@@ -252,7 +249,7 @@ func (a *Authenticator) getJSON(url string, v any) error {
 	return json.NewDecoder(http.MaxBytesReader(nil, resp.Body, keysMax)).Decode(v)
 }
 
-func (a *Authenticator) fetch() (map[string]crypto.PublicKey, error) {
+func (a *Verifier) fetch() (map[string]crypto.PublicKey, error) {
 	url := a.cfg.KeysURL
 	if url == "" {
 		var doc struct {
