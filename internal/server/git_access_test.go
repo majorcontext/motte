@@ -24,7 +24,7 @@ func TestGitOIDCIdentityPushesBranchesAndNeverProtectedRefs(t *testing.T) {
 	t.Parallel()
 	iss := identitytest.NewIssuer(t, "k1")
 	header := func(email string) []string {
-		jwt := iss.Sign(t, map[string]any{"iss": "https://team.example.test", "aud": "aud1", "email": email, "email_verified": true, "exp": time.Now().Add(time.Hour).Unix()})
+		jwt := iss.Sign(t, map[string]any{"iss": "https://team.example.test", "aud": "aud1", "email": email, "exp": time.Now().Add(time.Hour).Unix()})
 		return []string{"-c", "http.extraHeader=Cf-Access-Jwt-Assertion: " + jwt}
 	}
 	repo := []string{"pending"}

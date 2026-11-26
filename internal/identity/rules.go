@@ -50,7 +50,10 @@ func ScopeFor(rules []Rule, subject, repo string, isEmail bool) grant.Scope {
 	var best grant.Scope
 	for _, r := range rules {
 		if (repo == "") != (r.Scope == ScopeAdmin) || repo != "" && !slices.Contains(r.Repos, repo) ||
-			!slices.ContainsFunc(r.Principals, func(p string) bool { p = fold(p); return p == subject || domain != "" && p == domain }) {
+			!slices.ContainsFunc(r.Principals, func(p string) bool {
+				p = fold(p)
+				return p == subject && (isEmail || !strings.HasPrefix(p, "@")) || domain != "" && p == domain
+			}) {
 			continue
 		}
 		if best == "" || r.Scope == grant.ScopeWrite {

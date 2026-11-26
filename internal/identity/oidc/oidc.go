@@ -164,7 +164,7 @@ func (a *Authenticator) verify(token string) (jwtClaims, error) {
 	} else {
 		_ = json.Unmarshal(raw["aud"], &jc.Aud)
 	}
-	if a.cfg.Claim == "email" && !verified(raw["email_verified"]) {
+	if a.cfg.Claim == "email" && unverified(raw["email_verified"]) {
 		return jwtClaims{}, errors.New("email not verified")
 	}
 	now := a.cfg.Now().Unix()
@@ -174,14 +174,15 @@ func (a *Authenticator) verify(token string) (jwtClaims, error) {
 	return jc, nil
 }
 
-// verified reports whether the claim email_verified is true. Some issuers send it as the text "true".
-func verified(raw json.RawMessage) bool {
+// unverified reports whether the claim email_verified is present and false. An identity-aware proxy that verifies the
+// email itself sends no such claim. Some issuers send it as the text "false".
+func unverified(raw json.RawMessage) bool {
 	var b bool
 	if json.Unmarshal(raw, &b) == nil {
-		return b
+		return string(raw) != "null" && !b
 	}
 	var s string
-	return json.Unmarshal(raw, &s) == nil && s == "true"
+	return json.Unmarshal(raw, &s) == nil && s == "false"
 }
 
 func verifySig(alg string, key crypto.PublicKey, h crypto.Hash, sum, sig []byte) bool {
@@ -204,10 +205,10 @@ func decode(part string, v any) error {
 	return json.Unmarshal(raw, v)
 }
 
-// key returns the public key of kid. It starts a fetch of the key set when the cache is older than refreshAfter or kid
-// is unknown, at most once a minute and one at a time, and it holds no lock during the fetch. A request that finds
-// no usable key, or only a stale one, waits for the fetch in flight. It refuses a cache that staleAfter has passed since the last good
-// fetch.
+// key returns the public key of kid. It starts a fetch of the key set when the cache is older than refreshAfter or
+// kid is unknown, at most once a minute and one at a time, and it holds no lock during the fetch. A request that
+// finds no usable key, or only a stale one, waits for the fetch in flight. It refuses a cache that staleAfter has
+// passed since the last good fetch.
 func (a *Authenticator) key(kid string) (crypto.PublicKey, error) {
 	a.mu.Lock()
 	now := a.cfg.Now()

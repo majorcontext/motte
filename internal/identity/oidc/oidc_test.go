@@ -28,7 +28,7 @@ const (
 var now = time.Unix(1_000_000, 0)
 
 func claims(email string, exp time.Time) map[string]any {
-	return map[string]any{"iss": issuer, "aud": []string{aud}, "email": email, "email_verified": true, "exp": exp.Unix(), "nbf": now.Add(-time.Minute).Unix()}
+	return map[string]any{"iss": issuer, "aud": []string{aud}, "email": email, "exp": exp.Unix(), "nbf": now.Add(-time.Minute).Unix()}
 }
 
 func newAuth(t *testing.T, iss *identitytest.Issuer, rules ...identity.Rule) *oidc.Authenticator {
@@ -197,42 +197,8 @@ func TestOpaqueSubjectsMatchExactly(t *testing.T) {
 	}
 }
 
-func TestRefreshesBeforeTheKeysGoStaleAndNeedsAVerifiedEmail(t *testing.T) {
-	t.Parallel()
-	iss := identitytest.NewIssuer(t, "k1")
-	keys := &failableKeys{}
-	at := now
-	rules := []identity.Rule{{Principals: []string{"@example.test", "user@other.test"}, Repos: []string{"native:repo_A"}, Scope: grant.ScopeWrite}}
-	a, err := oidc.New(oidc.Config{Issuer: issuer, Header: header, Audience: aud, KeysURL: iss.URL, Client: &http.Client{Transport: keys}, Now: func() time.Time { return at }, Rules: rules})
-	if err != nil {
-		t.Fatal(err)
-	}
-	r := request(iss.Sign(t, claims("dev@example.test", now.Add(3*time.Hour))))
-	check := func(want bool, after time.Duration) {
-		t.Helper()
-		at = now.Add(after)
-		if _, err := a.Authenticate(r, "native:repo_A"); (err == nil) != want {
-			t.Errorf("after %s: err = %v, want ok = %v", after, err, want)
-		}
-	}
-	check(true, 0)
-	check(true, 46*time.Minute)
-	keys.down = true
-	check(true, 61*time.Minute)
-	check(false, 107*time.Minute)
-	unverified := claims("dev@example.test", now.Add(3*time.Hour))
-	unverified["email_verified"] = false
-	keys.down, at = false, now
-	if _, err := a.Authenticate(request(iss.Sign(t, unverified)), "native:repo_A"); err == nil {
-		t.Error("an email that is not verified signed in")
-	}
-	if got := identity.ScopeFor(rules, "someone@example.test", "native:repo_A", false); got != "" {
-		t.Errorf("a domain rule matched a subject that is not an email: %q", got)
-	}
-}
-
-func TestARequestWithAStaleKeyWaitsForTheRefreshInFlight(t *testing.T) {
-	t.Parallel()
+func refreshing(t *testing.T) (*oidc.Authenticator, *failableKeys, *time.Time, *http.Request) {
+	t.Helper()
 	iss := identitytest.NewIssuer(t, "k1")
 	keys := &failableKeys{}
 	at := now
@@ -241,21 +207,70 @@ func TestARequestWithAStaleKeyWaitsForTheRefreshInFlight(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := request(iss.Sign(t, claims("dev@example.test", now.Add(3*time.Hour))))
+	return a, keys, &at, request(iss.Sign(t, claims("dev@example.test", now.Add(3*time.Hour))))
+}
+
+func TestRefreshesBeforeTheKeysGoStale(t *testing.T) {
+	t.Parallel()
+	a, keys, at, r := refreshing(t)
+	for _, c := range []struct {
+		after time.Duration
+		down  bool
+		want  bool
+	}{{0, false, true}, {46 * time.Minute, false, true}, {61 * time.Minute, true, true}, {107 * time.Minute, true, false}} {
+		*at, keys.down = now.Add(c.after), c.down
+		if _, err := a.Authenticate(r, "native:repo_A"); (err == nil) != c.want {
+			t.Errorf("after %s: err = %v, want ok = %v", c.after, err, c.want)
+		}
+	}
+}
+
+func TestEmailVerifiedFalseIsRefusedAndAbsentIsAccepted(t *testing.T) {
+	t.Parallel()
+	iss := identitytest.NewIssuer(t, "k1")
+	rules := []identity.Rule{{Principals: []string{"@example.test"}, Repos: []string{"native:repo_A"}, Scope: grant.ScopeWrite}}
+	a := newAuth(t, iss, rules...)
+	for verified, want := range map[any]bool{nil: true, true: true, "true": true, false: false, "false": false} {
+		c := claims("dev@example.test", now.Add(time.Hour))
+		if verified != nil {
+			c["email_verified"] = verified
+		}
+		if _, err := a.Authenticate(request(iss.Sign(t, c)), "native:repo_A"); (err == nil) != want {
+			t.Errorf("email_verified %v: err = %v, want ok = %v", verified, err, want)
+		}
+	}
+	for _, sub := range []string{"someone@example.test", "@example.test"} {
+		if got := identity.ScopeFor(rules, sub, "native:repo_A", false); got != "" {
+			t.Errorf("a domain rule matched the subject %q that is not an email: %q", sub, got)
+		}
+	}
+}
+
+func TestRequestsDuringARefreshServeFreshKeysAndWaitOnStaleOnes(t *testing.T) {
+	t.Parallel()
+	a, keys, at, r := refreshing(t)
 	if _, err := a.Authenticate(r, "native:repo_A"); err != nil {
 		t.Fatal(err)
 	}
 	synctest.Test(t, func(t *testing.T) {
-		at, keys.gate = now.Add(61*time.Minute), make(chan struct{})
-		errs := make(chan error, 2)
-		for range 2 {
-			go func() { _, err := a.Authenticate(r, "native:repo_A"); errs <- err }()
-			synctest.Wait()
-		}
-		close(keys.gate)
-		for range 2 {
-			if err := <-errs; err != nil {
-				t.Errorf("a request during the refresh: %v", err)
+		for _, c := range []struct {
+			after time.Duration
+			done  int
+		}{{50 * time.Minute, 1}, {111 * time.Minute, 0}} {
+			*at, keys.gate = now.Add(c.after), make(chan struct{})
+			errs := make(chan error, 2)
+			for range 2 {
+				go func() { _, err := a.Authenticate(r, "native:repo_A"); errs <- err }()
+				synctest.Wait()
+			}
+			if len(errs) != c.done {
+				t.Errorf("after %s: %d requests ended while the refresh was blocked, want %d", c.after, len(errs), c.done)
+			}
+			close(keys.gate)
+			for range 2 {
+				if err := <-errs; err != nil {
+					t.Errorf("after %s: %v", c.after, err)
+				}
 			}
 		}
 	})
