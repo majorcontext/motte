@@ -493,3 +493,9 @@ func (b *Batch) diffTips(ctx context.Context, base gitpack.SHA, emit func(string
 		return nil
 	})
 }
+
+// TreeOf returns the root tree of a commit.
+func (b *Batch) TreeOf(ctx context.Context, sha gitpack.SHA) (gitpack.SHA, error) {
+	c, err := b.commit(ctx, sha)
+	return c.Tree, err
+}

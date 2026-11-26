@@ -3,7 +3,9 @@ package server_test
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -96,5 +98,50 @@ func TestLandIgnoresAPathThatTheTargetAddedAndRemoved(t *testing.T) {
 		land(start, asFile, nil)
 		land(asFile, asDir, nil)
 		land(start, beside, []string{"d/", "x", "y"})
+	})
+}
+
+func TestLandTrialMatchesLandAndMovesNothing(t *testing.T) {
+	eachBackend(t, func(t *testing.T, l *landEnv) {
+		ctx := context.Background()
+		var o objSet
+		c1 := o.commit(map[string]string{"a": "1"}, "", "c1", l.root)
+		c2 := o.commit(map[string]string{"b": "1"}, "", "c2", l.root)
+		c3 := o.commit(map[string]string{"a": "2"}, "", "c3", l.root)
+		o.upload(t, l.env, l.repo)
+		before, _, _ := l.Client(l.operator()).Events(ctx, "", 1000)
+		at := l.tip("main")
+		req := api.TrialRequest{Tip: l.root, Changes: []api.TrialChange{{Head: c1, Base: l.root}, {Head: c3, Base: l.root}, {Head: c2, Base: l.root}}}
+		trial, err := l.merge.LandTrial(ctx, l.repo, req)
+		if err != nil || len(trial.Items) != 3 {
+			t.Fatalf("trial = %+v, %v", trial, err)
+		}
+		if after, _, _ := l.Client(l.operator()).Events(ctx, "", 1000); len(after) != len(before) || l.tip("main") != at {
+			t.Errorf("trial moved a ref or wrote an event: %d events, main %+v, want %d and %+v", len(after), l.tip("main"), len(before), at)
+		}
+		first, third, second := trial.Items[0], trial.Items[1], trial.Items[2]
+		if first.Tip != c1 || third.Conflict == nil || !slices.Equal(third.Conflict.Paths, []string{"a"}) {
+			t.Fatalf("items = %+v, want c1 first, a conflict on a, and c2 landing after it", trial.Items)
+		}
+		if _, err := l.reader.Object(ctx, second.Tip); err != nil {
+			t.Errorf("trial objects are not stored: %v", err)
+		}
+		r1, err1 := l.land(l.merge, "main", l.root, c1)
+		r2, err2 := l.land(l.merge, "main", l.root, c2)
+		_, err3 := l.land(l.merge, "main", l.root, c3)
+		refuses(t, err3, client.ErrLandConflict, 409)
+		if err1 != nil || err2 != nil || l.treeOf(r1.Tip) != first.Tree || l.treeOf(r2.Tip) != second.Tree {
+			t.Errorf("land trees differ from the trial: %v %v %s %s, want %s %s", err1, err2, l.treeOf(r1.Tip), l.treeOf(r2.Tip), first.Tree, second.Tree)
+		}
+		raw := l.call(http.MethodPost, "/v1/repos/"+url.PathEscape(l.repo)+"/lands:trial", l.MergeGrant(t, l.repo), api.TrialRequest{Tip: l.root, Changes: req.Changes[:1]})
+		items, _ := raw.body["items"].([]any)
+		item, _ := items[0].(map[string]any)
+		if commits, ok := item["commits"].([]any); !ok || len(commits) != 0 {
+			t.Errorf("raw item = %v, want commits as []", item)
+		}
+		bad := l.call(http.MethodPost, "/v1/repos/"+url.PathEscape(l.repo)+"/lands:trial", l.MergeGrant(t, l.repo), map[string]any{"tip": l.root, "changes": []map[string]string{{"head": c1}}})
+		if bad.status != 400 || bad.code != "invalid_body" {
+			t.Errorf("a change with no base = %d %s, want 400 invalid_body", bad.status, bad.code)
+		}
 	})
 }

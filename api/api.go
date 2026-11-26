@@ -1,7 +1,10 @@
 // Package api holds the wire types and error codes of the /v1 routes.
 package api
 
-import "net/http"
+import (
+	"encoding/json"
+	"net/http"
+)
 
 // Code is a wire error code.
 type Code string
@@ -297,6 +300,56 @@ type LandRequest struct {
 	Base       string `json:"base"`
 	Head       string `json:"head"`
 	ExpectTree string `json:"expect_tree,omitempty"`
+}
+
+// TrialChange is one change of a trial land. Base is required.
+type TrialChange struct {
+	Head string `json:"head"`
+	Base string `json:"base"`
+}
+
+// TrialRequest is the body of POST /v1/repos/{repo}/lands:trial. Each change lands on the result of the one before,
+// the first on Tip.
+type TrialRequest struct {
+	Tip     string        `json:"tip"`
+	Changes []TrialChange `json:"changes"`
+}
+
+// TrialConflict names the paths that a change shares with what changed since its base.
+type TrialConflict struct {
+	Paths []string `json:"paths"`
+}
+
+// TrialItem is the result of one change of a trial land: Base, Tree, Tip and Commits when it landed, Conflict when it
+// clashed, else Error. Tree is the root tree of Tip, and Commits maps the commits of the range to the new commits. A
+// landed item always holds Commits, which is [] for a head that already descends from the running tip.
+type TrialItem struct {
+	Base     string         `json:"base,omitempty"`
+	Tree     string         `json:"tree,omitempty"`
+	Tip      string         `json:"tip,omitempty"`
+	Commits  []LandedCommit `json:"commits,omitempty"`
+	Conflict *TrialConflict `json:"conflict,omitempty"`
+	Error    *Error         `json:"error,omitempty"`
+}
+
+// MarshalJSON writes Commits as [] and never drops it for an item that landed.
+func (i TrialItem) MarshalJSON() ([]byte, error) {
+	type plain TrialItem
+	if i.Tip == "" {
+		return json.Marshal(plain(i))
+	}
+	if i.Commits == nil {
+		i.Commits = []LandedCommit{}
+	}
+	return json.Marshal(struct {
+		plain
+		Commits []LandedCommit `json:"commits"`
+	}{plain(i), i.Commits})
+}
+
+// TrialResponse has one item for each change, in order.
+type TrialResponse struct {
+	Items []TrialItem `json:"items"`
 }
 
 // LandedCommit is a commit of the range and the commit that replaced it on the ref.

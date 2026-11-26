@@ -387,6 +387,19 @@ func (c *Client) File(ctx context.Context, repo, commit, path string) ([]byte, e
 	return base64.StdEncoding.DecodeString(out.Data)
 }
 
+// LandTrial lands the changes of req one after the other on req.Tip without moving any ref, and returns one item for
+// each change. It writes the objects that the lands make. repo is the repository text of the grant, and the grant has
+// the merge or the write scope.
+func (c *Client) LandTrial(ctx context.Context, repo string, req api.TrialRequest) (api.TrialResponse, error) {
+	budget := c.budget
+	if !c.set {
+		budget = DefaultLandBudget
+	}
+	var out api.TrialResponse
+	err := c.doWithin(ctx, budget, http.MethodPost, "/v1/repos"+segs(repo, "lands:trial"), req, &out)
+	return out, err
+}
+
 // FromLatest is the cursor of Events that starts after the newest event and returns none.
 const FromLatest = "latest"
 
