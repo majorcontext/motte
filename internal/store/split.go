@@ -125,7 +125,7 @@ func (s *Service) splitPacks(ctx context.Context, repo Repo, prefix string, r *r
 	blobCount := 0
 	var inflated int64
 	for u, p := range r.packs {
-		data, err := s.st.Get(ctx, prefix+"/"+p.ID+".pack")
+		data, err := s.st.Get(ctx, prefix+"/"+p.FileKey())
 		if err != nil {
 			return nil, mapNotFound(err)
 		}
@@ -216,7 +216,7 @@ func (s *Service) splitPacks(ctx context.Context, repo Repo, prefix string, r *r
 		})}
 		idSum := sha256.Sum256(pack)
 		id := hex.EncodeToString(idSum[:])
-		l, n, err := midx.Merge(ctx, []midx.Iter{it}, []midx.Pack{{ID: id, Bytes: int64(len(pack))}}, len(metaObjs), func(_ int, rec midx.Record) (midx.Record, error) { return rec, nil })
+		l, n, err := midx.Merge(ctx, []midx.Iter{it}, []midx.Pack{midx.Pack{ID: id, Bytes: int64(len(pack))}.Keyed()}, len(metaObjs), func(_ int, rec midx.Record) (midx.Record, error) { return rec, nil })
 		if err != nil {
 			return nil, err
 		}

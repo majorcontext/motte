@@ -1348,3 +1348,44 @@ func (s *spy) Caps() bucket.Caps {
 func (s *slowBucket) Unwrap() bucket.Store { return s.Store }
 
 func (b *memBucket) Caps() bucket.Caps { return bucket.Caps{ConditionalDelete: true} }
+
+func TestAPackIsReadFromTheKeyThatTheManifestRecords(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	w.push(3)
+	row, err := w.meta.Manifest(t.Context(), repo.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := midx.DecodeManifest(row.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := "repos/native/" + b64("repo_x") + "/"
+	p := &m.Layers[0].Packs[0]
+	data, err := w.mem.Get(t.Context(), prefix+p.FileKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.mem.Create(t.Context(), prefix+"moved.pack", data); err != nil {
+		t.Fatal(err)
+	}
+	ver, _ := w.mem.Version(t.Context(), prefix+p.FileKey())
+	if err := w.mem.Delete(t.Context(), prefix+p.FileKey(), ver); err != nil {
+		t.Fatal(err)
+	}
+	p.Key = "moved.pack"
+	body, _ := m.Encode()
+	if _, err := w.meta.SwapManifest(t.Context(), repo.String(), row.Generation, body); err != nil {
+		t.Fatal(err)
+	}
+	got, err := w.cold().Has(t.Context(), repo, w.have)
+	if err != nil || !slices.Equal(got, []bool{true, true, true}) {
+		t.Fatalf("has = %v, %v; want every object read from the recorded key", got, err)
+	}
+	for _, sha := range w.have {
+		if _, _, err := w.cold().Get(t.Context(), repo, sha); err != nil {
+			t.Errorf("get %s: %v", sha, err)
+		}
+	}
+}

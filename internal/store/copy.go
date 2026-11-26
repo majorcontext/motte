@@ -78,17 +78,17 @@ func (r *Reader) Copy(ctx context.Context, shas []gitpack.SHA, ahead int64, befo
 			return err
 		}
 		for _, p := range f {
-			i, ok := at[p.pk.ID]
+			i, ok := at[p.pk.FileKey()]
 			if !ok {
 				i = uint32(len(packs))
-				packs, at[p.pk.ID] = append(packs, packRef{p.pk, p.meta}), i
+				packs, at[p.pk.FileKey()] = append(packs, packRef{p.pk, p.meta}), i
 			}
 			found = append(found, copyPlace{p.sha, i, p.off})
 		}
 		fall = append(fall, m...)
 	}
 	slices.SortFunc(found, func(a, b copyPlace) int {
-		if c := strings.Compare(packs[a.pack].pk.ID, packs[b.pack].pk.ID); c != 0 {
+		if c := strings.Compare(packs[a.pack].pk.FileKey(), packs[b.pack].pk.FileKey()); c != 0 {
 			return c
 		}
 		return int(a.off - b.off)
@@ -193,7 +193,7 @@ func (r *Reader) copyRuns(ctx context.Context, runs []copyRun, packs []packRef, 
 // packReader returns a reader of the pack of ref that the pack cache does not hold, so a copy adds no entry to that
 // cache. It reads through the range cache, which charges what it keeps.
 func (r *Reader) packReader(ref packRef) *packReader {
-	return &packReader{svc: r.v.s, st: r.v.s.st, key: r.v.prefix + "/" + ref.pk.ID + ".pack", size: ref.pk.Bytes}
+	return &packReader{svc: r.v.s, st: r.v.s.st, key: r.v.prefix + "/" + ref.pk.FileKey(), size: ref.pk.Bytes}
 }
 
 func (r *Reader) copyRun(ctx context.Context, run copyRun, ref packRef, d []byte, before func(size int64) error, fn func(gitpack.SHA, *gitpack.Raw) error, fallback *[]gitpack.SHA) error {

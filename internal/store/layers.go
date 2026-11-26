@@ -112,6 +112,14 @@ func (s *Service) loadLayer(ctx context.Context, key string, e midx.Entry) (*lay
 		return nil, 0, midx.ErrCorrupt
 	}
 	h.dir, h.packs = d, d.Packs
+	if len(e.Packs) == len(d.Packs) {
+		h.packs = slices.Clone(d.Packs)
+		for i, p := range e.Packs {
+			if p.ID == h.packs[i].ID {
+				h.packs[i].Key, h.packs[i].Idx = p.Key, p.Idx
+			}
+		}
+	}
 	return h, len(tail), nil
 }
 
@@ -322,7 +330,7 @@ func (s *Service) indexLayers(ctx context.Context, repo Repo, packs []meta.Pack)
 }
 
 func indexEntry(id string, bytes int64, objects int) midx.Entry {
-	return midx.Entry{Key: id + ".idx", Objects: objects, Bytes: bytes, NPacks: 1, Packs: []midx.Pack{{ID: id, Bytes: bytes}}}
+	return midx.Entry{Key: id + ".idx", Objects: objects, Bytes: bytes, NPacks: 1, Packs: []midx.Pack{midx.Pack{ID: id, Bytes: bytes}.Keyed()}}
 }
 
 const manifestRetries = 64

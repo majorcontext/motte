@@ -186,10 +186,10 @@ func (s *Service) openRun(ctx context.Context, prefix string, layers []midx.Entr
 		r.hs = append(r.hs, h)
 		ords := make([]uint32, len(h.packs))
 		for i, p := range h.packs {
-			u, ok := at[p.ID]
+			u, ok := at[p.FileKey()]
 			if !ok {
 				u = uint32(len(r.packs))
-				at[p.ID] = u
+				at[p.FileKey()] = u
 				r.packs = append(r.packs, p)
 			}
 			ords[i] = u
@@ -409,7 +409,7 @@ func (s *Service) putLayer(ctx context.Context, repo Repo, prefix string, l midx
 	if _, err := s.st.Create(ctx, prefix+"/"+l.Key, l.Data); err != nil {
 		return midx.Entry{}, err
 	}
-	return midx.Entry{Key: l.Key, Objects: l.Objects, Bytes: r.bytes(), NPacks: len(r.packs), Size: int64(len(l.Data)), Dir: l.Dir, Class: r.layers[0].Class}, nil
+	return midx.Entry{Key: l.Key, Objects: l.Objects, Bytes: r.bytes(), NPacks: len(r.packs), Packs: r.packs, Size: int64(len(l.Data)), Dir: l.Dir, Class: r.layers[0].Class}, nil
 }
 
 // recordIters opens the record streams of the layers of a run, from the index of a pack or from a layer file.
@@ -491,7 +491,7 @@ func (s *Service) compactRun(ctx context.Context, repo Repo, layers []midx.Entry
 				return err
 			}
 		}
-		entry := midx.Entry{Key: o.layer.Key, Objects: o.layer.Objects, Bytes: int64(len(o.pack)), NPacks: 1, Size: int64(len(o.layer.Data)), Dir: o.layer.Dir, Class: o.class}
+		entry := midx.Entry{Key: o.layer.Key, Objects: o.layer.Objects, Bytes: int64(len(o.pack)), NPacks: 1, Packs: []midx.Pack{midx.Pack{ID: o.id, Bytes: int64(len(o.pack))}.Keyed()}, Size: int64(len(o.layer.Data)), Dir: o.layer.Dir, Class: o.class}
 		if vals, err := layerSizes(o.layer, o.pack); err == nil {
 			if entry.Sizes, err = s.sizeObject(ctx, repo, prefix, midx.BuildSizes(vals), len(vals)); err != nil {
 				return err
@@ -539,7 +539,7 @@ func (s *Service) finishPack(ctx context.Context, body []byte, count int, class 
 	body = append(body, sum[:]...)
 	idSum := sha256.Sum256(body)
 	id := hex.EncodeToString(idSum[:])
-	l, seen, err := midx.Merge(ctx, ins, []midx.Pack{{ID: id, Bytes: int64(len(body))}}, objects, remap)
+	l, seen, err := midx.Merge(ctx, ins, []midx.Pack{midx.Pack{ID: id, Bytes: int64(len(body))}.Keyed()}, objects, remap)
 	if err != nil {
 		return packOut{}, 0, err
 	}
@@ -556,7 +556,7 @@ func (s *Service) copyPacks(ctx context.Context, prefix string, r *run, class st
 	shift := make([]int64, len(r.packs))
 	count := 0
 	for u, p := range r.packs {
-		data, err := s.st.Get(ctx, prefix+"/"+p.ID+".pack")
+		data, err := s.st.Get(ctx, prefix+"/"+p.FileKey())
 		if err != nil {
 			return packOut{}, mapNotFound(err)
 		}
@@ -641,22 +641,23 @@ func (s *Service) retiredByCompaction(ctx context.Context, repo Repo, prefix str
 		return nil, err
 	}
 	for _, p := range r.packs {
-		if _, live := held[p.ID]; !live {
-			out = append(out, p.ID+".pack", p.ID+".idx")
+		if _, live := held[p.FileKey()]; !live {
+			out = append(out, p.FileKey(), p.IdxKey())
 		}
 	}
 	return out, nil
 }
 
-func (s *Service) heldPacks(ctx context.Context, prefix string, layers []midx.Entry) (map[string]int64, error) {
-	held := map[string]int64{}
+// heldPacks lists the packs of layers by the key of the pack file.
+func (s *Service) heldPacks(ctx context.Context, prefix string, layers []midx.Entry) (map[string]midx.Pack, error) {
+	held := map[string]midx.Pack{}
 	for _, e := range layers {
 		h, err := s.layer(ctx, prefix, e)
 		if err != nil {
 			return nil, err
 		}
 		for _, p := range h.packs {
-			held[p.ID] = p.Bytes
+			held[p.FileKey()] = p
 		}
 	}
 	return held, nil
@@ -752,6 +753,9 @@ func (s *Service) collect(ctx context.Context, repo Repo) (err error) {
 		return err
 	}
 	keys := map[string]bool{}
+	for _, p := range held {
+		keys[p.FileKey()], keys[p.IdxKey()] = true, true
+	}
 	for _, e := range m.Layers {
 		keys[e.Key] = true
 		if e.Graph != "" {
@@ -767,7 +771,7 @@ func (s *Service) collect(ctx context.Context, repo Repo) (err error) {
 		if !isPack {
 			id, _ = strings.CutSuffix(key, ".idx")
 		}
-		if _, live := held[id]; keys[key] || live {
+		if keys[key] {
 			done = append(done, key)
 			continue
 		}
@@ -818,21 +822,23 @@ func (s *Service) reconcile(ctx context.Context, repo Repo) error {
 	for _, p := range rows {
 		listed[p.ID] = true
 	}
-	for id, bytes := range known {
-		if !listed[id] {
-			if err := s.index.AddPack(ctx, repo.String(), id, bytes); err != nil {
+	knownIDs := map[string]bool{}
+	for _, p := range known {
+		knownIDs[p.ID] = true
+		if !listed[p.ID] {
+			if err := s.index.AddPack(ctx, repo.String(), p.ID, p.Bytes); err != nil {
 				return err
 			}
 		}
 	}
 	for _, r := range retired {
 		if id, ok := strings.CutSuffix(r.Key, ".pack"); ok {
-			known[id] = 0
+			knownIDs[id] = true
 		}
 	}
 	var missing []meta.Pack
 	for _, p := range rows {
-		if _, ok := known[p.ID]; !ok {
+		if !knownIDs[p.ID] {
 			missing = append(missing, p)
 		}
 	}

@@ -501,7 +501,7 @@ func (s *Service) evict() {
 }
 
 func (s *Service) openPack(prefix string, ref midx.Pack, meta bool) *openPack {
-	key := prefix + "|" + ref.ID
+	key := prefix + "|" + ref.FileKey()
 	s.mu.Lock()
 	if e, ok := s.open[key]; ok {
 		s.mu.Unlock()
@@ -510,7 +510,7 @@ func (s *Service) openPack(prefix string, ref midx.Pack, meta bool) *openPack {
 	}
 	s.mu.Unlock()
 	s.misses.Add(1)
-	br := &packReader{svc: s, st: s.st, key: prefix + "/" + ref.ID + ".pack", size: ref.Bytes}
+	br := &packReader{svc: s, st: s.st, key: prefix + "/" + ref.FileKey(), size: ref.Bytes}
 	e := &openPack{meta: meta, b: br, p: gitpack.NewAt(reqReader{b: br, ctx: context.Background()})}
 	br.changed = func() { s.recharge(e) }
 	e.p.OnCacheChange(func() { s.recharge(e) })

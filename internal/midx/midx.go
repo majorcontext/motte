@@ -34,10 +34,36 @@ var ErrCorrupt = errors.New("midx: corrupt layer")
 
 type SHA = [20]byte
 
-// Pack names a pack of a layer: the hex SHA-256 of its bytes, and its size.
+// Pack names a pack of a layer: the hex SHA-256 of its bytes, and its size. Key and Idx are the bucket keys of the pack
+// file and of its index file, below the prefix of the repository. A manifest written before the keys were recorded has
+// neither, and the keys are then derived from the id.
 type Pack struct {
 	ID    string `json:"id"`
 	Bytes int64  `json:"b"`
+	Key   string `json:"k,omitempty"`
+	Idx   string `json:"i,omitempty"`
+}
+
+// FileKey is the bucket key of the pack file.
+func (p Pack) FileKey() string {
+	if p.Key != "" {
+		return p.Key
+	}
+	return p.ID + ".pack"
+}
+
+// IdxKey is the bucket key of the index file of the pack.
+func (p Pack) IdxKey() string {
+	if p.Idx != "" {
+		return p.Idx
+	}
+	return p.ID + ".idx"
+}
+
+// Keyed returns p with its derived keys recorded.
+func (p Pack) Keyed() Pack {
+	p.Key, p.Idx = p.FileKey(), p.IdxKey()
+	return p
 }
 
 // Record places one object: the pack that holds it, as an index of the pack list of the layer, and its offset. A layer
