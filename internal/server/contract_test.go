@@ -21,7 +21,6 @@ import (
 	"github.com/majorcontext/motte/client"
 	"github.com/majorcontext/motte/grant"
 	"github.com/majorcontext/motte/internal/gitpack"
-	"github.com/majorcontext/motte/internal/server"
 	"github.com/majorcontext/motte/testserver"
 )
 
@@ -57,6 +56,12 @@ var (
 )
 
 func newEnv(t *testing.T) *env { return newEnvOn(t, postgresBackend) }
+
+func newEnvLimits(t *testing.T, l testserver.Limits) *env {
+	t.Helper()
+	ts := testserver.New(t, testserver.WithPostgres(""), testserver.WithLimits(l))
+	return &env{Server: ts, t: t, url: ts.URL, cp: ts.Operator, node: ts.Node}
+}
 
 func newEnvOn(t *testing.T, b backend) *env {
 	t.Helper()
@@ -484,11 +489,11 @@ func TestGrantWithoutTheBearerSchemeIsRefused(t *testing.T) {
 }
 
 func TestBodyOverTheLimitAnswersTooLarge(t *testing.T) {
-	e := newEnv(t)
+	t.Parallel()
+	e := newEnvLimits(t, testserver.Limits{Object: lowObject})
 	e.want(e.claim("ws1", 1, repoText), 200, "")
 	r := e.call("POST", "/v1/vcs/objects/has", e.readGrant(repoText), map[string]any{"shas": []string{strings.Repeat("a", 1<<20)}})
 	e.want(r, 413, "vcs_object_too_large")
-	server.LowerLimits(t, lowObject, 0, 0, 0)
 	_, err := e.Client(e.nodeGrant("ws1", 1)).PutObjects(context.Background(), []client.Object{{Type: "blob", Data: make([]byte, lowObject+1)}})
 	refuses(t, err, client.ErrObjectTooLarge, 413)
 }
@@ -527,9 +532,9 @@ func TestUnknownRouteAndMethodUseTheErrorEnvelope(t *testing.T) {
 }
 
 func TestLargestObjectIsStored(t *testing.T) {
-	e := newEnv(t)
+	t.Parallel()
+	e := newEnvLimits(t, testserver.Limits{Object: lowObject})
 	e.want(e.claim("ws1", 1, repoText), 200, "")
-	server.LowerLimits(t, lowObject, 0, 0, 0)
 	node := e.Client(e.nodeGrant("ws1", 1))
 	if _, err := node.PutObjects(context.Background(), []client.Object{{Type: "blob", Data: make([]byte, lowObject)}}); err != nil {
 		t.Fatalf("object at the limit: %v", err)
@@ -537,11 +542,11 @@ func TestLargestObjectIsStored(t *testing.T) {
 }
 
 func TestLargeTreeIsRead(t *testing.T) {
-	e := newEnv(t)
+	t.Parallel()
+	e := newEnvLimits(t, testserver.Limits{TreeFirst: 1 << 20})
 	e.want(e.claim("ws1", 1, repoText), 200, "")
 	ctx := context.Background()
 	var tree bytes.Buffer
-	server.LowerLimits(t, 0, 0, 1<<20, 0)
 	for i := 0; tree.Len() < 300<<10; i++ {
 		fmt.Fprintf(&tree, "160000 e%07d\x00%s", i, strings.Repeat("a", 20))
 	}
@@ -556,9 +561,9 @@ func TestLargeTreeIsRead(t *testing.T) {
 }
 
 func TestObjectsBodyStartingWithAHugeTokenAnswersTooLarge(t *testing.T) {
-	e := newEnv(t)
+	t.Parallel()
+	e := newEnvLimits(t, testserver.Limits{Window: lowWindow})
 	e.want(e.claim("ws1", 1, repoText), 200, "")
-	server.LowerLimits(t, 0, lowWindow, 0, 0)
 	req, _ := http.NewRequest("POST", e.url+"/v1/vcs/objects", strings.NewReader(`"`+strings.Repeat("a", lowWindow+1<<10)+`"`))
 	req.Header.Set("Authorization", "Bearer "+e.nodeGrant("ws1", 1))
 	resp, err := http.DefaultClient.Do(req)

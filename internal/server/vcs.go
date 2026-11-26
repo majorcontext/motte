@@ -125,13 +125,13 @@ func (s *Server) getCommit(w http.ResponseWriter, r *http.Request, c call) error
 }
 
 func (s *Server) getTrees(w http.ResponseWriter, r *http.Request, c call) error {
-	release, err := s.reserve(r, treeReserve)
+	release, err := s.reserve(r, s.limits.TreeReserve)
 	if err != nil {
 		return err
 	}
-	hold := s.holding(r, treeReserve, release)
+	hold := s.holding(r, s.limits.TreeReserve, release)
 	defer hold.drop()
-	grow := func(treeBytes int64) error { return hold.grow(treeCost(treeBytes)) }
+	grow := func(treeBytes int64) error { return hold.grow(s.treeCost(treeBytes)) }
 	sha, err := parseSHA(r.PathValue("sha"))
 	if err != nil {
 		return err
@@ -208,11 +208,12 @@ func (s *Server) hasObjects(w http.ResponseWriter, r *http.Request, c call) erro
 }
 
 // aheadReader hands the decoder short reads and fails with store.ErrTooLarge when the decoder holds more than
-// decodeWindow bytes of unparsed text, so one huge element cannot grow its buffer.
+// the decode window of unparsed text, so one huge element cannot grow its buffer.
 type aheadReader struct {
-	r   io.Reader
-	dec *json.Decoder
-	n   int64
+	r      io.Reader
+	dec    *json.Decoder
+	n      int64
+	window int64
 	// failed makes the refusal stick, because the decoder can read again after an error.
 	failed bool
 }
@@ -223,7 +224,7 @@ func (a *aheadReader) Read(p []byte) (int, error) {
 	}
 	n, err := a.r.Read(p[:min(len(p), 64<<10)])
 	a.n += int64(n)
-	if a.n-a.dec.InputOffset() > decodeWindow {
+	if a.n-a.dec.InputOffset() > a.window {
 		a.failed = true
 		return 0, store.ErrTooLarge
 	}
@@ -239,8 +240,8 @@ func decodeFailure(err error) error {
 
 // decodeObjects reads {"objects":[...]} one object at a time, so a body full
 // of empty objects is refused at the object limit before it is decoded.
-func decodeObjects(body []byte) ([]gitpack.Object, error) {
-	ahead := &aheadReader{r: bytes.NewReader(body)}
+func decodeObjects(body []byte, l Limits) ([]gitpack.Object, error) {
+	ahead := &aheadReader{r: bytes.NewReader(body), window: l.DecodeWindow}
 	dec := json.NewDecoder(ahead)
 	ahead.dec = dec
 	var objs []gitpack.Object
@@ -274,7 +275,7 @@ func decodeObjects(body []byte) ([]gitpack.Object, error) {
 			if err != nil {
 				return nil, err
 			}
-			if len(data) > objectLimit {
+			if len(data) > l.Object {
 				return nil, store.ErrTooLarge
 			}
 			objs = append(objs, gitpack.Object{Type: gitpack.ParseType(o.Type), Data: data})
@@ -298,7 +299,7 @@ func (s *Server) putObjects(w http.ResponseWriter, r *http.Request, c call) erro
 		return err
 	}
 	defer release()
-	objs, err := decodeObjects(body)
+	objs, err := decodeObjects(body, s.limits)
 	if err != nil {
 		return err
 	}

@@ -340,9 +340,9 @@ func TestGitOnBothBackends(t *testing.T) {
 }
 
 func TestTheMemoryBudgetAndTheFetchSlotsOnOneServer(t *testing.T) {
-	server.LowerFetchSlots(t, 1, 1)
+	t.Parallel()
 	ts := testserver.StartLocal(t)
-	srv := server.New(server.Config{Meta: ts.Meta, Bucket: ts.Bucket, Verifier: ts.Verifier})
+	srv := server.New(server.Config{Meta: ts.Meta, Bucket: ts.Bucket, Verifier: ts.Verifier, Limits: server.Limits{FetchLarge: 1, FetchSlots: 1}})
 	web := httptest.NewServer(srv.Handler())
 	t.Cleanup(web.Close)
 	ts.URL = web.URL

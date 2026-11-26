@@ -40,13 +40,6 @@ const (
 	copyPerPack = 256
 )
 
-// fetchLarge is the reservation above which a fetch takes one of the fetchSlots slots of large fetches, which a clone of
-// a large repository needs. Without the slots, a few clones hold the whole memory budget for as long as they run.
-var (
-	fetchLarge int64 = 32 << 20
-	fetchSlots       = 4
-)
-
 // fetchHold is the reservation of a fetch.
 type fetchHold struct {
 	*reservation
@@ -75,10 +68,10 @@ func (f *fetchHold) track(objects int) error {
 	return f.resize()
 }
 
-// resize grows the reservation to cost. A fetch that passes fetchLarge takes a slot first, and holds no reservation
+// resize grows the reservation to cost. A fetch that passes Limits.FetchLarge takes a slot first, and holds no reservation
 // while it waits for it.
 func (f *fetchHold) resize() error {
-	if !f.large && f.cost() > fetchLarge {
+	if !f.large && f.cost() > f.srv.limits.FetchLarge {
 		f.drop()
 		select {
 		case f.srv.largeFetches <- struct{}{}:

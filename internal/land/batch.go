@@ -12,11 +12,21 @@ import (
 	"github.com/majorcontext/motte/internal/gitpack"
 )
 
-// MaxObjectBytes is the largest object that a land may make.
-var MaxObjectBytes = gitpack.MaxObjectBytes
+// The limits of a Batch whose Options leave them zero.
+const (
+	// DefaultMaxObjectBytes is the largest object that a land may make.
+	DefaultMaxObjectBytes = gitpack.MaxObjectBytes
+	// DefaultMaxChangedPaths is the most distinct leaves that one land may change.
+	DefaultMaxChangedPaths = 100000
+)
 
-// MaxChangedPaths is the most distinct leaves that one land may change.
-var MaxChangedPaths = 100000
+// Options sets the limits of a Batch. A zero field takes its default.
+type Options struct {
+	// MaxChangedPaths is the most distinct leaves that one land may change.
+	MaxChangedPaths int
+	// MaxObjectBytes is the largest object that a land may make.
+	MaxObjectBytes int
+}
 
 const (
 	// MaxCommits is the longest range that one land takes.
@@ -84,15 +94,24 @@ type Batch struct {
 	cached   int
 	tooBig   bool
 	merging  map[string]struct{}
+	maxPaths int
+	maxObj   int
 }
 
 // diffResult is the paths that differ between a base and the start tip.
 type diffResult struct{ paths []string }
 
+func orDefault(n, def int) int {
+	if n > 0 {
+		return n
+	}
+	return def
+}
+
 // NewBatch starts a batch on tip. grow is told how many bytes the batch holds before each read, and may refuse. hist
 // answers the stored lands since a base.
-func NewBatch(src Source, grow func(retained int64) error, tip gitpack.SHA, hist History) *Batch {
-	return &Batch{src: src, grow: grow, hist: hist, start: tip, tip: tip, byID: map[gitpack.SHA]int{},
+func NewBatch(src Source, grow func(retained int64) error, tip gitpack.SHA, hist History, opts Options) *Batch {
+	return &Batch{maxPaths: orDefault(opts.MaxChangedPaths, DefaultMaxChangedPaths), maxObj: orDefault(opts.MaxObjectBytes, DefaultMaxObjectBytes), src: src, grow: grow, hist: hist, start: tip, tip: tip, byID: map[gitpack.SHA]int{},
 		trees: map[gitpack.SHA][]Entry{}, produced: map[gitpack.SHA][]Entry{}, diffs: map[gitpack.SHA]diffResult{}}
 }
 
@@ -112,7 +131,7 @@ func (b *Batch) put(t gitpack.Type, data []byte) gitpack.SHA {
 		b.objs = append(b.objs, gitpack.Object{Type: t, Data: data})
 		b.bytes += len(data)
 	}
-	if len(data) > MaxObjectBytes {
+	if len(data) > b.maxObj {
 		b.tooBig = true
 	}
 	return sha
@@ -269,7 +288,7 @@ func (l *Landed) setPaths(paths []string) {
 
 // collect returns the sorted leaf paths that differ between two trees.
 func (b *Batch) collect(ctx context.Context, a, c gitpack.SHA, strict bool) ([]string, error) {
-	set := newPathSet(strict)
+	set := newPathSet(strict, b.maxPaths)
 	err := b.diff(ctx, a, c, "", func(ch Change) error { return set.add(ch.Path) })
 	return set.sorted(), err
 }
@@ -278,16 +297,19 @@ func (b *Batch) collect(ctx context.Context, a, c gitpack.SHA, strict bool) ([]s
 type pathSet struct {
 	seen   map[string]struct{}
 	strict bool
+	max    int
 }
 
-func newPathSet(strict bool) *pathSet { return &pathSet{seen: map[string]struct{}{}, strict: strict} }
+func newPathSet(strict bool, max int) *pathSet {
+	return &pathSet{seen: map[string]struct{}{}, strict: strict, max: max}
+}
 
 func (p *pathSet) add(path string) error {
 	if p.strict && !utf8.ValidString(path) {
 		return Invalid("a changed path is not valid UTF-8")
 	}
 	if _, ok := p.seen[path]; !ok {
-		if len(p.seen) == MaxChangedPaths {
+		if len(p.seen) == p.max {
 			return ErrTooLarge
 		}
 		p.seen[path] = struct{}{}
@@ -308,7 +330,7 @@ func (p *pathSet) sorted() []string {
 // that one commit adds and a later one removes still counts. It returns the changes when keep is set.
 func (b *Batch) scan(ctx context.Context, baseCommit Commit, chain []link, keep bool) ([][]Change, *pathSet, error) {
 	changes := make([][]Change, len(chain))
-	set := newPathSet(true)
+	set := newPathSet(true, b.maxPaths)
 	parent := baseCommit.Tree
 	for i, l := range chain {
 		err := b.diff(ctx, parent, l.c.Tree, "", func(ch Change) error {
@@ -387,7 +409,7 @@ func (b *Batch) conflicts(ctx context.Context, base, baseTree, tipTree gitpack.S
 	}
 	n, leaves := newClash(paths), 0
 	err := b.diff(ctx, baseTree, tipTree, "", func(ch Change) error {
-		if leaves++; leaves > MaxChangedPaths {
+		if leaves++; leaves > b.maxPaths {
 			return ErrTooLarge
 		}
 		n.add(ch.Path)
@@ -462,7 +484,7 @@ func (b *Batch) before(ctx context.Context, base gitpack.SHA, emit func(string))
 			return false, err
 		}
 		d = diffResult{paths: paths}
-		if b.cached+len(d.paths) > MaxChangedPaths {
+		if b.cached+len(d.paths) > b.maxPaths {
 			clear(b.diffs)
 			b.cached = 0
 		}
@@ -486,7 +508,7 @@ func (b *Batch) diffTips(ctx context.Context, base gitpack.SHA, emit func(string
 	}
 	leaves := 0
 	return b.diff(ctx, from.Tree, to.Tree, "", func(ch Change) error {
-		if leaves++; leaves > MaxChangedPaths {
+		if leaves++; leaves > b.maxPaths {
 			return ErrTooLarge
 		}
 		emit(ch.Path)

@@ -47,6 +47,8 @@ type Config struct {
 	// RangeCacheBytes is the memory of the cache of pack ranges that requests share. Zero takes the default, and a
 	// negative value turns the cache off.
 	RangeCacheBytes int64
+	// Limits are the size limits of the requests. Zero fields take the defaults.
+	Limits Limits
 	// Warm makes the server answer /ready with 503 until Warm has opened every pack index.
 	Warm bool
 	// Clock paces the retry of Warm. It defaults to the real clock.
@@ -54,6 +56,7 @@ type Config struct {
 }
 
 type Server struct {
+	limits     Limits
 	index      meta.Store
 	objects    objects
 	bearer     authenticate
@@ -96,7 +99,8 @@ func New(cfg Config) *Server {
 			readLatency.WithLabelValues(op).Observe(d.Seconds())
 		}
 	})
-	s := &Server{index: cfg.Meta, objects: store.New(metered, cfg.Meta, store.WithClock(clock.Or(cfg.Clock)), store.WithGrace(cfg.Compaction.withDefaults().Grace), rangeCacheOption(cfg.RangeCacheBytes)), compaction: cfg.Compaction.withDefaults(), logger: cfg.Logger, now: cfg.Now, readers: make(chan struct{}, uploadReaders), largeFetches: make(chan struct{}, fetchSlots), warmers: make(chan struct{}, landWarmers), wake: make(chan struct{}, 1), clock: clock.Or(cfg.Clock)}
+	limits := cfg.Limits.withDefaults()
+	s := &Server{limits: limits, index: cfg.Meta, objects: store.New(metered, cfg.Meta, store.WithClock(clock.Or(cfg.Clock)), store.WithGrace(cfg.Compaction.withDefaults().Grace), rangeCacheOption(cfg.RangeCacheBytes)), compaction: cfg.Compaction.withDefaults(), logger: cfg.Logger, now: cfg.Now, readers: make(chan struct{}, uploadReaders), largeFetches: make(chan struct{}, limits.FetchSlots), warmers: make(chan struct{}, landWarmers), wake: make(chan struct{}, 1), clock: clock.Or(cfg.Clock)}
 	s.cold.Store(cfg.Warm)
 	if s.now == nil {
 		s.now = time.Now

@@ -55,8 +55,10 @@ func (m mem) commit(parent gitpack.SHA, tree gitpack.SHA, extra string) gitpack.
 	return m.put(gitpack.Commit, fmt.Appendf(nil, "tree %s\n%sauthor A <a@x> 1 +0100\ncommitter C <c@x> 2 +0200\n%s\nmsg\n", tree, p, extra))
 }
 
-func (m mem) batch(tip gitpack.SHA) *Batch {
-	return NewBatch(m, func(int64) error { return nil }, tip, nil)
+func (m mem) batch(tip gitpack.SHA) *Batch { return m.batchWith(tip, Options{}) }
+
+func (m mem) batchWith(tip gitpack.SHA, o Options) *Batch {
+	return NewBatch(m, func(int64) error { return nil }, tip, nil, o)
 }
 
 func (m mem) files(t *testing.T, commit gitpack.SHA) []string {
@@ -197,19 +199,18 @@ func TestFastForwardRefusesAPathThatIsNotUTF8(t *testing.T) {
 }
 
 func TestTheLimitCountsDistinctPaths(t *testing.T) {
-	defer func(n int) { MaxChangedPaths = n }(MaxChangedPaths)
-	MaxChangedPaths = 3
+	t.Parallel()
 	m := mem{}
 	files := func(v string) map[string]string { return map[string]string{"a": v, "b": v, "c": v} }
 	base := m.commit(gitpack.SHA{}, m.tree(files("0")), "")
 	tip := m.commit(base, m.tree(map[string]string{"a": "0", "b": "0", "c": "0", "z": "z"}), "")
 	one := m.commit(base, m.tree(files("1")), "")
 	two := m.commit(one, m.tree(files("2")), "")
-	if _, err := m.batch(tip).Land(context.Background(), base, two, time.Unix(1, 0)); err != nil {
+	if _, err := m.batchWith(tip, Options{MaxChangedPaths: 3}).Land(context.Background(), base, two, time.Unix(1, 0)); err != nil {
 		t.Fatalf("two commits that edit the same 3 paths: %v", err)
 	}
 	four := m.commit(two, m.tree(map[string]string{"a": "2", "b": "2", "c": "2", "d": "1"}), "")
-	if _, err := m.batch(base).Land(context.Background(), base, four, time.Unix(1, 0)); !errors.Is(err, ErrTooLarge) {
+	if _, err := m.batchWith(base, Options{MaxChangedPaths: 3}).Land(context.Background(), base, four, time.Unix(1, 0)); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("4 distinct paths: err = %v, want ErrTooLarge", err)
 	}
 }
@@ -227,36 +228,35 @@ func TestFastForwardChecksEveryCommitOfTheRange(t *testing.T) {
 }
 
 func TestTheCacheOfBaseDiffsIsBounded(t *testing.T) {
-	defer func(n int) { MaxChangedPaths = n }(MaxChangedPaths)
-	MaxChangedPaths = 4
+	t.Parallel()
 	m := mem{}
 	start := m.commit(gitpack.SHA{}, m.tree(map[string]string{"a": "0"}), "")
-	b := m.batch(start)
+	b := m.batchWith(start, Options{MaxChangedPaths: 4})
 	for i := range 5 {
 		other := m.commit(gitpack.SHA{}, m.tree(map[string]string{fmt.Sprint("x", i): "1", fmt.Sprint("y", i): "1"}), "")
 		if ok, err := b.before(context.Background(), other, func(string) {}); err != nil || !ok {
 			t.Fatalf("before = %v, %v", ok, err)
 		}
-		if b.cached > MaxChangedPaths {
-			t.Fatalf("cache holds %d paths, want at most %d", b.cached, MaxChangedPaths)
+		if b.cached > b.maxPaths {
+			t.Fatalf("cache holds %d paths, want at most %d", b.cached, b.maxPaths)
 		}
 	}
 }
 
 func TestALandThatMakesAnObjectAboveTheLimitFailsAloneAndLeavesNoTrace(t *testing.T) {
-	defer func(n int) { MaxObjectBytes = n }(MaxObjectBytes)
+	t.Parallel()
 	m := mem{}
 	base := m.commit(gitpack.SHA{}, m.tree(map[string]string{"a": "1"}), "")
 	one := m.commit(base, m.tree(map[string]string{"a": "1", "b": "1"}), "")
 	two := m.commit(base, m.tree(map[string]string{"a": "1", "c": "1"}), "")
 	tip := m.commit(base, m.tree(map[string]string{"a": "1", "d": "1"}), "")
 	b := m.batch(tip)
-	MaxObjectBytes = 1 << 20
+	b.maxObj = 1 << 20
 	if _, err := b.Land(context.Background(), base, one, time.Unix(1, 0)); err != nil {
 		t.Fatal(err)
 	}
 	held := b.Bytes()
-	MaxObjectBytes = 100
+	b.maxObj = 100
 	if _, err := b.Land(context.Background(), base, two, time.Unix(1, 0)); !errors.Is(err, ErrTooLarge) || b.Bytes() != held {
 		t.Fatalf("err = %v, bytes = %d, want ErrTooLarge and %d", err, b.Bytes(), held)
 	}
@@ -264,7 +264,7 @@ func TestALandThatMakesAnObjectAboveTheLimitFailsAloneAndLeavesNoTrace(t *testin
 	if _, err := b.LandExpecting(context.Background(), base, two, time.Unix(1, 0), &wrong); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("with a stale expect_tree: err = %v, want ErrTooLarge before the tree compare", err)
 	}
-	MaxObjectBytes = 1 << 20
+	b.maxObj = 1 << 20
 	if _, err := b.Land(context.Background(), base, two, time.Unix(1, 0)); err != nil {
 		t.Fatalf("a land after the refused one: %v", err)
 	}
@@ -295,13 +295,26 @@ func TestEveryClashingPathIsCheckedBeyondTheCapOfTheConflictList(t *testing.T) {
 }
 
 func TestALandOntoATargetWithAnOversizedNetDiffIsRefused(t *testing.T) {
-	defer func(n int) { MaxChangedPaths = n }(MaxChangedPaths)
-	MaxChangedPaths = 3
+	t.Parallel()
 	m := mem{}
 	base := m.commit(gitpack.SHA{}, m.tree(map[string]string{"a": "0"}), "")
 	tip := m.commit(base, m.tree(map[string]string{"a": "0", "t1": "1", "t2": "1", "t3": "1", "t4": "1"}), "")
 	head := m.commit(base, m.tree(map[string]string{"a": "0", "z": "1"}), "")
-	if _, err := m.batch(tip).Land(context.Background(), base, head, time.Unix(1, 0)); !errors.Is(err, ErrTooLarge) {
+	if _, err := m.batchWith(tip, Options{MaxChangedPaths: 3}).Land(context.Background(), base, head, time.Unix(1, 0)); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("err = %v, want ErrTooLarge", err)
+	}
+}
+
+func TestOptionsSetTheLimitsOfOneBatch(t *testing.T) {
+	t.Parallel()
+	m := mem{}
+	base := m.commit(gitpack.SHA{}, m.tree(map[string]string{"a": "1"}), "")
+	head := m.commit(base, m.tree(map[string]string{"a": "1", "b": "1"}), "")
+	tip := m.commit(base, m.tree(map[string]string{"a": "1", "d": "1"}), "")
+	if _, err := m.batchWith(tip, Options{MaxObjectBytes: 10}).Land(context.Background(), base, head, time.Unix(1, 0)); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("land over MaxObjectBytes: err = %v, want ErrTooLarge", err)
+	}
+	if _, err := m.batch(tip).Land(context.Background(), base, head, time.Unix(1, 0)); err != nil {
+		t.Fatalf("land with the default limits: %v", err)
 	}
 }

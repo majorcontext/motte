@@ -306,7 +306,7 @@ func (b *batchRun) attempt(ctx context.Context) (retry bool, err error) {
 	if err != nil {
 		return false, err
 	}
-	batch := land.NewBatch(landSource{reader}, b.res.growLand, tip, s.landHistory(b.key, tip))
+	batch := land.NewBatch(landSource{reader}, b.res.growLand, tip, s.landHistory(b.key, tip), land.Options{})
 	when := s.events.Clock.Now()
 	for _, it := range b.items {
 		if batch.Bytes() >= softBatchBytes {
@@ -483,7 +483,7 @@ func chained(rows []meta.LandLogRow, base, start gitpack.SHA) bool {
 		}
 		prev, total = r.New, total+len(r.Paths)
 	}
-	return len(rows) > 0 && prev == start.String() && total <= land.MaxChangedPaths
+	return len(rows) > 0 && prev == start.String() && total <= land.DefaultMaxChangedPaths
 }
 
 // sweepLands starts a leader here for every ref that has queued lands, so a land that a crashed replica accepted does

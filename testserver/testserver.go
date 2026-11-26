@@ -47,8 +47,7 @@ type Server struct {
 }
 
 // Limits lowers the size limits of one test, so that it crosses the same boundaries with small bodies. A zero field
-// keeps the limit. The limits are process-wide and return when the test ends, so a test that sets them must not run in
-// parallel with another test of the package that sends large bodies.
+// keeps the limit. The limits belong to the one server.
 type Limits struct {
 	// Object is the largest object that a put accepts, in bytes.
 	Object int
@@ -56,6 +55,9 @@ type Limits struct {
 	Window int64
 	// TreeFirst is the first reservation of a tree read, and TreeFixed the fixed part of every later one, in bytes.
 	TreeFirst, TreeFixed int64
+	// FetchLarge is the reservation above which a fetch takes one of the FetchSlots slots of large fetches.
+	FetchLarge int64
+	FetchSlots int
 }
 
 type options struct {
@@ -91,8 +93,14 @@ func New(t testing.TB, opts ...Option) *Server {
 	for _, opt := range opts {
 		opt(&o)
 	}
-	if o.limits != nil {
-		server.LowerLimits(t, o.limits.Object, o.limits.Window, o.limits.TreeFirst, o.limits.TreeFixed)
+	if l := o.limits; l != nil {
+		prev := o.change
+		o.change = func(c *server.Config) {
+			if prev != nil {
+				prev(c)
+			}
+			c.Limits = server.Limits{Object: l.Object, DecodeWindow: l.Window, TreeReserve: l.TreeFirst, TreeSlack: l.TreeFixed, FetchLarge: l.FetchLarge, FetchSlots: l.FetchSlots}
+		}
 	}
 	if o.postgres {
 		pool := pgtest.Pool

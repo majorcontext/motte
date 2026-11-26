@@ -145,8 +145,8 @@ func TestHandlerPanicIsLoggedAndAnswered(t *testing.T) {
 
 func TestLimitDefaultsAreTheSpecValues(t *testing.T) {
 	t.Parallel()
-	if objectLimit != 16<<20 || decodeWindow != 24<<20 || treeReserve != 8<<20 || treeSlack != 8<<20 || smallBodyMax != 1<<20 {
-		t.Errorf("limits = %d %d %d %d %d, want 16 MiB, 24 MiB, 8 MiB, 8 MiB, 1 MiB", objectLimit, decodeWindow, treeReserve, treeSlack, smallBodyMax)
+	if l := (Limits{}).withDefaults(); l != (Limits{Object: 16 << 20, DecodeWindow: 24 << 20, TreeReserve: 8 << 20, TreeSlack: 8 << 20, FetchLarge: 32 << 20, FetchSlots: 4}) || smallBodyMax != 1<<20 {
+		t.Errorf("limits = %+v %d, want 16 MiB, 24 MiB, 8 MiB, 8 MiB, 32 MiB, 4 slots, 1 MiB", l, smallBodyMax)
 	}
 }
 

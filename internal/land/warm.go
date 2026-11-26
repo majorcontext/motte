@@ -17,7 +17,7 @@ func Warm(ctx context.Context, src Source, base, head gitpack.SHA) error {
 			return ErrTooLarge
 		}
 		return nil
-	}, base, nil)
+	}, base, nil, Options{})
 	baseCommit, err := b.commit(ctx, base)
 	if err != nil {
 		return err

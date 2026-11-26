@@ -40,7 +40,7 @@ func (s *Server) landTrial(w http.ResponseWriter, r *http.Request, c call) error
 	if err != nil {
 		return err
 	}
-	batch := land.NewBatch(landSource{reader}, res.growLand, tip, nil)
+	batch := land.NewBatch(landSource{reader}, res.growLand, tip, nil, land.Options{})
 	when := s.events.Clock.Now()
 	out := api.TrialResponse{Items: make([]api.TrialItem, 0, len(req.Changes))}
 	for _, ch := range req.Changes {

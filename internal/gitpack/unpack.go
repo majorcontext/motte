@@ -17,9 +17,6 @@ const MaxUnpackObjects = 100000
 // returns, each.
 const MaxUnpackBytes = 64 << 20
 
-// unpackLimit is MaxUnpackBytes. A test lowers it.
-var unpackLimit int64 = MaxUnpackBytes
-
 type unpacked struct {
 	off      int64
 	t        Type
@@ -40,6 +37,10 @@ func Unpack(ctx context.Context, pack []byte, external func(SHA) (Type, []byte, 
 // UnpackHeld is Unpack that calls held with the inflated bytes that it holds, before it allocates them, each time
 // that count grows. An error of held stops the unpack.
 func UnpackHeld(ctx context.Context, pack []byte, external func(SHA) (Type, []byte, error), held func(int64) error) ([]Object, error) {
+	return unpackLimited(ctx, pack, external, held, MaxUnpackBytes)
+}
+
+func unpackLimited(ctx context.Context, pack []byte, external func(SHA) (Type, []byte, error), held func(int64) error, limit int64) ([]Object, error) {
 	if len(pack) < 32 || string(pack[:4]) != "PACK" || (binary.BigEndian.Uint32(pack[4:8]) != 2 && binary.BigEndian.Uint32(pack[4:8]) != 3) {
 		return nil, ErrCorrupt
 	}
@@ -60,7 +61,7 @@ func UnpackHeld(ctx context.Context, pack []byte, external func(SHA) (Type, []by
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		e, err := readEntry(r, int64(len(body))-int64(r.Len()), &declared, held)
+		e, err := readEntry(r, int64(len(body))-int64(r.Len()), &declared, held, limit)
 		if err != nil {
 			return nil, err
 		}
@@ -70,10 +71,10 @@ func UnpackHeld(ctx context.Context, pack []byte, external func(SHA) (Type, []by
 	if r.Len() != 0 {
 		return nil, ErrCorrupt
 	}
-	return resolveEntries(ctx, entries, byOff, external, held)
+	return resolveEntries(ctx, entries, byOff, external, held, limit)
 }
 
-func readEntry(r *bytes.Reader, off int64, declared *int64, held func(int64) error) (*unpacked, error) {
+func readEntry(r *bytes.Reader, off int64, declared *int64, held func(int64) error, limit int64) (*unpacked, error) {
 	e := &unpacked{off: off}
 	c, err := r.ReadByte()
 	if err != nil {
@@ -113,7 +114,7 @@ func readEntry(r *bytes.Reader, off int64, declared *int64, held func(int64) err
 			return nil, ErrCorrupt
 		}
 	}
-	if *declared += size; size > MaxObjectBytes || *declared > unpackLimit {
+	if *declared += size; size > MaxObjectBytes || *declared > limit {
 		return nil, ErrTooLarge
 	}
 	if held != nil {
@@ -144,7 +145,7 @@ func readEntry(r *bytes.Reader, off int64, declared *int64, held func(int64) err
 
 // resolveEntries resolves each delta once, when its base is resolved. A ref delta whose base the pack does not hold
 // asks external once for each base name, after every entry that the pack can resolve is resolved.
-func resolveEntries(ctx context.Context, entries []*unpacked, byOff map[int64]*unpacked, external func(SHA) (Type, []byte, error), held func(int64) error) ([]Object, error) {
+func resolveEntries(ctx context.Context, entries []*unpacked, byOff map[int64]*unpacked, external func(SHA) (Type, []byte, error), held func(int64) error, limit int64) ([]Object, error) {
 	var total int64
 	var queue []*unpacked
 	waitName := map[SHA][]*unpacked{}
@@ -160,7 +161,7 @@ func resolveEntries(ctx context.Context, entries []*unpacked, byOff map[int64]*u
 			waitOff[e.baseOff] = append(waitOff[e.baseOff], e)
 		}
 	}
-	if total > unpackLimit {
+	if total > limit {
 		return nil, ErrTooLarge
 	}
 	settle := func(base *unpacked) error {
@@ -177,7 +178,7 @@ func resolveEntries(ctx context.Context, entries []*unpacked, byOff map[int64]*u
 			if err != nil {
 				return err
 			}
-			if total += int64(len(out)); total > unpackLimit {
+			if total += int64(len(out)); total > limit {
 				return ErrTooLarge
 			}
 			if held != nil {

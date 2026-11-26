@@ -51,20 +51,8 @@ const (
 	decodeSlack = 80 << 20
 )
 
-// The size limits that the limit tests lower through LowerLimits. Each starts at the value of the spec.
-var (
-	// objectLimit is the largest object that a put accepts.
-	objectLimit = gitpack.MaxObjectBytes
-	// decodeWindow bounds the JSON text that the decoder of decodeObjects holds for one object: 16 MiB in base64 and
-	// some slack.
-	decodeWindow int64 = 24 << 20
-	// treeReserve is the first reservation of a tree read, and treeSlack the fixed part of every later one.
-	treeReserve int64 = 8 << 20
-	treeSlack   int64 = 8 << 20
-)
-
 // treeCost is the reservation of a tree read that holds treeBytes of tree data.
-func treeCost(treeBytes int64) int64 { return 8*treeBytes + treeSlack }
+func (s *Server) treeCost(treeBytes int64) int64 { return 8*treeBytes + s.limits.TreeSlack }
 
 // readCost is the reservation of a read of size bytes of objects, grown as the sizes are met. A commit read holds the
 // delta, its base and its result: 3 times. An object or blob read holds the data, its base64 text and an encoder

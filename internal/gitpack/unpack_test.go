@@ -8,10 +8,14 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 )
 
-var zw = zlib.NewWriter(nil)
+var (
+	zmu sync.Mutex
+	zw  = zlib.NewWriter(nil)
+)
 
 func packEntry(typ byte, size int, extra, data []byte) []byte {
 	var b bytes.Buffer
@@ -24,6 +28,8 @@ func packEntry(typ byte, size int, extra, data []byte) []byte {
 	}
 	b.WriteByte(c)
 	b.Write(extra)
+	zmu.Lock()
+	defer zmu.Unlock()
 	zw.Reset(&b)
 	_, _ = zw.Write(data)
 	_ = zw.Close()
@@ -80,8 +86,7 @@ func TestUnpackResolvesAThinChainThatListsTheDependentFirst(t *testing.T) {
 }
 
 func TestUnpackCountsWholeObjectsInTheResolvedTotal(t *testing.T) {
-	unpackLimit = 4 << 20
-	t.Cleanup(func() { unpackLimit = MaxUnpackBytes })
+	t.Parallel()
 	const n = 1 << 20
 	var entries [][]byte
 	var names []SHA
@@ -94,7 +99,7 @@ func TestUnpackCountsWholeObjectsInTheResolvedTotal(t *testing.T) {
 	for i := range 2 {
 		entries = append(entries, packEntry(7, len(copyAll), names[i][:], copyAll))
 	}
-	if _, err := Unpack(context.Background(), packOf(entries...), nil); !errors.Is(err, ErrTooLarge) {
+	if _, err := unpackLimited(context.Background(), packOf(entries...), nil, nil, 4<<20); !errors.Is(err, ErrTooLarge) {
 		t.Errorf("err = %v, want ErrTooLarge", err)
 	}
 }
