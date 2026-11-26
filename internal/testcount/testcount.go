@@ -31,7 +31,20 @@ var (
 	mu     sync.Mutex
 	counts = map[string]int{Servers: 0, Schemas: 0, Processes: 0}
 	hooked atomic.Bool
+	exits  []func()
 )
+
+// AtExit registers f to run after the tests of the package, before Run prints the counts. It reports false, and
+// does not register f, when the package does not call Run from its TestMain.
+func AtExit(f func()) bool {
+	mu.Lock()
+	defer mu.Unlock()
+	if !hooked.Load() {
+		return false
+	}
+	exits = append(exits, f)
+	return true
+}
 
 // Add counts one operation. In a package of this module that does not call Run from its TestMain, it fails the test,
 // because the count would be lost.
@@ -56,6 +69,12 @@ func Command(t testing.TB, name string, args ...string) *exec.Cmd {
 func Run(m *testing.M) int {
 	hooked.Store(true)
 	code := m.Run()
+	mu.Lock()
+	fns := exits
+	mu.Unlock()
+	for _, f := range fns {
+		f()
+	}
 	runs := 1
 	if f := flag.Lookup("test.count"); f != nil {
 		_, _ = fmt.Sscan(f.Value.String(), &runs)

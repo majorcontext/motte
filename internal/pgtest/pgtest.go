@@ -18,14 +18,21 @@ import (
 const DSNEnv = "MOTTE_TEST_DATABASE_URL"
 
 // Pool creates a fresh schema in the database at dsn, applies the migrations and returns a pool on it. An empty dsn
-// is read from DSNEnv. When that is empty too, Pool skips the test. Cleanup drops the schema.
+// is read from DSNEnv. When that is empty too, Pool starts one throwaway cluster for the package from the binaries
+// of BinEnv or PATH. Without binaries it skips the test, or fails it when RequireEnv is 1. Cleanup drops the schema.
 func Pool(t testing.TB, dsn string) *pgxpool.Pool {
 	t.Helper()
 	if dsn == "" {
 		dsn = os.Getenv(DSNEnv)
 	}
 	if dsn == "" {
-		t.Skip(DSNEnv + " is not set: the test needs a PostgreSQL database")
+		var err error
+		if dsn, err = startCluster(t); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if dsn == "" {
+		missingDatabase(t)
 	}
 	testcount.Add(t, testcount.Schemas)
 	ctx := context.Background()

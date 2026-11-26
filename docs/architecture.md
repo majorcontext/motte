@@ -91,7 +91,7 @@ openssl genpkey -algorithm ed25519 -out motte.key && MOTTE_META=sqlite MOTTE_SQL
 
 The local loop of a person needs no identity provider, no tunnel and no workspace box. `motte operator-grant --key motte.key --kid local` prints an operator grant for `MOTTE_TOKEN`. With it, issue a token, and use plain `git` with it as the password; `ward check` runs the checks of the repository and `ward land` lands a branch (see README "Developing"). The service serves TLS itself when `MOTTE_TLS_CERT` and `MOTTE_TLS_KEY` are set.
 
-A Go test starts the same composition with `testserver.StartLocal`, which needs no service and never skips. `testserver.Start` runs on PostgreSQL and skips without `MOTTE_TEST_DATABASE_URL`. One process uses one SQLite file and one `fs` directory.
+A Go test starts the same composition with `testserver.StartLocal`, which needs no service and never skips. `testserver.Start` runs on PostgreSQL. It uses the database of `MOTTE_TEST_DATABASE_URL`. Without that variable, `internal/pgtest` starts one throwaway cluster for each test package when `initdb` and `postgres` are on `PATH` or in the directory `MOTTE_TEST_PG_BIN` names. The cluster listens on a unix socket only, runs with `fsync` off, counts as one process, and the package stops and removes it at the end of its tests. When neither a database nor the binaries exist, the test skips, or fails when `MOTTE_TEST_REQUIRE_PG=1`. One process uses one SQLite file and one `fs` directory.
 
 ### Load test
 
@@ -638,7 +638,7 @@ Package `client` has one typed method for each route of both planes. A `Client` 
 - `Land` serves a `merge` client and a `write` client. Its time limit is 35 seconds (`DefaultLandBudget`), which is above the 30 seconds that the server waits, unless `WithBudget` sets another.
 - `SwapRef` and `DeleteRef` serve a `node` client and a `merge` client. `SetProtectedRefs`, `ProtectedRefs`, `Events`, `CreateSubscription`, `Subscriptions` and `DeleteSubscription` serve an `operator` client.
 
-Package `testserver` runs the real server in the process of a test, on a fresh schema of the PostgreSQL database that the caller names (or `MOTTE_TEST_DATABASE_URL`) and a temporary filesystem bucket. It skips the test when no DSN is set. It returns the base URL, the pool of its schema (for a test that sets up a state no route can make), the metadata store, the bucket and the verifier (for a test that runs a second replica on the same state), the control-plane and node signers, and helpers that mint operator, node, read, write, import and merge grants. It does not run the delivery worker. A land needs no worker: a request starts the leader in the process of the server.
+Package `testserver` runs the real server in the process of a test, on a fresh schema of the PostgreSQL database that the caller names (or `MOTTE_TEST_DATABASE_URL`) and a temporary filesystem bucket. It skips the test when no DSN is set and no throwaway cluster can start (see Tests), or fails it when `MOTTE_TEST_REQUIRE_PG=1`. It returns the base URL, the pool of its schema (for a test that sets up a state no route can make), the metadata store, the bucket and the verifier (for a test that runs a second replica on the same state), the control-plane and node signers, and helpers that mint operator, node, read, write, import and merge grants. It does not run the delivery worker. A land needs no worker: a request starts the leader in the process of the server.
 
 ## Observability
 
