@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/majorcontext/motte/internal/meta/sqlcore"
 	"github.com/majorcontext/motte/meta"
 )
 
@@ -207,17 +208,6 @@ func (s *Store) DeleteSubscription(ctx context.Context, id string) error {
 	return nil
 }
 
-func (s *Store) leaseLost(ctx context.Context, id string, partition int) error {
-	var found bool
-	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM subscription_cursors WHERE sub_id = ? AND partition = ?)`, id, partition).Scan(&found); err != nil {
-		return fmt.Errorf("sqlite: read subscription: %w", err)
-	}
-	if !found {
-		return meta.ErrNotFound
-	}
-	return meta.ErrLeaseHeld
-}
-
 func (s *Store) AcquireLease(ctx context.Context, id string, partition int, owner string, now, until time.Time) (meta.Lease, error) {
 	l := meta.Lease{ID: id, Partition: partition}
 	err := s.db.QueryRowContext(ctx, `
@@ -226,7 +216,7 @@ func (s *Store) AcquireLease(ctx context.Context, id string, partition int, owne
 		RETURNING cursor, (SELECT url FROM subscriptions WHERE id = ?1), (SELECT secret FROM subscriptions WHERE id = ?1), (SELECT repo FROM subscriptions WHERE id = ?1)`,
 		id, partition, owner, now.UnixMicro(), until.UnixMicro()).Scan(&l.Cursor, &l.URL, &l.Secret, &l.Repo)
 	if errors.Is(err, sql.ErrNoRows) {
-		return meta.Lease{}, s.leaseLost(ctx, id, partition)
+		return meta.Lease{}, sqlcore.LeaseLost(ctx, s.probe(), id, partition)
 	}
 	if err != nil {
 		return meta.Lease{}, fmt.Errorf("sqlite: acquire lease: %w", err)
@@ -244,7 +234,7 @@ func (s *Store) AdvanceCursor(ctx context.Context, id string, partition int, own
 		if err != nil {
 			return err
 		}
-		return s.leaseLost(ctx, id, partition)
+		return sqlcore.LeaseLost(ctx, s.probe(), id, partition)
 	}
 	return nil
 }

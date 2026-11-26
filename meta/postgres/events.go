@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/majorcontext/motte/internal/meta/sqlcore"
 	"github.com/majorcontext/motte/meta"
 )
 
@@ -153,18 +154,6 @@ func (s *Store) DeleteSubscription(ctx context.Context, id string) error {
 	return nil
 }
 
-// leaseLost picks the error of a lease write that changed no row.
-func (s *Store) leaseLost(ctx context.Context, id string, partition int) error {
-	var found bool
-	if err := s.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM subscription_cursors WHERE sub_id = $1 AND partition = $2)`, id, partition).Scan(&found); err != nil {
-		return fmt.Errorf("postgres: read subscription: %w", err)
-	}
-	if !found {
-		return meta.ErrNotFound
-	}
-	return meta.ErrLeaseHeld
-}
-
 func (s *Store) AcquireLease(ctx context.Context, id string, partition int, owner string, now, until time.Time) (meta.Lease, error) {
 	l := meta.Lease{ID: id, Partition: partition}
 	err := s.Pool.QueryRow(ctx, `
@@ -174,7 +163,7 @@ func (s *Store) AcquireLease(ctx context.Context, id string, partition int, owne
 		SELECT s.url, s.secret, s.repo, taken.cursor FROM taken, subscriptions s WHERE s.id = $1`,
 		id, partition, owner, now, until).Scan(&l.URL, &l.Secret, &l.Repo, &l.Cursor)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return meta.Lease{}, s.leaseLost(ctx, id, partition)
+		return meta.Lease{}, sqlcore.LeaseLost(ctx, s.probe(), id, partition)
 	}
 	if err != nil {
 		return meta.Lease{}, fmt.Errorf("postgres: acquire lease: %w", err)
@@ -190,7 +179,7 @@ func (s *Store) AdvanceCursor(ctx context.Context, id string, partition int, own
 		return fmt.Errorf("postgres: advance cursor: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return s.leaseLost(ctx, id, partition)
+		return sqlcore.LeaseLost(ctx, s.probe(), id, partition)
 	}
 	return nil
 }

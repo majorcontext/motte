@@ -32,6 +32,7 @@ Non-goals:
 | `internal/pktline`, `internal/gitproto` | The pkt-line framing, and the git smart HTTP protocol over an object reader: advertisement, v2 fetch and ls-refs, receive-pack. | M6 |
 | `internal/land` | Pure rebase of a linear range of commits onto a tip: tree diff, tree apply and the file-level conflict check. | M7 |
 | `meta` | Metadata seam: repositories, workspaces and the epoch fence, op heads, refs, protected ref patterns, ref events, event subscriptions, the land queue, lease and log, pack listing, pack manifest. Backends `meta/postgres` and `meta/sqlite`, and the suite `meta/metatest`. Public package. | M2 |
+| `internal/meta/sqlcore` | The checks that both SQL backends run after a write changed no row (lost fence, flush, ref, op heads, event lease and land lease), over a small `Probe` interface. Each backend keeps its SQL and migrations. | M2 |
 | Store service | HTTP service over a `meta` store and a `bucket` store, and the epoch fence. | M2 |
 | `client` | Typed Go client for callers. Public package. | M3 |
 | `devicelogin` | Signs a person in with the OAuth device authorization grant against an OIDC issuer and keeps the token in a private file. Public package. | M3 |

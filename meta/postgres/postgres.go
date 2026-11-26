@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/majorcontext/motte/internal/meta/sqlcore"
 	"github.com/majorcontext/motte/meta"
 )
 
@@ -136,19 +137,6 @@ func (s *Store) Live(ctx context.Context, id string, epoch uint64, repo string) 
 	return f.Live(epoch, repo)
 }
 
-// lost reports a failed fenced write as ErrClaimLost when the fence no longer holds. It returns nil when the fence
-// holds, so the write lost on its own condition.
-func (s *Store) lost(ctx context.Context, ws string, epoch uint64, repo string) error {
-	f, err := s.fence(ctx, ws)
-	if errors.Is(err, meta.ErrNotFound) {
-		return meta.ErrClaimLost
-	}
-	if err != nil {
-		return err
-	}
-	return f.WriteLost(epoch, repo)
-}
-
 func (s *Store) Delete(ctx context.Context, id string) error {
 	if _, err := s.Pool.Exec(ctx, `UPDATE workspaces SET deleted_at = COALESCE(deleted_at, now()) WHERE id = $1`, id); err != nil {
 		return fmt.Errorf("postgres: delete workspace: %w", err)
@@ -178,18 +166,14 @@ func (s *Store) Report(ctx context.Context, ws string, epoch uint64, repo string
 	if wrote, err := s.report(ctx, ws, epoch, repo, generation, prev, op, snapshot); wrote || err != nil {
 		return err
 	}
-	return s.lost(ctx, ws, epoch, repo)
+	return sqlcore.FenceLost(ctx, s.probe(), ws, epoch, repo)
 }
 
 func (s *Store) Flush(ctx context.Context, ws string, epoch uint64, generation int64, prev, op, snapshot string) error {
 	if wrote, err := s.report(ctx, ws, epoch, nil, generation, prev, op, snapshot); wrote || err != nil {
 		return err
 	}
-	f, err := s.fence(ctx, ws)
-	if err != nil {
-		return err
-	}
-	return f.FlushLost(epoch)
+	return sqlcore.FlushLost(ctx, s.probe(), ws, epoch)
 }
 
 func (s *Store) OpHeads(ctx context.Context, ws string) (meta.OpHeads, error) {
@@ -229,20 +213,7 @@ func (s *Store) SwapOpHeads(ctx context.Context, ws string, epoch uint64, repo s
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return meta.OpHeads{}, fmt.Errorf("postgres: swap op heads: %w", err)
 	}
-	if err := s.lost(ctx, ws, epoch, repo); err != nil {
-		return meta.OpHeads{}, err
-	}
-	cur, err := s.OpHeads(ctx, ws)
-	if errors.Is(err, meta.ErrNotFound) {
-		return meta.OpHeads{}, &meta.OpHeadsConflict{}
-	}
-	if err != nil {
-		return meta.OpHeads{}, err
-	}
-	if cur.Epoch > epoch {
-		return meta.OpHeads{}, meta.ErrClaimLost
-	}
-	return meta.OpHeads{}, &meta.OpHeadsConflict{Current: &cur}
+	return meta.OpHeads{}, sqlcore.OpHeadsLost(ctx, s.probe(), ws, epoch, repo)
 }
 
 func (s *Store) AddPack(ctx context.Context, repo, packID string, bytes int64) error {
@@ -499,7 +470,7 @@ func (s *Store) swapRef(ctx context.Context, w writer, ws string, epoch uint64, 
 	if wrote {
 		return meta.Ref{Name: name, Commit: sha, Generation: generation}, nil
 	}
-	return meta.Ref{}, s.refLost(ctx, w, ws, epoch, repo, name)
+	return meta.Ref{}, sqlcore.RefLost(ctx, s.probe(), w.kind == meta.WriterNode, ws, epoch, repo, name)
 }
 
 func (s *Store) deleteRef(ctx context.Context, w writer, ws string, epoch uint64, repo, name string, expect int64) error {
@@ -525,7 +496,7 @@ func (s *Store) deleteRef(ctx context.Context, w writer, ws string, epoch uint64
 	if wrote {
 		return nil
 	}
-	return s.refLost(ctx, w, ws, epoch, repo, name)
+	return sqlcore.RefLost(ctx, s.probe(), w.kind == meta.WriterNode, ws, epoch, repo, name)
 }
 
 // dropLandMeta removes the land log, head and lease of a deleted ref in the transaction of the delete.
@@ -585,28 +556,5 @@ func (s *Store) UpdateRef(ctx context.Context, repo, name, old, new, kind string
 	if wrote {
 		return meta.Ref{Name: name, Commit: new, Generation: generation}, nil
 	}
-	cur, err := s.Ref(ctx, repo, name)
-	switch {
-	case errors.Is(err, meta.ErrNotFound):
-		return meta.Ref{}, &meta.RefConflict{}
-	case err != nil:
-		return meta.Ref{}, err
-	}
-	return meta.Ref{}, &meta.RefConflict{Current: &cur}
-}
-
-func (s *Store) refLost(ctx context.Context, w writer, ws string, epoch uint64, repo, name string) error {
-	if w.kind == meta.WriterNode {
-		if err := s.lost(ctx, ws, epoch, repo); err != nil {
-			return err
-		}
-	}
-	cur, err := s.Ref(ctx, repo, name)
-	if errors.Is(err, meta.ErrNotFound) {
-		return &meta.RefConflict{}
-	}
-	if err != nil {
-		return err
-	}
-	return &meta.RefConflict{Current: &cur}
+	return meta.Ref{}, sqlcore.RefConflict(ctx, s.probe(), repo, name)
 }

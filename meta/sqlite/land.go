@@ -9,6 +9,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/majorcontext/motte/internal/meta/sqlcore"
 	"github.com/majorcontext/motte/meta"
 )
 
@@ -94,17 +95,6 @@ func (s *Store) ReleaseLandLease(ctx context.Context, repo, ref, owner string) e
 
 const leaseHeld = `EXISTS (SELECT 1 FROM land_leases WHERE repo = ?1 AND ref = ?2 AND owner = ?3 AND lease_until > ?4)`
 
-func (s *Store) landLeaseHeld(ctx context.Context, repo, ref, owner string, now time.Time) error {
-	var held bool
-	if err := s.db.QueryRowContext(ctx, `SELECT `+leaseHeld, repo, ref, owner, now.UnixMicro()).Scan(&held); err != nil {
-		return fmt.Errorf("sqlite: read land lease: %w", err)
-	}
-	if !held {
-		return meta.ErrLeaseHeld
-	}
-	return nil
-}
-
 func (s *Store) ClaimLands(ctx context.Context, repo, ref, owner string, now time.Time, limit int) ([]meta.LandItem, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		UPDATE land_queue SET state = 'claimed', owner = ?3
@@ -128,7 +118,7 @@ func (s *Store) ClaimLands(ctx context.Context, repo, ref, owner string, now tim
 	}
 	_ = rows.Close()
 	if len(out) == 0 {
-		return nil, s.landLeaseHeld(ctx, repo, ref, owner, now)
+		return nil, sqlcore.LandLeaseLost(ctx, s.probe(), repo, ref, owner, now)
 	}
 	slices.SortFunc(out, func(a, b meta.LandItem) int { return int(a.Seq - b.Seq) })
 	return out, nil
@@ -202,17 +192,10 @@ func (s *Store) LandRef(ctx context.Context, m meta.LandMove, owner string, now 
 	if ok {
 		return meta.Ref{Name: m.Ref, Commit: m.New, Generation: generation}, nil
 	}
-	if err := s.landLeaseHeld(ctx, m.Repo, m.Ref, owner, now); err != nil {
+	if err := sqlcore.LandLeaseLost(ctx, s.probe(), m.Repo, m.Ref, owner, now); err != nil {
 		return meta.Ref{}, err
 	}
-	cur, err := s.Ref(ctx, m.Repo, m.Ref)
-	switch {
-	case errors.Is(err, meta.ErrNotFound):
-		return meta.Ref{}, &meta.RefConflict{}
-	case err != nil:
-		return meta.Ref{}, err
-	}
-	return meta.Ref{}, &meta.RefConflict{Current: &cur}
+	return meta.Ref{}, sqlcore.RefConflict(ctx, s.probe(), m.Repo, m.Ref)
 }
 
 // landRows appends the log rows and ends the items of m, one statement each, while applied holds. applied reads the
