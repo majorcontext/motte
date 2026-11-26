@@ -1,9 +1,8 @@
 // Package meta is the metadata seam of the store service: repositories,
 // workspaces and their epoch fence, op heads, refs and the pack listing. A
 // Store keeps small mutable records, never object data. Implementations:
-// PostgreSQL (meta/postgres) and SQLite (meta/sqlite). The conformance suite
-// is meta/metatest. docs/architecture.md, section Backends, is the contract
-// of every method.
+// PostgreSQL (internal/meta/postgres) and SQLite (meta/sqlite). docs/architecture.md, section
+// Backends, is the contract of every method.
 package meta
 
 import (

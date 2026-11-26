@@ -15,15 +15,15 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 
-	"github.com/majorcontext/motte/bucket"
-	"github.com/majorcontext/motte/bucket/fs"
-	"github.com/majorcontext/motte/bucket/gcs"
-	"github.com/majorcontext/motte/bucket/s3"
 	"github.com/majorcontext/motte/grant"
 	"github.com/majorcontext/motte/identity/oidc"
+	"github.com/majorcontext/motte/internal/bucket"
+	"github.com/majorcontext/motte/internal/bucket/fs"
+	"github.com/majorcontext/motte/internal/bucket/gcs"
+	"github.com/majorcontext/motte/internal/bucket/s3"
+	"github.com/majorcontext/motte/internal/meta/postgres"
 	"github.com/majorcontext/motte/internal/server"
 	"github.com/majorcontext/motte/meta"
-	"github.com/majorcontext/motte/meta/postgres"
 	"github.com/majorcontext/motte/meta/sqlite"
 )
 

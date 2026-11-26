@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/majorcontext/motte/api"
-	"github.com/majorcontext/motte/bucket"
 	"github.com/majorcontext/motte/client"
+	"github.com/majorcontext/motte/internal/bucket"
 	"github.com/majorcontext/motte/internal/server"
 	"github.com/majorcontext/motte/testserver"
 )

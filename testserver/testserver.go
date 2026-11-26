@@ -13,15 +13,15 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/majorcontext/motte/bucket"
-	"github.com/majorcontext/motte/bucket/fs"
 	"github.com/majorcontext/motte/client"
 	"github.com/majorcontext/motte/grant"
+	"github.com/majorcontext/motte/internal/bucket"
+	"github.com/majorcontext/motte/internal/bucket/fs"
+	"github.com/majorcontext/motte/internal/meta/postgres"
 	"github.com/majorcontext/motte/internal/pgtest"
 	"github.com/majorcontext/motte/internal/server"
 	"github.com/majorcontext/motte/internal/testcount"
 	"github.com/majorcontext/motte/meta"
-	"github.com/majorcontext/motte/meta/postgres"
 	"github.com/majorcontext/motte/meta/sqlite"
 )
 

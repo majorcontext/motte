@@ -11,7 +11,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/majorcontext/motte/bucket"
+	"github.com/majorcontext/motte/internal/bucket"
 	"github.com/majorcontext/motte/internal/gitpack"
 	"github.com/majorcontext/motte/internal/midx"
 )

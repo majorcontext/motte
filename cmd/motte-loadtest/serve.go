@@ -10,9 +10,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/majorcontext/motte/bucket"
-	"github.com/majorcontext/motte/bucket/fs"
 	"github.com/majorcontext/motte/grant"
+	"github.com/majorcontext/motte/internal/bucket"
+	"github.com/majorcontext/motte/internal/bucket/fs"
 	"github.com/majorcontext/motte/internal/server"
 	"github.com/majorcontext/motte/meta/sqlite"
 )

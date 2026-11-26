@@ -8,9 +8,9 @@ import (
 
 	"cloud.google.com/go/storage"
 
-	"github.com/majorcontext/motte/bucket"
-	"github.com/majorcontext/motte/bucket/buckettest"
-	"github.com/majorcontext/motte/bucket/gcs"
+	"github.com/majorcontext/motte/internal/bucket"
+	"github.com/majorcontext/motte/internal/bucket/buckettest"
+	"github.com/majorcontext/motte/internal/bucket/gcs"
 )
 
 const bucketEnv = "MOTTE_TEST_GCS_BUCKET"

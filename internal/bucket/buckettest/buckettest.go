@@ -12,14 +12,14 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/majorcontext/motte/bucket"
+	"github.com/majorcontext/motte/internal/bucket"
 )
 
 // Caps names the guarantees that a backend gives beyond the base contract.
 type Caps struct {
 	// ConditionalDelete: Delete of a stale version leaves an object that was
-	// deleted and stored again, and returns bucket.ErrChanged. bucket/fs and
-	// bucket/gcs have it. bucket/s3 does not: an ETag is the same for the
+	// deleted and stored again, and returns bucket.ErrChanged. internal/bucket/fs and
+	// internal/bucket/gcs have it. internal/bucket/s3 does not: an ETag is the same for the
 	// same bytes, so its collector relies on the mark lease alone.
 	ConditionalDelete bool
 }

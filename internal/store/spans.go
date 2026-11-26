@@ -14,7 +14,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/semaphore"
 
-	"github.com/majorcontext/motte/bucket"
+	"github.com/majorcontext/motte/internal/bucket"
 	"github.com/majorcontext/motte/internal/gitpack"
 )
 

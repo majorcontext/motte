@@ -63,9 +63,9 @@ jobs:
       # A skipped suite passes in the run above, so this step prints the suites and fails on a skip.
       - run: |
           set -o pipefail
-          go test -count=1 -v -run '^TestConformance$' ./bucket/s3 ./bucket/gcs | tee conformance.log
+          go test -count=1 -v -run '^TestConformance$' ./internal/bucket/s3 ./internal/bucket/gcs | tee conformance.log
           if grep -q -e '--- SKIP' conformance.log; then exit 1; fi
-          for pkg in bucket/s3 bucket/gcs; do grep -q -e "^ok .*/$pkg" conformance.log; done
+          for pkg in internal/bucket/s3 internal/bucket/gcs; do grep -q -e "^ok .*/$pkg" conformance.log; done
       - run: test -z "$(gofmt -l .)"
       # ./... skips testdata directories, so the privileged harness tools are named.
       - run: go vet ./internal/vfs/testdata/vfsfuzz ./internal/vfs/testdata/overlaycheck ./internal/vfs/testdata/overlaykit

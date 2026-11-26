@@ -1,7 +1,7 @@
 // Package bucket is the object store seam of the store service. One Store is
 // one bucket of immutable objects. Implementations: Google Cloud Storage
-// (bucket/gcs), an S3-compatible service (bucket/s3) and a filesystem
-// directory (bucket/fs). The conformance suite is bucket/buckettest.
+// (internal/bucket/gcs), an S3-compatible service (internal/bucket/s3) and a filesystem
+// directory (internal/bucket/fs). The conformance suite is internal/bucket/buckettest.
 package bucket
 
 import (
@@ -81,7 +81,7 @@ type Store interface {
 	// returned it. A missing key is not an error. An object of another
 	// version stays, and Delete returns ErrChanged. A backend that cannot
 	// test the version atomically removes the object whatever its version:
-	// bucket/s3 does, because an ETag is the same for the same bytes. Only
+	// internal/bucket/s3 does, because an ETag is the same for the same bytes. Only
 	// the removal of a retired file calls it.
 	Delete(ctx context.Context, key, version string) error
 }

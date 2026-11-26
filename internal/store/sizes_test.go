@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/majorcontext/motte/bucket"
+	"github.com/majorcontext/motte/internal/bucket"
 	"github.com/majorcontext/motte/internal/gitpack"
 	"github.com/majorcontext/motte/internal/midx"
 	"github.com/majorcontext/motte/internal/store"

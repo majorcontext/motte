@@ -10,7 +10,7 @@ import (
 	"cloud.google.com/go/storage"
 	"google.golang.org/api/option"
 
-	"github.com/majorcontext/motte/bucket/gcs"
+	"github.com/majorcontext/motte/internal/bucket/gcs"
 )
 
 type countingTransport struct{ n atomic.Int64 }
