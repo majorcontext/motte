@@ -180,6 +180,32 @@ func (s *Server) claimLands(ctx context.Context, key meta.LandKey, owner string,
 	return items, now, err
 }
 
+// holdLease renews the lease of the ref at a third of its length until stop is called. A renewal that finds another
+// owner ends the returned context with errLeaseLost, so a batch that lost its lease moves no ref. A renewal that
+// fails for another reason is repeated at the next tick: the lease still holds until its end.
+func (s *Server) holdLease(ctx context.Context, key meta.LandKey, owner string) (context.Context, func()) {
+	ctx, cancel := context.WithCancelCause(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		t := s.events.Clock.NewTicker(s.lands.Lease / 3)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+			now := s.events.Clock.Now()
+			if _, err := s.index.AcquireLandLease(ctx, key.Repo, key.Ref, owner, now, now.Add(s.lands.Lease)); errors.Is(err, meta.ErrLeaseHeld) {
+				cancel(errLeaseLost)
+				return
+			}
+		}
+	}()
+	return ctx, func() { cancel(context.Canceled); <-done }
+}
+
 func (s *Server) failLands(ctx context.Context, key meta.LandKey, owner string, items []meta.LandItem) {
 	out := mustJSON(landOutcome{Code: api.CodeInternal, Message: "the land failed: ask again with a new id"})
 	done := make([]meta.LandDone, len(items))
@@ -213,6 +239,12 @@ func (s *Server) landBatch(ctx context.Context, key meta.LandKey, owner string, 
 	if err != nil {
 		return err
 	}
+	ctx, stop := s.holdLease(ctx, key, owner)
+	defer func() {
+		if stop(); errors.Is(context.Cause(ctx), errLeaseLost) {
+			err = errLeaseLost
+		}
+	}()
 	res := &reservation{take: func(n int64) (func(), error) { return s.objects.ReserveLand(ctx, n) }}
 	defer res.drop()
 	for range landAttempts {
@@ -303,6 +335,9 @@ func (b *batchRun) attempt(ctx context.Context) (retry bool, err error) {
 			}
 		}
 		endWrite(nil)
+	}
+	if err := ctx.Err(); err != nil {
+		return false, context.Cause(ctx)
 	}
 	_, endSwap := store.StartSpan(ctx, "vcs.land.swap", attribute.Int("rows", len(b.rows)))
 	moved, err := s.index.LandRef(ctx, meta.LandMove{Repo: b.key.Repo, Ref: b.key.Ref, Old: ref.Commit, New: batch.Tip().String(), Kind: b.kind, Rows: b.rows, Results: b.results}, b.owner, s.events.Clock.Now())
