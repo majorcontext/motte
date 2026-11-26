@@ -13,7 +13,7 @@ import (
 	"cloud.google.com/go/storage"
 	"google.golang.org/api/googleapi"
 
-	"github.com/majorcontext/motte/bucket"
+	"github.com/majorcontext/motte/internal/bucket"
 )
 
 type gcsBucket struct {

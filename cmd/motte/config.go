@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/majorcontext/motte/bucket"
-	"github.com/majorcontext/motte/bucket/s3"
 	"github.com/majorcontext/motte/grant"
+	"github.com/majorcontext/motte/internal/bucket"
+	"github.com/majorcontext/motte/internal/bucket/s3"
 	"github.com/majorcontext/motte/internal/identity"
 	"github.com/majorcontext/motte/internal/identity/oidc"
 	"github.com/majorcontext/motte/internal/store"

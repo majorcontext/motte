@@ -20,9 +20,9 @@ import (
 	"time"
 
 	"github.com/majorcontext/motte/api"
-	"github.com/majorcontext/motte/bucket/fs"
 	"github.com/majorcontext/motte/client"
 	"github.com/majorcontext/motte/grant"
+	"github.com/majorcontext/motte/internal/bucket/fs"
 	"github.com/majorcontext/motte/internal/server"
 	"github.com/majorcontext/motte/meta"
 	"github.com/majorcontext/motte/meta/sqlite"

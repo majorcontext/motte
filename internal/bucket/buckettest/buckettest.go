@@ -12,7 +12,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/majorcontext/motte/bucket"
+	"github.com/majorcontext/motte/internal/bucket"
 )
 
 // Caps names the guarantees that a backend gives beyond the base contract.

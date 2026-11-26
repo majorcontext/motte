@@ -9,9 +9,9 @@ import (
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 
-	"github.com/majorcontext/motte/bucket"
-	"github.com/majorcontext/motte/bucket/buckettest"
-	"github.com/majorcontext/motte/bucket/s3"
+	"github.com/majorcontext/motte/internal/bucket"
+	"github.com/majorcontext/motte/internal/bucket/buckettest"
+	"github.com/majorcontext/motte/internal/bucket/s3"
 )
 
 const (

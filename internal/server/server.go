@@ -15,8 +15,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/majorcontext/motte/api"
-	"github.com/majorcontext/motte/bucket"
 	"github.com/majorcontext/motte/grant"
+	"github.com/majorcontext/motte/internal/bucket"
 	"github.com/majorcontext/motte/internal/clock"
 	"github.com/majorcontext/motte/internal/identity"
 	"github.com/majorcontext/motte/internal/identity/token"

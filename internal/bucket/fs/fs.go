@@ -21,7 +21,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/majorcontext/motte/bucket"
+	"github.com/majorcontext/motte/internal/bucket"
 )
 
 // headerSize is the fixed block that precedes the bytes of an object file: a 4-byte big-endian length and the JSON

@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/majorcontext/motte/bucket"
+	"github.com/majorcontext/motte/internal/bucket"
 	"github.com/majorcontext/motte/internal/gitpack"
 	"github.com/majorcontext/motte/internal/gitproto"
 	"github.com/majorcontext/motte/internal/pktline"

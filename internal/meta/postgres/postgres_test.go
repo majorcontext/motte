@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/majorcontext/motte/internal/meta/metatest"
+	"github.com/majorcontext/motte/internal/meta/postgres"
 	"github.com/majorcontext/motte/internal/pgtest"
 	"github.com/majorcontext/motte/meta"
-	"github.com/majorcontext/motte/meta/metatest"
-	"github.com/majorcontext/motte/meta/postgres"
 )
 
 func TestConformance(t *testing.T) {

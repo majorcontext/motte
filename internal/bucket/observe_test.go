@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/majorcontext/motte/bucket"
+	"github.com/majorcontext/motte/internal/bucket"
 )
 
 type failing struct {

@@ -5,8 +5,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/majorcontext/motte/bucket"
-	"github.com/majorcontext/motte/bucket/buckettest"
+	"github.com/majorcontext/motte/internal/bucket"
+	"github.com/majorcontext/motte/internal/bucket/buckettest"
 )
 
 func TestConformance(t *testing.T) {

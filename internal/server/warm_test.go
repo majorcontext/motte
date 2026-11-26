@@ -13,8 +13,8 @@ import (
 
 	"github.com/coder/quartz"
 
-	"github.com/majorcontext/motte/bucket"
 	"github.com/majorcontext/motte/client"
+	"github.com/majorcontext/motte/internal/bucket"
 	"github.com/majorcontext/motte/internal/gitpack"
 	"github.com/majorcontext/motte/internal/server"
 	"github.com/majorcontext/motte/testserver"

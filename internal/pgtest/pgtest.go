@@ -10,8 +10,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/majorcontext/motte/internal/meta/postgres"
 	"github.com/majorcontext/motte/internal/testcount"
-	"github.com/majorcontext/motte/meta/postgres"
 )
 
 // DSNEnv is the environment variable that Pool reads when it gets no DSN.
