@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync/atomic"
 	"time"
 	"weak"
 
@@ -253,21 +254,30 @@ func (s *Service) readLayer(h *layerH) midx.ReadFunc {
 // loadManifest returns the manifest of repo and its generation. A repo that has packs and no manifest gets one from
 // its pack list, with one index layer for each pack. A repo with neither has an empty manifest of generation 0.
 func (s *Service) loadManifest(ctx context.Context, repo Repo) (midx.Manifest, int64, error) {
+	m, gen, _, err := s.loadManifestCounted(ctx, repo)
+	return m, gen, err
+}
+
+// loadManifestCounted is loadManifest that also returns the layers that this call made by writing the first manifest.
+// A call that lost the swap, or that shared the work of another call, returns 0.
+func (s *Service) loadManifestCounted(ctx context.Context, repo Repo) (midx.Manifest, int64, int, error) {
 	row, err := s.index.Manifest(ctx, repo.String())
 	if errors.Is(err, meta.ErrNotFound) {
 		return s.bootstrap(ctx, repo)
 	}
 	if err != nil {
-		return midx.Manifest{}, 0, err
+		return midx.Manifest{}, 0, 0, err
 	}
 	m, err := midx.DecodeManifest(row.Body)
-	return m, row.Generation, err
+	return m, row.Generation, 0, err
 }
 
-func (s *Service) bootstrap(ctx context.Context, repo Repo) (midx.Manifest, int64, error) {
+func (s *Service) bootstrap(ctx context.Context, repo Repo) (midx.Manifest, int64, int, error) {
 	type result struct {
-		m   midx.Manifest
-		gen int64
+		m       midx.Manifest
+		gen     int64
+		made    int
+		credits *atomic.Bool
 	}
 	v, err, _ := s.loads.Do("bootstrap|"+repo.String(), func() (any, error) {
 		ctx := context.WithoutCancel(ctx)
@@ -291,15 +301,18 @@ func (s *Service) bootstrap(ctx context.Context, repo Repo) (midx.Manifest, int6
 				return nil, err
 			}
 			m, err := midx.DecodeManifest(row.Body)
-			return result{m, row.Generation}, err
+			return result{m: m, gen: row.Generation, credits: new(atomic.Bool)}, err
 		}
-		return result{m, gen}, err
+		return result{m: m, gen: gen, made: len(layers), credits: new(atomic.Bool)}, err
 	})
 	if err != nil {
-		return midx.Manifest{}, 0, err
+		return midx.Manifest{}, 0, 0, err
 	}
 	r := v.(result)
-	return r.m, r.gen, nil
+	if r.made > 0 && r.credits.CompareAndSwap(false, true) {
+		return r.m, r.gen, r.made, nil
+	}
+	return r.m, r.gen, 0, nil
 }
 
 // indexLayers makes an index layer for each pack, reading only the header of its index.

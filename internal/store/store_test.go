@@ -1076,6 +1076,40 @@ func TestAPackThatAnOlderReleaseListedIsAddedToTheManifest(t *testing.T) {
 	w.reachable(w.cold())
 }
 
+func TestAdoptPacksCountsThePacksThatTheManifestLacked(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	w.push(2)
+	w.listOlderPack("listed only")
+	if n, err := w.svc.AdoptPacks(t.Context(), repo); err != nil || n != 1 {
+		t.Fatalf("AdoptPacks = %d, %v; want 1, nil", n, err)
+	}
+	w.reachable(w.cold())
+	if n, err := w.svc.AdoptPacks(t.Context(), repo); err != nil || n != 0 {
+		t.Fatalf("second AdoptPacks = %d, %v; want 0, nil", n, err)
+	}
+}
+
+func TestReplicasThatBootstrapTogetherCountTheLayersOnce(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	w.listOlderPack("listed only, no manifest")
+	other := w.cold()
+	got := make(chan int, 2)
+	for _, svc := range []*store.Service{w.svc, other} {
+		go func() {
+			n, err := svc.AdoptPacks(t.Context(), repo)
+			if err != nil {
+				t.Error(err)
+			}
+			got <- n
+		}()
+	}
+	if sum := <-got + <-got; sum != 1 {
+		t.Fatalf("two replicas counted %d layers added, want 1", sum)
+	}
+}
+
 func TestOnePassOfMaintenanceClearsABacklogOfLayers(t *testing.T) {
 	t.Parallel()
 	w := newWorld(t)
