@@ -188,7 +188,7 @@ func (b dirBucket) Version(_ context.Context, key string) (string, error) {
 	return strconv.FormatInt(a.Generation, 10), nil
 }
 
-func (b dirBucket) ConditionalDelete() bool { return true }
+func (b dirBucket) Caps() bucket.Caps { return bucket.Caps{ConditionalDelete: true} }
 
 // Delete holds the lock of the root across its check and its removal, and Create holds it across its link, so a
 // version that matched cannot be replaced before the removal.

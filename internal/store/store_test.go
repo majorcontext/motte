@@ -1341,10 +1341,10 @@ func TestATreeReadFetchesOnlyTheHeadersOfItsBlobs(t *testing.T) {
 	}
 }
 
-func (s *spy) ConditionalDelete() bool {
-	return !s.unconditional && bucket.DeletesConditionally(s.Store)
+func (s *spy) Caps() bucket.Caps {
+	return bucket.Caps{ConditionalDelete: !s.unconditional && bucket.DeletesConditionally(s.Store)}
 }
 
-func (s *slowBucket) ConditionalDelete() bool { return bucket.DeletesConditionally(s.Store) }
+func (s *slowBucket) Unwrap() bucket.Store { return s.Store }
 
-func (b *memBucket) ConditionalDelete() bool { return true }
+func (b *memBucket) Caps() bucket.Caps { return bucket.Caps{ConditionalDelete: true} }

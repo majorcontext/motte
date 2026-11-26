@@ -39,6 +39,6 @@ func TestAFlightThatFollowsAFilledCacheMakesNoBucketRead(t *testing.T) {
 	}
 }
 
-func (c *countingStore) ConditionalDelete() bool { return bucket.DeletesConditionally(c.Store) }
+func (c *countingStore) Unwrap() bucket.Store { return c.Store }
 
-func (f fixedStore) ConditionalDelete() bool { return bucket.DeletesConditionally(f.Store) }
+func (f fixedStore) Unwrap() bucket.Store { return f.Store }

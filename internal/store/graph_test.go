@@ -185,4 +185,4 @@ func TestTheLayerCacheChargesAGraphByTheCapacityOfItsBuffer(t *testing.T) {
 	}
 }
 
-func (g *graphFiles) ConditionalDelete() bool { return bucket.DeletesConditionally(g.Store) }
+func (g *graphFiles) Unwrap() bucket.Store { return g.Store }
