@@ -1,11 +1,14 @@
 package oidc_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/majorcontext/motte/grant"
@@ -110,13 +113,28 @@ func TestRulesNeverGiveMergeOrOperator(t *testing.T) {
 	}
 }
 
-type failableKeys struct{ down bool }
+type failableKeys struct {
+	down bool
+	gate chan struct{}
+	body []byte
+}
 
 func (f *failableKeys) RoundTrip(r *http.Request) (*http.Response, error) {
+	if f.gate != nil {
+		<-f.gate
+	}
 	if f.down {
 		return nil, errors.New("key set unreachable")
 	}
-	return http.DefaultTransport.RoundTrip(r)
+	if f.body != nil {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(f.body))}, nil
+	}
+	resp, err := http.DefaultTransport.RoundTrip(r)
+	if err == nil {
+		f.body, _ = io.ReadAll(resp.Body)
+		resp.Body = io.NopCloser(bytes.NewReader(f.body))
+	}
+	return resp, err
 }
 
 func TestRefusesKeysAnHourPastTheirLastGoodFetch(t *testing.T) {
@@ -171,10 +189,89 @@ func TestDiscoversTheKeySetAndReadsABearerToken(t *testing.T) {
 func TestOpaqueSubjectsMatchExactly(t *testing.T) {
 	t.Parallel()
 	rules := []identity.Rule{{Principals: []string{"UserA"}, Repos: []string{"native:repo_A"}, Scope: grant.ScopeWrite}}
-	if got := identity.ScopeFor(rules, "usera", "native:repo_A"); got != "" {
+	if got := identity.ScopeFor(rules, "usera", "native:repo_A", false); got != "" {
 		t.Errorf("usera got %q from a rule for UserA", got)
 	}
-	if got := identity.ScopeFor(rules, "UserA", "native:repo_A"); got != grant.ScopeWrite {
+	if got := identity.ScopeFor(rules, "UserA", "native:repo_A", false); got != grant.ScopeWrite {
 		t.Errorf("UserA got %q", got)
 	}
+}
+
+func refreshing(t *testing.T) (*oidc.Authenticator, *failableKeys, *time.Time, *http.Request) {
+	t.Helper()
+	iss := identitytest.NewIssuer(t, "k1")
+	keys := &failableKeys{}
+	at := now
+	a, err := oidc.New(oidc.Config{Issuer: issuer, Header: header, Audience: aud, KeysURL: iss.URL, Client: &http.Client{Transport: keys}, Now: func() time.Time { return at },
+		Rules: []identity.Rule{{Principals: []string{"dev@example.test"}, Repos: []string{"native:repo_A"}, Scope: grant.ScopeWrite}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a, keys, &at, request(iss.Sign(t, claims("dev@example.test", now.Add(3*time.Hour))))
+}
+
+func TestRefreshesBeforeTheKeysGoStale(t *testing.T) {
+	t.Parallel()
+	a, keys, at, r := refreshing(t)
+	for _, c := range []struct {
+		after time.Duration
+		down  bool
+		want  bool
+	}{{0, false, true}, {46 * time.Minute, false, true}, {61 * time.Minute, true, true}, {107 * time.Minute, true, false}} {
+		*at, keys.down = now.Add(c.after), c.down
+		if _, err := a.Authenticate(r, "native:repo_A"); (err == nil) != c.want {
+			t.Errorf("after %s: err = %v, want ok = %v", c.after, err, c.want)
+		}
+	}
+}
+
+func TestEmailVerifiedFalseIsRefusedAndAbsentIsAccepted(t *testing.T) {
+	t.Parallel()
+	iss := identitytest.NewIssuer(t, "k1")
+	rules := []identity.Rule{{Principals: []string{"@example.test"}, Repos: []string{"native:repo_A"}, Scope: grant.ScopeWrite}}
+	a := newAuth(t, iss, rules...)
+	for verified, want := range map[any]bool{nil: true, true: true, "true": true, false: false, "false": false} {
+		c := claims("dev@example.test", now.Add(time.Hour))
+		if verified != nil {
+			c["email_verified"] = verified
+		}
+		if _, err := a.Authenticate(request(iss.Sign(t, c)), "native:repo_A"); (err == nil) != want {
+			t.Errorf("email_verified %v: err = %v, want ok = %v", verified, err, want)
+		}
+	}
+	for _, sub := range []string{"someone@example.test", "@example.test"} {
+		if got := identity.ScopeFor(rules, sub, "native:repo_A", false); got != "" {
+			t.Errorf("a domain rule matched the subject %q that is not an email: %q", sub, got)
+		}
+	}
+}
+
+func TestRequestsDuringARefreshServeFreshKeysAndWaitOnStaleOnes(t *testing.T) {
+	t.Parallel()
+	a, keys, at, r := refreshing(t)
+	if _, err := a.Authenticate(r, "native:repo_A"); err != nil {
+		t.Fatal(err)
+	}
+	synctest.Test(t, func(t *testing.T) {
+		for _, c := range []struct {
+			after time.Duration
+			done  int
+		}{{50 * time.Minute, 1}, {111 * time.Minute, 0}} {
+			*at, keys.gate = now.Add(c.after), make(chan struct{})
+			errs := make(chan error, 2)
+			for range 2 {
+				go func() { _, err := a.Authenticate(r, "native:repo_A"); errs <- err }()
+				synctest.Wait()
+			}
+			if len(errs) != c.done {
+				t.Errorf("after %s: %d requests ended while the refresh was blocked, want %d", c.after, len(errs), c.done)
+			}
+			close(keys.gate)
+			for range 2 {
+				if err := <-errs; err != nil {
+					t.Errorf("after %s: %v", c.after, err)
+				}
+			}
+		}
+	})
 }
