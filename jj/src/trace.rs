@@ -3,20 +3,39 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
 
 use opentelemetry::trace::{
     Span as _, SpanContext, SpanId, TraceContextExt as _, TraceFlags, TraceId, TraceState,
     Tracer as _,
 };
 use opentelemetry::{Context, KeyValue};
-use opentelemetry_otlp::{
-    Protocol, RetryPolicy, SpanExporter, WithExportConfig as _, WithHttpConfig as _,
-};
+use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use opentelemetry_proto::transform::common::tonic::ResourceAttributesWithSchema;
+use opentelemetry_proto::transform::trace::tonic::group_spans_by_resource_and_scope;
 use opentelemetry_sdk::Resource;
-use opentelemetry_sdk::trace::{SdkTracer, SdkTracerProvider, Span};
+use opentelemetry_sdk::error::OTelSdkResult;
+use opentelemetry_sdk::trace::{SdkTracer, SdkTracerProvider, Span, SpanData, SpanProcessor};
+use prost::Message as _;
 
-const EXPORT_TIMEOUT: Duration = Duration::from_millis(500);
+/// Keeps finished spans in memory until `shutdown` hands them to the export mode.
+#[derive(Debug, Clone, Default)]
+struct Collector(Arc<Mutex<Vec<SpanData>>>);
+
+impl SpanProcessor for Collector {
+    fn on_start(&self, _span: &mut Span, _cx: &Context) {}
+
+    fn on_end(&self, span: SpanData) {
+        self.0.lock().unwrap().push(span);
+    }
+
+    fn force_flush(&self) -> OTelSdkResult {
+        Ok(())
+    }
+
+    fn shutdown_with_timeout(&self, _timeout: std::time::Duration) -> OTelSdkResult {
+        Ok(())
+    }
+}
 
 struct Frame {
     ctx: SpanContext,
@@ -26,6 +45,8 @@ struct Frame {
 
 struct State {
     provider: Option<SdkTracerProvider>,
+    spans: Collector,
+    resource: Resource,
     tracer: Option<SdkTracer>,
     env_parent: Option<SpanContext>,
     stack: Mutex<Vec<Arc<Frame>>>,
@@ -73,24 +94,12 @@ fn exporter_configured() -> bool {
         && (set("OTEL_EXPORTER_OTLP_ENDPOINT") || set("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"))
 }
 
-fn build_provider() -> Option<SdkTracerProvider> {
-    let exporter = SpanExporter::builder()
-        .with_http()
-        .with_protocol(Protocol::HttpBinary)
-        .with_timeout(EXPORT_TIMEOUT)
-        .with_retry_policy(RetryPolicy::disabled())
-        .build()
-        .ok()?;
+fn resource() -> Resource {
     let mut resource = Resource::builder();
     if std::env::var_os("OTEL_SERVICE_NAME").is_none() {
         resource = resource.with_service_name("motte-jj");
     }
-    Some(
-        SdkTracerProvider::builder()
-            .with_resource(resource.build())
-            .with_batch_exporter(exporter)
-            .build(),
-    )
+    resource.build()
 }
 
 /// Starts tracing for this process. `TRACEPARENT` names the parent of the command span.
@@ -99,7 +108,14 @@ pub fn init() {
         let env_parent = std::env::var("TRACEPARENT")
             .ok()
             .and_then(|v| parse_traceparent(&v));
-        let provider = exporter_configured().then(build_provider).flatten();
+        let spans = Collector::default();
+        let resource = resource();
+        let provider = exporter_configured().then(|| {
+            SdkTracerProvider::builder()
+                .with_resource(resource.clone())
+                .with_span_processor(spans.clone())
+                .build()
+        });
         let tracer = provider.as_ref().map(|p| {
             use opentelemetry::trace::TracerProvider as _;
             p.tracer("motte-jj")
@@ -118,6 +134,8 @@ pub fn init() {
         }
         State {
             provider,
+            spans,
+            resource,
             tracer,
             env_parent,
             stack: Mutex::new(stack),
@@ -133,7 +151,8 @@ fn parent_context(parent: Option<&SpanContext>) -> Context {
     }
 }
 
-/// Ends the command span and flushes the exporter.
+/// Ends the command span and starts a detached export of the finished spans. It never waits for
+/// the network.
 pub fn shutdown() {
     let Some(st) = STATE.get() else { return };
     if let Some(mut root) = st.root.lock().unwrap().take() {
@@ -149,8 +168,15 @@ pub fn shutdown() {
         }
         root.end();
     }
-    if let Some(p) = &st.provider {
-        let _ = p.shutdown_with_timeout(EXPORT_TIMEOUT);
+    let spans = std::mem::take(&mut *st.spans.0.lock().unwrap());
+    if st.provider.is_some() && !spans.is_empty() {
+        let request = ExportTraceServiceRequest {
+            resource_spans: group_spans_by_resource_and_scope(
+                spans,
+                &ResourceAttributesWithSchema::from(&st.resource),
+            ),
+        };
+        crate::trace_export::spawn(&request.encode_to_vec());
     }
 }
 

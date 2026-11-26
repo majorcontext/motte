@@ -35,12 +35,16 @@ smallvec = "1"
 bstr = "1"
 opentelemetry = { version = "=0.33.1", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "=0.33.1", default-features = false, features = ["trace"] }
-opentelemetry-otlp = { version = "=0.33.1", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
+opentelemetry-proto = { version = "=0.33.1", default-features = false, features = ["trace", "gen-tonic-messages"] }
+prost = "0.14"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
 
 
 [dev-dependencies]
 rand = "0.9"
 rand_chacha = "0.9"
+rcgen = "0.14"
+rustls = "0.23"
 
 [profile.release]
 debug = 1

@@ -127,6 +127,13 @@ fn dirty(ui: &mut Ui, helper: &CommandHelper) -> Result<(), CommandError> {
 }
 
 fn main() -> std::process::ExitCode {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|a| a == motte_jj::trace_export::ARG)
+    {
+        motte_jj::trace_export::run();
+        return std::process::ExitCode::SUCCESS;
+    }
     motte_jj::trace::init();
     let mut wcf = WorkingCopyFactories::new();
     wcf.insert(
