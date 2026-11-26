@@ -1,6 +1,8 @@
 package server_test
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"strings"
 	"sync"
 	"testing"
@@ -19,18 +21,19 @@ func traceInMemory() {
 	traceOnce.Do(func() { otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSyncer(spans))) })
 }
 
-const fetchTraceID = "4bf92f3577b34da6a3ce929d0e0e4736"
-
-// tracedClone is a clone whose requests all carry the trace fetchTraceID.
+// tracedClone is a clone whose requests all carry a trace of its own, g.trace, so that cases on other backends that run
+// at the same time do not share the spans.
 func (g *gitEnv) tracedClone(token string) string {
 	traceInMemory()
-	return g.clone(token, "-c", "http.extraHeader=traceparent: 00-"+fetchTraceID+"-00f067aa0ba902b7-01")
+	var id [16]byte
+	_, _ = rand.Read(id[:])
+	g.trace = hex.EncodeToString(id[:])
+	return g.clone(token, "-c", "http.extraHeader=traceparent: 00-"+g.trace+"-00f067aa0ba902b7-01")
 }
 
-// checkFetchSpans fails the test unless the fetches of the trace fetchTraceID recorded each phase with counts.
-func checkFetchSpans(t *testing.T) {
+// checkFetchSpans fails the test unless the fetches of the trace traceID recorded each phase with counts.
+func checkFetchSpans(t *testing.T, traceID string) {
 	t.Helper()
-	traceID := fetchTraceID
 	serves := map[string]bool{}
 	phases := map[string]string{}
 	var objects, misses int64

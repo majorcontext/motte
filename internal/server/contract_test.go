@@ -47,11 +47,19 @@ type reply struct {
 	body   map[string]any
 }
 
-var startServer = func(t *testing.T) *testserver.Server { return testserver.Start(t, "") }
+// A backend starts the server that a contract case runs against.
+type backend func(testing.TB) *testserver.Server
 
-func newEnv(t *testing.T) *env {
+var (
+	sqliteBackend   backend = func(t testing.TB) *testserver.Server { return testserver.New(t) }
+	postgresBackend backend = func(t testing.TB) *testserver.Server { return testserver.New(t, testserver.WithPostgres("")) }
+)
+
+func newEnv(t *testing.T) *env { return newEnvOn(t, postgresBackend) }
+
+func newEnvOn(t *testing.T, b backend) *env {
 	t.Helper()
-	ts := startServer(t)
+	ts := b(t)
 	return &env{Server: ts, t: t, url: ts.URL, cp: ts.Operator, node: ts.Node}
 }
 
@@ -107,9 +115,9 @@ func (e *env) want(r reply, status int, code string) {
 	}
 }
 
-func TestStaleEpochWritesAreRefusedAfterAClaimRaise(t *testing.T) {
+func contractStaleEpochWritesAreRefusedAfterAClaimRaise(t *testing.T, on backend) {
 	t.Parallel()
-	e := newEnv(t)
+	e := newEnvOn(t, on)
 	e.want(e.claim("ws1", 1, repoText), 200, "")
 	old := e.nodeGrant("ws1", 1)
 	e.want(e.call("PUT", "/v1/vcs/refs/keep", old, map[string]any{"expect": 0, "commit": commitA}), 200, "")
@@ -133,9 +141,9 @@ func TestStaleEpochWritesAreRefusedAfterAClaimRaise(t *testing.T) {
 	e.want(e.call("PUT", "/v1/vcs/refs/new", e.nodeGrant("ws1", 2), map[string]any{"expect": 0, "commit": commitA}), 200, "")
 }
 
-func TestRefGenerationIsACompareAndSwapThatNeverRepeats(t *testing.T) {
+func contractRefGenerationIsACompareAndSwapThatNeverRepeats(t *testing.T, on backend) {
 	t.Parallel()
-	e := newEnv(t)
+	e := newEnvOn(t, on)
 	e.want(e.claim("ws1", 1, repoText), 200, "")
 	node := e.Client(e.nodeGrant("ws1", 1))
 	ctx := context.Background()
@@ -166,9 +174,9 @@ func TestRefGenerationIsACompareAndSwapThatNeverRepeats(t *testing.T) {
 	}
 }
 
-func TestImportedPackServesObjects(t *testing.T) {
+func contractImportedPackServesObjects(t *testing.T, on backend) {
 	t.Parallel()
-	e := newEnv(t)
+	e := newEnvOn(t, on)
 	e.want(e.claim("ws1", 1, repoText), 200, "")
 	pack, idx, names := gitpack.Build([]gitpack.Object{{Type: gitpack.Blob, Data: []byte("hello")}})
 	sum := sha256.Sum256(pack)
@@ -206,9 +214,9 @@ func TestImportedPackServesObjects(t *testing.T) {
 	}
 }
 
-func TestDeletedWorkspaceRefusesReadsAndWrites(t *testing.T) {
+func contractDeletedWorkspaceRefusesReadsAndWrites(t *testing.T, on backend) {
 	t.Parallel()
-	e := newEnv(t)
+	e := newEnvOn(t, on)
 	e.want(e.claim("ws1", 1, repoText), 200, "")
 	ctx := context.Background()
 	node, op := e.Client(e.nodeGrant("ws1", 1)), e.Client(e.operator())
@@ -225,9 +233,9 @@ func TestDeletedWorkspaceRefusesReadsAndWrites(t *testing.T) {
 	refuses(t, err, client.ErrWorkspaceDeleted, 410)
 }
 
-func TestCreateRepoStartsOnARootCommitOfMain(t *testing.T) {
+func contractCreateRepoStartsOnARootCommitOfMain(t *testing.T, on backend) {
 	t.Parallel()
-	e := newEnv(t)
+	e := newEnvOn(t, on)
 	ctx := context.Background()
 	op := e.Client(e.operator())
 	for _, name := range []string{"", "   ", strings.Repeat("a", 101), "bad\x07name"} {
@@ -261,9 +269,9 @@ func TestCreateRepoStartsOnARootCommitOfMain(t *testing.T) {
 	refuses(t, err, client.ErrNotFound, 404)
 }
 
-func TestClaimBindsOwnerAndRepoOnce(t *testing.T) {
+func contractClaimBindsOwnerAndRepoOnce(t *testing.T, on backend) {
 	t.Parallel()
-	e := newEnv(t)
+	e := newEnvOn(t, on)
 	ctx := context.Background()
 	op := e.Client(e.operator())
 	path, err := op.CreateRepo(ctx, "w", "o1")
@@ -287,9 +295,9 @@ func TestClaimBindsOwnerAndRepoOnce(t *testing.T) {
 	refuses(t, claim("ws4", "o1", "gh:acme/other"), client.ErrWorkspaceConflict, 409)
 }
 
-func TestFlushOrdersByGenerationUnderTheEpochFence(t *testing.T) {
+func contractFlushOrdersByGenerationUnderTheEpochFence(t *testing.T, on backend) {
 	t.Parallel()
-	e := newEnv(t)
+	e := newEnvOn(t, on)
 	ctx := context.Background()
 	op := e.Client(e.operator())
 	claim := func(epoch uint64) api.ClaimResponse {
@@ -467,21 +475,32 @@ func TestObjectsBodyStartingWithAHugeTokenAnswersTooLarge(t *testing.T) {
 	}
 }
 
-// The scenarios that pin the fence, the generations and the repo rules also hold on the SQLite and filesystem
-// composition, which needs no other service.
-func TestContractOnTheLocalBackend(t *testing.T) {
-	prev := startServer
-	startServer = func(t *testing.T) *testserver.Server { return testserver.StartLocal(t) }
-	t.Cleanup(func() { startServer = prev })
-	for name, fn := range map[string]func(*testing.T){
-		"stale epoch":       TestStaleEpochWritesAreRefusedAfterAClaimRaise,
-		"ref generation":    TestRefGenerationIsACompareAndSwapThatNeverRepeats,
-		"imported pack":     TestImportedPackServesObjects,
-		"deleted workspace": TestDeletedWorkspaceRefusesReadsAndWrites,
-		"create repo":       TestCreateRepoStartsOnARootCommitOfMain,
-		"claim binds":       TestClaimBindsOwnerAndRepoOnce,
-		"flush order":       TestFlushOrdersByGenerationUnderTheEpochFence,
-	} {
-		t.Run(name, fn)
+// onBothBackends runs each case against the SQLite and the PostgreSQL composition.
+func onBothBackends(t *testing.T, cases map[string]func(*testing.T, backend)) {
+	t.Helper()
+	t.Parallel()
+	for _, bk := range []struct {
+		name string
+		b    backend
+	}{{"sqlite", sqliteBackend}, {"postgres", postgresBackend}} {
+		t.Run(bk.name, func(t *testing.T) {
+			t.Parallel()
+			for name, fn := range cases {
+				t.Run(name, func(t *testing.T) { fn(t, bk.b) })
+			}
+		})
 	}
+}
+
+// The scenarios that pin the fence, the generations and the repo rules hold on both backends.
+func TestContract(t *testing.T) {
+	onBothBackends(t, map[string]func(*testing.T, backend){
+		"stale epoch":       contractStaleEpochWritesAreRefusedAfterAClaimRaise,
+		"ref generation":    contractRefGenerationIsACompareAndSwapThatNeverRepeats,
+		"imported pack":     contractImportedPackServesObjects,
+		"deleted workspace": contractDeletedWorkspaceRefusesReadsAndWrites,
+		"create repo":       contractCreateRepoStartsOnARootCommitOfMain,
+		"claim binds":       contractClaimBindsOwnerAndRepoOnce,
+		"flush order":       contractFlushOrdersByGenerationUnderTheEpochFence,
+	})
 }

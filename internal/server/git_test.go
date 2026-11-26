@@ -31,15 +31,18 @@ import (
 type gitEnv struct {
 	*env
 	path, text string
+	trace      string
 }
 
-func newGitEnv(t *testing.T) *gitEnv {
+func newGitEnv(t *testing.T) *gitEnv { return newGitEnvOn(t, postgresBackend) }
+
+func newGitEnvOn(t *testing.T, b backend) *gitEnv {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("the git binary is not installed")
 	}
 	t.Parallel()
-	e := newEnv(t)
+	e := newEnvOn(t, b)
 	path, err := e.Client(e.operator()).CreateRepo(context.Background(), "widgets", "o1")
 	if err != nil {
 		t.Fatal(err)
@@ -112,8 +115,8 @@ func bigText(n int, tail string) string {
 	return strings.Repeat("line of filler text for deltas\n", n) + tail
 }
 
-func TestGitCloneFetchAndPush(t *testing.T) {
-	g := newGitEnv(t)
+func gitCloneFetchAndPush(t *testing.T, on backend) {
+	g := newGitEnvOn(t, on)
 	read, write := g.readGrant(g.text), g.WriteGrant(t, g.text)
 	reader, writer := g.tracedClone(read), g.clone(write)
 	g.commit(writer, "big.txt", bigText(2000, "one\n"))
@@ -124,7 +127,7 @@ func TestGitCloneFetchAndPush(t *testing.T) {
 	if got := g.git(reader, true, "show", "origin/feature/x:big.txt"); !strings.HasSuffix(got, "two") {
 		t.Errorf("fetched branch content ends %q", got[len(got)-10:])
 	}
-	checkFetchSpans(t)
+	checkFetchSpans(t, g.trace)
 }
 
 func TestSmallRequestsNeedLittleMemory(t *testing.T) {
@@ -170,8 +173,8 @@ func TestSmallRequestsNeedLittleMemory(t *testing.T) {
 	}
 }
 
-func TestGitAnnotatedTags(t *testing.T) {
-	g := newGitEnv(t)
+func gitAnnotatedTags(t *testing.T, on backend) {
+	g := newGitEnvOn(t, on)
 	writer, reader := g.clone(g.WriteGrant(t, g.text)), g.clone(g.readGrant(g.text))
 	g.commit(writer, "t.txt", "t")
 	g.git(writer, true, "tag", "-a", "-m", "release", "v1")
@@ -183,8 +186,8 @@ func TestGitAnnotatedTags(t *testing.T) {
 	g.git(reader, true, "fsck", "--strict")
 }
 
-func TestGitPushRules(t *testing.T) {
-	g := newGitEnv(t)
+func gitPushRules(t *testing.T, on backend) {
+	g := newGitEnvOn(t, on)
 	write := g.WriteGrant(t, g.text)
 	a, b := g.clone(write), g.clone(write)
 	g.commit(a, "a.txt", "a")
@@ -203,8 +206,8 @@ func TestGitPushRules(t *testing.T) {
 	}
 }
 
-func TestGitRefusedPushesAreReported(t *testing.T) {
-	g := newGitEnv(t)
+func gitRefusedPushesAreReported(t *testing.T, on backend) {
+	g := newGitEnvOn(t, on)
 	write := g.WriteGrant(t, g.text)
 	head := g.head(g.clone(write))
 	line := fmt.Sprintf("%s %s refs/heads/main\x00report-status\n", strings.Repeat("1", 40), head)
@@ -248,8 +251,8 @@ func (g *gitEnv) rawPush(token, command, pack string) string {
 	return reply.String()
 }
 
-func TestGitAuthorization(t *testing.T) {
-	g := newGitEnv(t)
+func gitAuthorization(t *testing.T, on backend) {
+	g := newGitEnvOn(t, on)
 	refs := g.url + "/git/native/" + g.path + ".git/info/refs?service=git-upload-pack"
 	resp, err := http.Get(refs)
 	if err != nil {
@@ -277,8 +280,8 @@ func TestGitAuthorization(t *testing.T) {
 	g.git(scratch, false, "ls-remote", g.remote("repo_missing", g.WriteGrant(t, "native:repo_missing")))
 }
 
-func TestGitPartialClone(t *testing.T) {
-	g := newGitEnv(t)
+func gitPartialClone(t *testing.T, on backend) {
+	g := newGitEnvOn(t, on)
 	write := g.WriteGrant(t, g.text)
 	w := g.clone(write)
 	g.commit(w, "doc.txt", "lazy content\n")
@@ -294,8 +297,8 @@ func TestGitPartialClone(t *testing.T) {
 	g.git(scratch, false, "clone", "-q", "--filter=tree:0", g.remote(g.path, write), filepath.Join(scratch, "x"))
 }
 
-func TestGitServesAnImportedPack(t *testing.T) {
-	g := newGitEnv(t)
+func gitServesAnImportedPack(t *testing.T, on backend) {
+	g := newGitEnvOn(t, on)
 	ctx := context.Background()
 	blob := []byte("imported\n")
 	blobSHA := gitpack.Hash(gitpack.Blob, blob)
@@ -324,21 +327,16 @@ func TestGitServesAnImportedPack(t *testing.T) {
 	}
 }
 
-func TestGitOnTheLocalBackend(t *testing.T) {
-	prev := startServer
-	startServer = func(t *testing.T) *testserver.Server { return testserver.StartLocal(t) }
-	t.Cleanup(func() { startServer = prev })
-	for name, fn := range map[string]func(*testing.T){
-		"clone fetch push": TestGitCloneFetchAndPush,
-		"push rules":       TestGitPushRules,
-		"tags":             TestGitAnnotatedTags,
-		"refused pushes":   TestGitRefusedPushesAreReported,
-		"authorization":    TestGitAuthorization,
-		"partial clone":    TestGitPartialClone,
-		"imported pack":    TestGitServesAnImportedPack,
-	} {
-		t.Run(name, fn)
-	}
+func TestGitOnBothBackends(t *testing.T) {
+	onBothBackends(t, map[string]func(*testing.T, backend){
+		"clone fetch push": gitCloneFetchAndPush,
+		"push rules":       gitPushRules,
+		"tags":             gitAnnotatedTags,
+		"refused pushes":   gitRefusedPushesAreReported,
+		"authorization":    gitAuthorization,
+		"partial clone":    gitPartialClone,
+		"imported pack":    gitServesAnImportedPack,
+	})
 }
 
 func TestTheMemoryBudgetAndTheFetchSlotsOnOneServer(t *testing.T) {
