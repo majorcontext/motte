@@ -46,6 +46,8 @@ git push origin my-change
 ward land REPO my-change
 ```
 
+Clone without `--depth`: the service does not offer shallow fetches.
+
 `motte token list` shows the tokens and `motte token revoke ID` revokes one. `motte repo create NAME` creates a repository for a token with the scope `admin`.
 
 `ward check` runs the checks of `.ward/checks.json` on your machine. `git push` writes a branch and never `main`: only `ward land` lands a branch on `main`.
