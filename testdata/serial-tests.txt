@@ -12,3 +12,4 @@ internal/land TestTheCacheOfBaseDiffsIsBounded it writes the package variable Ma
 internal/land TestALandThatMakesAnObjectAboveTheLimitFailsAloneAndLeavesNoTrace it writes the package variable MaxObjectBytes that every land reads
 internal/server TestTheMemoryBudgetAndTheFetchSlotsOnOneServer LowerFetchSlots writes the package variables that every running server reads
 internal/store TestSlowReadsGetASpanAtMostOnceASecond sets the global tracer provider
+testserver TestLimitsLowerTheObjectLimit WithLimits writes the package size limits that every running server reads

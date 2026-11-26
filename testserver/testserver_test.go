@@ -13,7 +13,6 @@ import (
 )
 
 func TestLimitsLowerTheObjectLimit(t *testing.T) {
-	t.Parallel()
 	s := testserver.New(t, testserver.WithLimits(testserver.Limits{Object: 256 << 10}))
 	ctx := context.Background()
 	if _, err := s.Client(s.OperatorGrant(t)).Claim(ctx, "ws1", api.ClaimRequest{Epoch: 1, Owner: "o1", Repo: "gh:acme/widgets"}); err != nil {
