@@ -1095,6 +1095,40 @@ func TestAPackRowWhoseFilesAreMissingDoesNotFailMaintenance(t *testing.T) {
 	w.reachable(w.cold())
 }
 
+func TestAdoptPacksCountsThePacksThatTheManifestLacked(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	w.push(2)
+	w.listOlderPack("listed only")
+	if n, _, err := w.svc.AdoptPacks(t.Context(), repo); err != nil || n != 1 {
+		t.Fatalf("AdoptPacks = %d, %v; want 1, nil", n, err)
+	}
+	w.reachable(w.cold())
+	if n, _, err := w.svc.AdoptPacks(t.Context(), repo); err != nil || n != 0 {
+		t.Fatalf("second AdoptPacks = %d, %v; want 0, nil", n, err)
+	}
+}
+
+func TestReplicasThatBootstrapTogetherCountTheLayersOnce(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	w.listOlderPack("listed only, no manifest")
+	other := w.cold()
+	got := make(chan int, 2)
+	for _, svc := range []*store.Service{w.svc, other} {
+		go func() {
+			n, _, err := svc.AdoptPacks(t.Context(), repo)
+			if err != nil {
+				t.Error(err)
+			}
+			got <- n
+		}()
+	}
+	if sum := <-got + <-got; sum != 1 {
+		t.Fatalf("two replicas counted %d layers added, want 1", sum)
+	}
+}
+
 func TestOnePassOfMaintenanceClearsABacklogOfLayers(t *testing.T) {
 	t.Parallel()
 	w := newWorld(t)
@@ -1341,5 +1375,22 @@ func TestAPackIsReadFromTheKeyThatTheManifestRecords(t *testing.T) {
 		if _, _, err := w.cold().Get(t.Context(), repo, sha); err != nil {
 			t.Errorf("get %s: %v", sha, err)
 		}
+	}
+}
+
+type failingSwap struct{ store.PackIndex }
+
+func (failingSwap) SwapManifest(context.Context, string, int64, []byte) (int64, error) {
+	return 0, errors.New("swap failed")
+}
+
+func TestAdoptPacksCountsNothingWhenTheManifestSwapFails(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	w.push(2)
+	w.listOlderPack("listed only")
+	svc := store.New(w.mem, failingSwap{w.meta}, store.WithGrace(grace))
+	if n, _, err := svc.AdoptPacks(t.Context(), repo); err == nil || n != 0 {
+		t.Fatalf("AdoptPacks = %d, %v; want 0 and an error", n, err)
 	}
 }

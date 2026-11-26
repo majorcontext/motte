@@ -115,6 +115,14 @@ func planByClass(layers []midx.Entry, plan func([]midx.Entry) (midx.Plan, bool))
 	return nil, false
 }
 
+// AdoptPacks adds to the manifest of repo an index layer for each pack that the pack list has and the manifest lacks,
+// and returns the number of layers that it added and the number of pack rows that it dropped because their files do not
+// exist. A layer counts only after the manifest swap that holds it succeeded. A repo that has packs and no manifest gets one.
+func (s *Service) AdoptPacks(ctx context.Context, repo Repo) (added, dropped int, err error) {
+	err = s.locked(repo, func() (err error) { added, dropped, err = s.reconcile(ctx, repo); return err })
+	return added, dropped, err
+}
+
 // Maintain does one bounded pass over repo: it adds the packs that the manifest lacks, compacts packs, merges layers
 // and deletes the retired files whose grace has passed. It repeats the compactions and the merges until no run is left
 // or maintainBudget has passed, so a burst of writes does not outrun it. Every step ends in one compare and swap of the
@@ -122,7 +130,7 @@ func planByClass(layers []midx.Entry, plan func([]midx.Entry) (midx.Plan, bool))
 // alone, so a tail merge of a write can run between steps. It is safe to run on many replicas, which only repeat work.
 func (s *Service) Maintain(ctx context.Context, repo Repo) error {
 	end := s.clk.Now().Add(maintainBudget)
-	if err := s.locked(repo, func() error { return s.reconcile(ctx, repo) }); err != nil {
+	if _, _, err := s.AdoptPacks(ctx, repo); err != nil {
 		return s.failed(err)
 	}
 	for _, f := range []func() (bool, error){
@@ -773,60 +781,62 @@ func (s *Service) collect(ctx context.Context, repo Repo) (err error) {
 // dropGonePacks removes the pack rows of packs that the manifest does not name and whose files do not exist. A write
 // stores the files and swaps the manifest before it adds the row, so no ref reaches the objects of such a row. The
 // manifest is read again first, so a row that a concurrent write just added with unique keys stays.
-func (s *Service) dropGonePacks(ctx context.Context, repo Repo, gone []meta.Pack) error {
+func (s *Service) dropGonePacks(ctx context.Context, repo Repo, gone []meta.Pack) (int, error) {
 	if len(gone) == 0 {
-		return nil
+		return 0, nil
 	}
 	prefix, err := repoPrefix(repo)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	m, _, err := s.loadManifest(ctx, repo)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	held, err := s.heldPacks(ctx, prefix, m.Layers)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	named := map[string]bool{}
 	for _, p := range held {
 		named[p.ID] = true
 	}
+	dropped := 0
 	for _, p := range gone {
 		if named[p.ID] {
 			continue
 		}
 		s.logger.WarnContext(ctx, "pack row without files dropped", "repo", repo.String(), "pack", p.ID)
 		if err := s.index.RemovePack(ctx, repo.String(), p.ID); err != nil {
-			return err
+			return dropped, err
 		}
+		dropped++
 	}
-	return nil
+	return dropped, nil
 }
 
 // reconcile adds an index layer for each pack that the pack list has and the manifest lacks. A writer of an older
 // release adds packs to the list only.
-func (s *Service) reconcile(ctx context.Context, repo Repo) error {
+func (s *Service) reconcile(ctx context.Context, repo Repo) (added, dropped int, err error) {
 	prefix, err := repoPrefix(repo)
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
-	m, _, err := s.loadManifest(ctx, repo)
+	m, _, made, err := s.loadManifestCounted(ctx, repo)
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
 	rows, err := s.index.Packs(ctx, repo.String())
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
 	known, err := s.heldPacks(ctx, prefix, m.Layers)
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
 	retired, err := s.index.RetiredFiles(ctx, repo.String())
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
 	listed := map[string]bool{}
 	for _, p := range rows {
@@ -837,7 +847,7 @@ func (s *Service) reconcile(ctx context.Context, repo Repo) error {
 		knownIDs[p.ID] = true
 		if !listed[p.ID] {
 			if err := s.index.AddPack(ctx, repo.String(), p.ID, p.Bytes); err != nil {
-				return err
+				return 0, 0, err
 			}
 		}
 	}
@@ -853,32 +863,38 @@ func (s *Service) reconcile(ctx context.Context, repo Repo) error {
 		}
 	}
 	if len(missing) == 0 {
-		return nil
+		return made, 0, nil
 	}
 	layers, gone, err := s.indexLayers(ctx, repo, missing)
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
-	if err := s.dropGonePacks(ctx, repo, gone); err != nil {
-		return err
+	dropped, err = s.dropGonePacks(ctx, repo, gone)
+	if err != nil {
+		return 0, 0, err
 	}
 	if len(layers) == 0 {
-		return nil
+		return made, dropped, nil
 	}
-	return s.updateManifest(ctx, repo, func(m *midx.Manifest) (bool, error) {
+	swapped := 0
+	err = s.updateManifest(ctx, repo, func(m *midx.Manifest) (bool, error) {
 		have := map[string]bool{}
 		for _, l := range m.Layers {
 			if l.IsIndex() {
 				have[l.Packs[0].ID] = true
 			}
 		}
-		changed := false
+		swapped = 0
 		for _, l := range layers {
 			if !have[l.Packs[0].ID] {
 				m.Layers = append(m.Layers, l)
-				changed = true
+				swapped++
 			}
 		}
-		return changed, nil
+		return swapped > 0, nil
 	})
+	if err != nil {
+		return made, dropped, err
+	}
+	return made + swapped, dropped, nil
 }
