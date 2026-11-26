@@ -1,4 +1,4 @@
-# Top-level tests that do not call t.Parallel, read by internal/lint/paralleltests.
+# Top-level tests that do not call t.Parallel, read by the analyzer paralleltests of majorcontext/tools.
 # One line for each test: package TestName reason
 # package is the import path below the module path. The reason says what shared state the test writes.
 # A serial test runs before any parallel test of its package resumes, so no running test reads the state while it changes.

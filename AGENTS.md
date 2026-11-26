@@ -10,7 +10,7 @@ Read `docs/architecture.md` before you change behavior. It is the contract. A di
 
 This repository is public. No file, commit message, branch name, pull request title or body, or comment may name an internal project, host, address, bucket, person or product of a caller. Use "workspace" for the identity concept and "the caller" or "a control plane" for the client.
 
-The CI job `leak` runs `internal/leaklint` against the secret `LEAK_DENYLIST`. Never commit denylist content.
+The CI job `leak` runs `go tool leaklint` (majorcontext/tools) against the secret `LEAK_DENYLIST`. Never commit denylist content.
 
 ## Tests
 
@@ -18,7 +18,7 @@ The CI job `leak` runs `internal/leaklint` against the secret `LEAK_DENYLIST`. N
 - Write a unit test only for pure code: codecs, the grant, the pack format.
 - Name the failure a test catches before you write it.
 - Added test lines stay at or below added code lines.
-- No wall-clock waits in tests: `time.Sleep` and `time.After` only inside a `synctest.Test` bubble; otherwise use channels. A wait that no bubble can hold, such as a cross-process wait, carries a `//lint:allow wallclock REASON` comment on its line. The analyzer `internal/lint/wallclock` enforces this.
+- No wall-clock waits in tests: `time.Sleep` and `time.After` only inside a `synctest.Test` bubble; otherwise use channels. A wait that no bubble can hold, such as a cross-process wait, carries a `//lint:allow wallclock REASON` comment on its line. The analyzer `wallclock` of majorcontext/tools enforces this (`go tool lint`).
 - Run Go tests with `-race`.
 - A test is at most 10 s and a package at most 10 s, unless `testdata/test-time-budget.txt` says more. Make a slow test fast; raise a budget only with a stated reason in the same change. `internal/testtime` enforces the budget in CI. CI times each package alone (`go test -p 1`), so a package time is its own cost.
 
@@ -26,7 +26,7 @@ The CI job `leak` runs `internal/leaklint` against the secret `LEAK_DENYLIST`. N
 
 Test time differs by machine, so the repository limits the causes of slow tests exactly and keeps time only as a calibrated backstop.
 
-- Every top-level `TestXxx` calls `t.Parallel()` on its own `t`, directly or through a helper of the same package that calls it. A test that cannot run in parallel is listed in `testdata/serial-tests.txt`, one `package TestName reason` per line, where `package` is the import path below the module path. A line without a reason, and a line that names a test that does not exist or already runs in parallel, fails the analyzer `internal/lint/paralleltests`.
+- Every top-level `TestXxx` calls `t.Parallel()` on its own `t`, directly or through a helper of the same package that calls it. A test that cannot run in parallel is listed in `testdata/serial-tests.txt`, one `package TestName reason` per line, where `package` is the import path below the module path. A line without a reason, and a line that names a test that does not exist or already runs in parallel, fails the analyzer `paralleltests` of majorcontext/tools.
 - PostgreSQL tests use `MOTTE_TEST_DATABASE_URL` when it is set. Otherwise `pgtest` starts one throwaway cluster for each package from `initdb` and `postgres` on `PATH` or in `MOTTE_TEST_PG_BIN`, and the cluster counts as one process. `MOTTE_TEST_REQUIRE_PG=1` makes a missing database fail the test instead of skipping it. The check `budget` of `.ward/checks.json` sets both, with the PostgreSQL 17 binaries of the box image, so the land gate runs every PostgreSQL test.
 - A test helper that starts a server (`testserver.Start`, `testserver.StartLocal`), creates a PostgreSQL schema (`pgtest.Pool`) or starts a process (`testcount.Command`) counts it through `internal/testcount`. A package that uses these helpers calls `testcount.Run` from its `TestMain`; the helpers fail a test in a package that does not. At the end of the run the package prints one line `motte-testcount {"processes":N,"schemas":N,"servers":N}`. Under `-count=N` the counts are those of one run. A cached run prints the same line.
 - `testdata/test-time-budget.txt` holds one limit for each count: `count PATH NAME MAX` for one package, `count default NAME MAX` for a package without its own line. A package or name without a line, and without a default, has the limit 0. `internal/testtime` fails a package whose count passes its limit and prints the counts. A change that raises a count raises its line in the same diff and states why.
@@ -68,8 +68,8 @@ ward lands a branch onto `main` only after it runs the checks of `.ward/checks.j
 ```bash
 go build ./...
 go vet ./...
-go run ./internal/lint/cmd/lint ./...
+go tool lint ./...
 MOTTE_TEST_PG_BIN=/usr/lib/postgresql/17/bin MOTTE_TEST_REQUIRE_PG=1 go test -race -count=1 -p 1 -json ./... | go run ./internal/testtime
 test -z "$(gofmt -l .)"
-LEAK_DENYLIST="$(cat denylist.txt)" go run ./internal/leaklint
+LEAK_DENYLIST="$(cat denylist.txt)" go tool leaklint
 ```

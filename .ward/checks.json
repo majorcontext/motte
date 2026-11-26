@@ -1,6 +1,6 @@
 {
   "checks": [
-    {"name": "static", "run": ["sh", "-c", "go build ./... && go vet ./... && go run ./internal/lint/cmd/lint ./... && test -z \"$(gofmt -l .)\""], "timeout_seconds": 900},
+    {"name": "static", "run": ["sh", "-c", "go build ./... && go vet ./... && go tool lint ./... && test -z \"$(gofmt -l .)\""], "timeout_seconds": 900},
     {"name": "budget", "run": ["sh", "-c", "f=$(mktemp) && MOTTE_TEST_PG_BIN=/usr/lib/postgresql/17/bin MOTTE_TEST_REQUIRE_PG=1 GORACE=atexit_sleep_ms=0 go test -race -count=1 -p 1 -json ./... > \"$f\"; a=$?; go run ./internal/testtime -title Unit -job go -time-allowance 1.15 < \"$f\"; b=$?; rm -f \"$f\"; test $a -eq 0 && test $b -eq 0"], "timeout_seconds": 1800},
   ],
 }
