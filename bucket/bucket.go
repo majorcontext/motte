@@ -15,6 +15,19 @@ var ErrNotFound = errors.New("bucket: object not found")
 // ErrChanged is a Delete of an object whose version is not the one named.
 var ErrChanged = errors.New("bucket: object changed")
 
+// ConditionalDeleter is an optional method of a Store. ConditionalDelete reports whether Delete tests the version
+// atomically, so an object that is stored again is never removed by a Delete of the older version.
+type ConditionalDeleter interface {
+	ConditionalDelete() bool
+}
+
+// DeletesConditionally reports whether Delete of s tests the version. A Store that does not declare it answers false,
+// so a wrapper must forward the method.
+func DeletesConditionally(s Store) bool {
+	c, ok := s.(ConditionalDeleter)
+	return ok && c.ConditionalDelete()
+}
+
 type Store interface {
 	// Create writes data when key is absent and reports whether it wrote. A
 	// stored object is never replaced. Of concurrent creators of one key,

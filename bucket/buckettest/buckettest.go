@@ -178,6 +178,9 @@ func deleteRemoves(t *testing.T, b bucket.Store, key func(string) string) {
 }
 
 func staleVersion(t *testing.T, b bucket.Store, key func(string) string, caps Caps) {
+	if got := bucket.DeletesConditionally(b); got != caps.ConditionalDelete {
+		t.Errorf("DeletesConditionally = %v, want %v", got, caps.ConditionalDelete)
+	}
 	if !caps.ConditionalDelete {
 		return
 	}

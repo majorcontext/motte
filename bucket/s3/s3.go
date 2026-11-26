@@ -123,6 +123,9 @@ func (b s3Bucket) Version(ctx context.Context, key string) (string, error) {
 	return aws.ToString(out.ETag), nil
 }
 
+// ConditionalDelete is false: Delete ignores the version.
+func (b s3Bucket) ConditionalDelete() bool { return false }
+
 // Delete ignores the version. DeleteObject takes If-Match with an ETag, but a file that a writer stores again has the
 // bytes, and so the ETag, of the file that was deleted, so the precondition cannot tell them apart. The mark lease of
 // the collector is the only guard of this backend.

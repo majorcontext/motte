@@ -75,6 +75,8 @@ func (g *gcsBucket) Version(ctx context.Context, key string) (string, error) {
 	return strconv.FormatInt(a.Generation, 10), nil
 }
 
+func (g *gcsBucket) ConditionalDelete() bool { return true }
+
 // Delete sends the generation as ifGenerationMatch, and reads the object again on a 412 to tell a changed object from
 // a missing one.
 func (g *gcsBucket) Delete(ctx context.Context, key, version string) error {

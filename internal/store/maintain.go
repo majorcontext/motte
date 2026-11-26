@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -46,7 +47,7 @@ const (
 type maintStats struct {
 	compactRuns, compactBytes, compactObjects atomic.Int64
 	mergeRuns, mergeObjects                   atomic.Int64
-	deleted, failures                         atomic.Int64
+	deleted, deleteSkipped, failures          atomic.Int64
 	mu                                        sync.Mutex
 	layers                                    map[string]int
 }
@@ -55,7 +56,7 @@ type maintStats struct {
 type MaintStats struct {
 	CompactRuns, CompactBytes, CompactObjects int64
 	MergeRuns, MergeObjects                   int64
-	Deleted, Failures                         int64
+	Deleted, DeleteSkipped, Failures          int64
 	Repos, LayersMax, LayersSum               int64
 }
 
@@ -64,7 +65,7 @@ func (s *Service) MaintStats() MaintStats {
 	st := &s.stats
 	out := MaintStats{
 		CompactRuns: st.compactRuns.Load(), CompactBytes: st.compactBytes.Load(), CompactObjects: st.compactObjects.Load(),
-		MergeRuns: st.mergeRuns.Load(), MergeObjects: st.mergeObjects.Load(), Deleted: st.deleted.Load(), Failures: st.failures.Load(),
+		MergeRuns: st.mergeRuns.Load(), MergeObjects: st.mergeObjects.Load(), Deleted: st.deleted.Load(), DeleteSkipped: st.deleteSkipped.Load(), Failures: st.failures.Load(),
 	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -714,6 +715,11 @@ func (s *Service) collect(ctx context.Context, repo Repo) (err error) {
 		}
 	}
 	if len(due) == 0 {
+		return nil
+	}
+	if !bucket.DeletesConditionally(s.st) {
+		s.stats.deleteSkipped.Add(int64(len(due)))
+		slog.WarnContext(ctx, "maintenance kept retired files: the bucket does not delete conditionally", "repo", repo.String(), "files", len(due))
 		return nil
 	}
 	versions := make(map[string]string, len(due))
