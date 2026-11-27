@@ -79,7 +79,6 @@ pub(crate) async fn publish(
         .clone();
     let commit = mount_commit(&repo, &wc_id, ctl, settings).await?;
     let pending = unflushed(&repo, ws.repo_path(), &[repo.operation().id().clone()]).await?;
-    put_ops(ctl, ws.repo_path(), &pending, None).map_err(cmd_err)?;
     let head = repo.operation().id().hex();
     let roots = repo
         .store()
@@ -88,7 +87,18 @@ pub(crate) async fn publish(
         .ok_or_else(|| cmd_err("this repo has no native backend"))?
         .shallow_roots()
         .map_err(cmd_err)?;
-    put_shallow(ctl, &head, &roots).map_err(cmd_err)?;
+    let (ops, shallow) = std::thread::scope(|scope| {
+        let shallow = scope.spawn(|| put_shallow(ctl, &head, &roots));
+        let ops = put_ops(ctl, ws.repo_path(), &pending, None);
+        (
+            ops,
+            shallow
+                .join()
+                .unwrap_or_else(|_| Err(StoreError::Local("the shallow upload panicked".into()))),
+        )
+    });
+    ops.map_err(cmd_err)?;
+    shallow.map_err(cmd_err)?;
     let _lock = repo.op_heads_store().lock().await.map_err(cmd_err)?;
     if read_heads(ws.repo_path()).map_err(cmd_err)? != [head.clone()] {
         return Ok(None);

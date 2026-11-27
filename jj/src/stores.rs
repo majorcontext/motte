@@ -404,7 +404,9 @@ pub fn merge_remote(
 /// The ops of this op log that an earlier flush uploaded, one ID per line under the repo dir.
 pub const FLUSHED_FILE: &str = "motte_flushed";
 
-/// Uploads the operations and views of `pending`, then lists the operations in the flushed file.
+const PUT_PARALLEL: usize = 8;
+
+/// Uploads the operations and views of `pending`, at most `PUT_PARALLEL` at once, then lists the operations in the flushed file.
 /// With a `deadline`, it makes no daemon call after it.
 pub fn put_ops(
     ctl: &CtlClient,
@@ -414,16 +416,33 @@ pub fn put_ops(
 ) -> Result<(), StoreError> {
     let op_store = repo_path.join("op_store");
     let mut sent = String::new();
+    let mut jobs = Vec::new();
     for (op, view) in pending {
         for (kind, obj) in [("views", view), ("operations", op)] {
             let data = std::fs::read(op_store.join(kind).join(obj)).map_err(|e| {
                 StoreError::Local(format!("cannot read {kind}/{obj} of the op log: {e}"))
             })?;
-            deadline.map_or(Ok(()), in_budget)?;
-            ctl.putop(kind, obj, &data)?;
+            jobs.push((kind, obj.as_str(), data));
         }
         sent.push_str(op);
         sent.push('\n');
+    }
+    for round in jobs.chunks(PUT_PARALLEL) {
+        std::thread::scope(|scope| {
+            let calls: Vec<_> = round
+                .iter()
+                .map(|(kind, obj, data)| {
+                    scope.spawn(move || {
+                        deadline.map_or(Ok(()), in_budget)?;
+                        ctl.putop(kind, obj, data)
+                    })
+                })
+                .collect();
+            calls.into_iter().try_for_each(|c| {
+                c.join()
+                    .unwrap_or_else(|_| Err(StoreError::Local("an op upload panicked".into())))
+            })
+        })?;
     }
     std::fs::OpenOptions::new()
         .create(true)

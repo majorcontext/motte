@@ -689,6 +689,26 @@ fn changes_lists_a_file_that_grew_past_the_large_limit_from_its_target_bytes() {
 }
 
 #[test]
+fn the_objects_of_an_upload_go_up_at_once() {
+    let d = FakeDaemon::full();
+    d.state.lock().unwrap().hold_putops = 4;
+    let c = CtlClient::new(d.path());
+    let repo = tempfile::tempdir().unwrap();
+    for kind in ["views", "operations"] {
+        std::fs::create_dir_all(repo.path().join("op_store").join(kind)).unwrap();
+        for name in ["a1", "b2"] {
+            std::fs::write(repo.path().join("op_store").join(kind).join(name), b"x").unwrap();
+        }
+    }
+    let pending = [
+        ("a1".to_owned(), "a1".to_owned()),
+        ("b2".to_owned(), "b2".to_owned()),
+    ];
+    put_ops(&c, repo.path(), &pending, None).unwrap();
+    assert_eq!(d.state.lock().unwrap().putops_peak, 4);
+}
+
+#[test]
 fn a_worker_past_its_deadline_makes_no_daemon_call() {
     let d = FakeDaemon::start(true);
     let c = CtlClient::new(d.path());

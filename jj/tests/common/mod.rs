@@ -71,6 +71,11 @@ pub struct State {
     pub max_line: usize,
     /// The count of request lines received.
     pub lines: u64,
+    /// A `putop` waits up to a second until this many are in flight, then answers.
+    pub hold_putops: usize,
+    pub putops_inflight: usize,
+    /// The most `putop` requests in flight at once.
+    pub putops_peak: usize,
 }
 
 pub struct FakeDaemon {
@@ -390,11 +395,11 @@ fn refs(st: &mut State, rq: &Value) -> Answer {
     Ok(json!({"ref": view(name, &next)}))
 }
 
-fn serve(conn: UnixStream, st: Arc<Mutex<State>>) {
+fn serve(conn: UnixStream, state: Arc<Mutex<State>>) {
     let mut w = conn.try_clone().unwrap();
     for line in BufReader::new(conn).lines() {
         let Ok(line) = line else { return };
-        let mut st = st.lock().unwrap();
+        let mut st = state.lock().unwrap();
         st.lines += 1;
         let dropped = st.drop_request_of.clone().filter(|op| {
             serde_json::from_str::<Value>(&line).is_ok_and(|v| v["op"] == op.as_str())
@@ -410,6 +415,19 @@ fn serve(conn: UnixStream, st: Arc<Mutex<State>>) {
         if lost.is_some() {
             st.lose_answer_of = None;
             return;
+        }
+        let held = st.hold_putops > 0
+            && serde_json::from_str::<Value>(&line).is_ok_and(|v| v["op"] == "putop");
+        if held {
+            st.putops_inflight += 1;
+            st.putops_peak = st.putops_peak.max(st.putops_inflight);
+            let give_up = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            while st.putops_inflight < st.hold_putops && std::time::Instant::now() < give_up {
+                drop(st);
+                std::thread::yield_now();
+                st = state.lock().unwrap();
+            }
+            st.putops_inflight -= 1;
         }
         drop(st);
         let mut out = serde_json::to_vec(&rs).unwrap();
