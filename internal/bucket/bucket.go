@@ -1,7 +1,7 @@
 // Package bucket is the object store seam of the store service. One Store is
 // one bucket of immutable objects. Implementations: Google Cloud Storage
 // (internal/bucket/gcs), an S3-compatible service (internal/bucket/s3) and a filesystem
-// directory (internal/bucket/fs). The conformance suite is internal/bucket/buckettest.
+// directory (internal/bucket/fs), and memory (internal/bucket/mem). The conformance suite is internal/bucket/buckettest.
 package bucket
 
 import (

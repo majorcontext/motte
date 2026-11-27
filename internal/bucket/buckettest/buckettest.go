@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"testing"
 
@@ -78,7 +79,7 @@ func rangeReads(t *testing.T, b bucket.Store, key func(string) string) {
 		off, n int64
 		want   string
 	}{
-		{1, 3, "ell"}, {0, 5, "hello"}, {1, -1, "ello"}, {0, -1, "hello"}, {3, 100, "lo"}, {5, 1, ""}, {9, 3, ""},
+		{1, 3, "ell"}, {0, 5, "hello"}, {1, -1, "ello"}, {0, -1, "hello"}, {3, 100, "lo"}, {1, math.MaxInt64, "ello"}, {5, 1, ""}, {9, 3, ""},
 	} {
 		got, err := b.GetRange(ctx, k, c.off, c.n)
 		if err != nil || !bytes.Equal(got, []byte(c.want)) {

@@ -3,9 +3,11 @@ package testserver_test
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/majorcontext/motte/api"
 	"github.com/majorcontext/motte/client"
@@ -94,4 +96,54 @@ func TestThePackageServerIsOneServerForEveryTest(t *testing.T) {
 			t.Fatal("Package returned another server")
 		}
 	})
+}
+
+type tempTB struct {
+	testing.TB
+	dir string
+}
+
+func (b tempTB) TempDir() string { return b.dir }
+
+func TestInMemoryKeepsTheStateInMemoryAndPerServer(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dir := t.TempDir()
+	a, b := testserver.Start(tempTB{t, dir}, testserver.InMemory()), testserver.Start(t, testserver.InMemory())
+	claim(t, a, "gh:acme/widgets")
+	node := a.Client(a.NodeGrant(t, "ws1", 1, "gh:acme/widgets"))
+	shas, err := node.PutObjects(ctx, []client.Object{{Type: "blob", Data: []byte("x")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := node.Object(ctx, shas[0]); err != nil || string(got.Data) != "x" {
+		t.Fatalf("object round trip = %q, %v", got.Data, err)
+	}
+	if _, err := a.Client(a.MergeGrant(t, "gh:acme/widgets")).SwapRef(ctx, "a", 0, "0123456789012345678901234567890123456789"); err != nil {
+		t.Fatal(err)
+	}
+	if left, _ := os.ReadDir(dir); len(left) != 0 {
+		t.Errorf("an in-memory server wrote %d entries to its temporary directory", len(left))
+	}
+	if evs, _, err := a.Client(a.OperatorGrant(t)).Events(ctx, "", 0); err != nil || len(evs) != 1 {
+		t.Fatalf("events of the first server = %v, %v, want one", evs, err)
+	}
+	if evs, _, err := b.Client(b.OperatorGrant(t)).Events(ctx, "", 0); err != nil || len(evs) != 0 {
+		t.Fatalf("events of the second server = %v, %v, want none", evs, err)
+	}
+}
+
+func TestPruneEventsRefusesAnOlderCursor(t *testing.T) {
+	t.Parallel()
+	s := testserver.Start(t, testserver.InMemory())
+	claim(t, s, "gh:acme/widgets")
+	ctx := context.Background()
+	op := s.Client(s.OperatorGrant(t))
+	if _, err := s.Client(s.MergeGrant(t, "gh:acme/widgets")).SwapRef(ctx, "a", 0, "0123456789012345678901234567890123456789"); err != nil {
+		t.Fatal(err)
+	}
+	s.PruneEvents(t, time.Now().Add(time.Hour))
+	if _, _, err := op.Events(ctx, "", 0); !errors.Is(err, client.ErrEventsPruned) {
+		t.Fatalf("events after prune = %v, want ErrEventsPruned", err)
+	}
 }
