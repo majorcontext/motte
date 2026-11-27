@@ -121,9 +121,23 @@ static PREFETCHED: Seen = Mutex::new(BTreeMap::new());
 /// The objects that `put_deferred` holds for a daemon socket until `flush_deferred` sends them in
 /// one request. A snapshot writes its blobs, trees and commit this way, and the op store flushes
 /// before it writes the operation, so no local operation names an object that the daemon lacks.
+///
+/// The completion steps that `after_flush` registers live in the same value as the objects, and a
+/// flush takes both under one lock. A step therefore runs only after the send of the batch that
+/// holds the objects it was registered after, whichever thread buffers more objects meanwhile. A
+/// failed send puts the objects and the steps back. One flush at a time for the process: a flush
+/// that finds nothing to send must not run a step while another flush still uploads its objects.
 type Held = Vec<(gix::ObjectId, Kind, Vec<u8>)>;
+type Step = Box<dyn FnOnce() + Send>;
 
-static DEFERRED: Mutex<BTreeMap<PathBuf, Held>> = Mutex::new(BTreeMap::new());
+#[derive(Default)]
+struct Batch {
+    held: Held,
+    steps: Vec<Step>,
+}
+
+static DEFERRED: Mutex<BTreeMap<PathBuf, Batch>> = Mutex::new(BTreeMap::new());
+static FLUSHING: Mutex<()> = Mutex::new(());
 
 /// The most bytes and objects that one socket defers; past it an object goes to the daemon now.
 const DEFER_BYTES: usize = 4 << 20;
@@ -417,6 +431,18 @@ impl CtlClient {
         Ok((reply.generation, reply.heads))
     }
 
+    /// Runs `step` once the batch that holds every object deferred so far is stored; a failed send
+    /// runs nothing and keeps the step for the next flush.
+    pub fn after_flush(&self, step: impl FnOnce() + Send + 'static) {
+        DEFERRED
+            .lock()
+            .unwrap()
+            .entry(self.path.clone())
+            .or_default()
+            .steps
+            .push(Box::new(step));
+    }
+
     /// The generation and heads that this process last read or swapped, if any.
     pub fn last_opheads(&self) -> Option<(i64, Vec<String>)> {
         LAST_OPHEADS.lock().unwrap().get(&self.path).cloned()
@@ -658,7 +684,7 @@ impl ObjectStore for CtlClient {
             return self.put(kind, data);
         }
         let mut all = DEFERRED.lock().unwrap();
-        let held = all.entry(self.path.clone()).or_default();
+        let held = &mut all.entry(self.path.clone()).or_default().held;
         let bytes: usize = held.iter().map(|(_, _, d)| d.len()).sum();
         if held.len() >= DEFER_OBJECTS || bytes + data.len() > DEFER_BYTES {
             drop(all);
@@ -672,30 +698,31 @@ impl ObjectStore for CtlClient {
     }
 
     fn flush_deferred(&self) -> StoreResult<()> {
-        let held = DEFERRED
+        let _one_at_a_time = FLUSHING.lock().unwrap_or_else(|e| e.into_inner());
+        let Batch { held, steps } = DEFERRED
             .lock()
             .unwrap()
             .remove(&self.path)
             .unwrap_or_default();
-        if held.is_empty() {
-            return Ok(());
+        if !held.is_empty() {
+            let objects: Vec<(Kind, &[u8])> =
+                held.iter().map(|(_, k, d)| (*k, d.as_slice())).collect();
+            if let Err(e) = self.put_many(&objects) {
+                let mut all = DEFERRED.lock().unwrap();
+                let back = all.entry(self.path.clone()).or_default();
+                back.held.extend(held);
+                back.steps.extend(steps);
+                return Err(e);
+            }
         }
-        let objects: Vec<(Kind, &[u8])> = held.iter().map(|(_, k, d)| (*k, d.as_slice())).collect();
-        if let Err(e) = self.put_many(&objects) {
-            DEFERRED
-                .lock()
-                .unwrap()
-                .entry(self.path.clone())
-                .or_default()
-                .extend(held);
-            return Err(e);
-        }
+        steps.into_iter().for_each(|step| step());
         Ok(())
     }
 
     fn get(&self, id: &gix::ObjectId) -> StoreResult<(Kind, Vec<u8>)> {
-        let held = DEFERRED.lock().unwrap().get(&self.path).and_then(|h| {
-            h.iter()
+        let held = DEFERRED.lock().unwrap().get(&self.path).and_then(|b| {
+            b.held
+                .iter()
                 .find(|(i, _, _)| i == id)
                 .map(|(_, k, d)| (*k, d.clone()))
         });

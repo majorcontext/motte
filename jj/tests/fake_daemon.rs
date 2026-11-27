@@ -724,6 +724,53 @@ fn a_tree_and_its_commit_go_up_in_one_batch_at_the_flush() {
 }
 
 #[test]
+fn a_step_runs_only_after_the_send_of_its_own_batch() {
+    use motte_jj::ctl::ObjectStore as _;
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    let d = FakeDaemon::full();
+    d.state.lock().unwrap().delay_putbatch_ms = 300;
+    let c = std::sync::Arc::new(CtlClient::new(d.path()));
+    c.put_deferred(gix::objs::Kind::Blob, b"x").unwrap();
+    let flushing = {
+        let c = c.clone();
+        std::thread::spawn(move || c.flush_deferred().unwrap())
+    };
+    while d.ops("putbatch") == 0 {
+        std::thread::yield_now();
+    }
+    c.put_deferred(gix::objs::Kind::Blob, b"y").unwrap();
+    let ran = std::sync::Arc::new(AtomicBool::new(false));
+    let flag = ran.clone();
+    c.after_flush(move || flag.store(true, SeqCst));
+    flushing.join().unwrap();
+    assert!(!ran.load(SeqCst), "the first send does not hold the blob y");
+    c.flush_deferred().unwrap();
+    assert!(ran.load(SeqCst));
+}
+
+#[test]
+fn a_step_does_not_run_after_a_failed_send_and_runs_after_the_retry() {
+    use motte_jj::ctl::ObjectStore as _;
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    let d = FakeDaemon::full();
+    d.state
+        .lock()
+        .unwrap()
+        .failing
+        .insert("putbatch".into(), "internal".into());
+    let c = CtlClient::new(d.path());
+    c.put_deferred(gix::objs::Kind::Blob, b"x").unwrap();
+    let ran = std::sync::Arc::new(AtomicBool::new(false));
+    let flag = ran.clone();
+    c.after_flush(move || flag.store(true, SeqCst));
+    assert!(c.flush_deferred().is_err());
+    assert!(!ran.load(SeqCst));
+    d.state.lock().unwrap().failing.clear();
+    c.flush_deferred().unwrap();
+    assert!(ran.load(SeqCst));
+}
+
+#[test]
 fn a_worker_past_its_deadline_makes_no_daemon_call() {
     let d = FakeDaemon::start(true);
     let c = CtlClient::new(d.path());
