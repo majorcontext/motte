@@ -30,7 +30,7 @@ func TestRawTreeRebuildsTheBytesThatNameAnEditedTree(t *testing.T) {
 
 func TestTheVfsdScenarioMountsReadsSnapshotsAndLandsAgainstTheService(t *testing.T) {
 	t.Parallel()
-	srv := testserver.StartLocal(t)
+	srv := testserver.Start(t)
 	der, err := x509.MarshalPKCS8PrivateKey(srv.Operator.Key)
 	if err != nil {
 		t.Fatal(err)

@@ -14,7 +14,7 @@ func TestMain(m *testing.M) { os.Exit(testcount.Run(m)) }
 
 func TestRepoCreatePrintsThePathOfANewRepository(t *testing.T) {
 	t.Parallel()
-	ts := testserver.StartLocal(t)
+	ts := testserver.Start(t)
 	env := map[string]string{"MOTTE_URL": ts.URL, "MOTTE_TOKEN": ts.OperatorGrant(t)}
 	run := func(args ...string) (int, string) {
 		var out, errOut bytes.Buffer

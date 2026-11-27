@@ -12,6 +12,7 @@ import (
 	"github.com/majorcontext/motte/identity"
 	"github.com/majorcontext/motte/identity/identitytest"
 	"github.com/majorcontext/motte/identity/oidc"
+	"github.com/majorcontext/motte/internal/testhook"
 	"github.com/majorcontext/motte/testserver"
 )
 
@@ -34,7 +35,7 @@ func TestGitOIDCIdentityPushesBranchesAndNeverProtectedRefs(t *testing.T) {
 		{Principals: []string{"dev@example.test"}, Repos: repo, Scope: identity.ScopeWrite},
 		{Principals: []string{"reader@example.test"}, Repos: repo, Scope: identity.ScopeRead},
 		{Principals: []string{"admin@example.test"}, Scope: identity.ScopeAdmin}}))
-	e := &env{Server: ts, t: t, url: ts.URL, cp: ts.Operator, node: ts.Node}
+	e := &env{Server: ts, Stack: testhook.Of(ts), t: t, url: ts.URL, cp: ts.Operator, node: ts.Node}
 	ctx := context.Background()
 	path, err := e.Client(e.operator()).CreateRepo(ctx, "widgets", "o1")
 	if err != nil {
@@ -82,8 +83,8 @@ func TestGitUserTokenPushesBranchesAndNeverProtectedRefs(t *testing.T) {
 		t.Skip("the git binary is not installed")
 	}
 	t.Parallel()
-	ts := testserver.StartLocal(t)
-	e := &env{Server: ts, t: t, url: ts.URL, cp: ts.Operator, node: ts.Node}
+	ts := testserver.Start(t)
+	e := &env{Server: ts, Stack: testhook.Of(ts), t: t, url: ts.URL, cp: ts.Operator, node: ts.Node}
 	ctx := context.Background()
 	op := e.Client(e.operator())
 	path, err := op.CreateRepo(ctx, "widgets", "o1")

@@ -13,6 +13,7 @@ import (
 	"github.com/majorcontext/motte/client"
 	"github.com/majorcontext/motte/internal/bucket"
 	"github.com/majorcontext/motte/internal/server"
+	"github.com/majorcontext/motte/internal/testhook"
 	"github.com/majorcontext/motte/testserver"
 )
 
@@ -82,16 +83,18 @@ func BenchmarkLand(b *testing.B) {
 func benchLand(b *testing.B, backend, store string, agents int) {
 	var ts *testserver.Server
 	if backend == "sqlite" {
-		ts = testserver.StartLocal(b)
+		ts = testserver.Start(b)
 	} else {
 		ts = testserver.Start(b, testserver.WithPostgres(""))
 	}
 	if store == "mem" {
-		srv := httptest.NewServer(server.New(server.Config{Meta: ts.Meta, Bucket: &memBucket{m: map[string][]byte{}}, Verifier: ts.Verifier}).Handler())
+		srv := httptest.NewServer(server.New(server.Config{Meta: testhook.Of(ts).Meta, Bucket: &memBucket{m: map[string][]byte{}}, Verifier: testhook.Of(ts).Verifier}).Handler())
 		b.Cleanup(srv.Close)
-		ts = &testserver.Server{URL: srv.URL, Meta: ts.Meta, Verifier: ts.Verifier, Operator: ts.Operator, Node: ts.Node, Expire: ts.Expire}
+		moved := *ts
+		moved.URL = srv.URL
+		ts = &moved
 	}
-	e := &env{Server: ts, url: ts.URL, cp: ts.Operator, node: ts.Node}
+	e := &env{Server: ts, Stack: testhook.Of(ts), url: ts.URL, cp: ts.Operator, node: ts.Node}
 	l := &landEnv{env: e, repo: repoText}
 	e.t = &testing.T{}
 	total := max(2000, 3*agents)

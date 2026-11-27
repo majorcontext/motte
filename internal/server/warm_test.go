@@ -17,6 +17,7 @@ import (
 	"github.com/majorcontext/motte/internal/bucket"
 	"github.com/majorcontext/motte/internal/gitpack"
 	"github.com/majorcontext/motte/internal/server"
+	"github.com/majorcontext/motte/internal/testhook"
 	"github.com/majorcontext/motte/testserver"
 )
 
@@ -51,14 +52,14 @@ func (b *idxBucket) Get(ctx context.Context, key string) ([]byte, error) {
 // coldReplica is a second replica on the state of a store that holds one imported repo, which has no repos row. It is cold until Warm returns.
 func coldReplica(t *testing.T, clk quartz.Clock) (*idxBucket, *server.Server, func(context.Context) error, func() int) {
 	t.Helper()
-	ts := testserver.StartLocal(t)
+	ts := testserver.Start(t)
 	pack, idx, names := gitpack.Build([]gitpack.Object{{Type: gitpack.Blob, Data: []byte("hello")}})
 	sum := sha256.Sum256(pack)
 	if err := ts.Client(ts.ImportGrant(t, repoText)).ImportPack(context.Background(), hex.EncodeToString(sum[:]), idx, pack); err != nil {
 		t.Fatal(err)
 	}
-	b := &idxBucket{Store: ts.Bucket, gate: make(chan struct{}), entered: make(chan struct{}, 1)}
-	srv := server.New(server.Config{Meta: ts.Meta, Bucket: b, Verifier: ts.Verifier, Warm: true, Clock: clk})
+	b := &idxBucket{Store: testhook.Of(ts).Bucket, gate: make(chan struct{}), entered: make(chan struct{}, 1)}
+	srv := server.New(server.Config{Meta: testhook.Of(ts).Meta, Bucket: b, Verifier: testhook.Of(ts).Verifier, Warm: true, Clock: clk})
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
 	ready := func() int {

@@ -21,6 +21,7 @@ import (
 	"github.com/majorcontext/motte/client"
 	"github.com/majorcontext/motte/grant"
 	"github.com/majorcontext/motte/internal/gitpack"
+	"github.com/majorcontext/motte/internal/testhook"
 	"github.com/majorcontext/motte/testserver"
 )
 
@@ -35,6 +36,7 @@ const (
 
 type env struct {
 	*testserver.Server
+	testhook.Stack
 	t    *testing.T
 	url  string
 	cp   grant.Signer
@@ -60,13 +62,13 @@ func newEnv(t *testing.T) *env { return newEnvOn(t, postgresBackend) }
 func newEnvLimits(t *testing.T, l testserver.Limits) *env {
 	t.Helper()
 	ts := testserver.Start(t, testserver.WithPostgres(""), testserver.WithLimits(l))
-	return &env{Server: ts, t: t, url: ts.URL, cp: ts.Operator, node: ts.Node}
+	return &env{Server: ts, Stack: testhook.Of(ts), t: t, url: ts.URL, cp: ts.Operator, node: ts.Node}
 }
 
 func newEnvOn(t *testing.T, b backend) *env {
 	t.Helper()
 	ts := b(t)
-	return &env{Server: ts, t: t, url: ts.URL, cp: ts.Operator, node: ts.Node}
+	return &env{Server: ts, Stack: testhook.Of(ts), t: t, url: ts.URL, cp: ts.Operator, node: ts.Node}
 }
 
 func (e *env) mint(s grant.Signer, c grant.Claims) string { return e.Mint(e.t, s, c) }

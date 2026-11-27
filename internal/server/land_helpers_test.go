@@ -13,6 +13,7 @@ import (
 	"github.com/majorcontext/motte/api"
 	"github.com/majorcontext/motte/client"
 	"github.com/majorcontext/motte/internal/gitpack"
+	"github.com/majorcontext/motte/internal/testhook"
 	"github.com/majorcontext/motte/testserver"
 )
 
@@ -163,8 +164,8 @@ func eachBackend(t *testing.T, fn func(t *testing.T, l *landEnv)) {
 	t.Parallel()
 	t.Run("sqlite", func(t *testing.T) {
 		t.Parallel()
-		ts := testserver.StartLocal(t)
-		fn(t, newLandEnv(t, &env{Server: ts, t: t, url: ts.URL, cp: ts.Operator, node: ts.Node}))
+		ts := testserver.Start(t)
+		fn(t, newLandEnv(t, &env{Server: ts, Stack: testhook.Of(ts), t: t, url: ts.URL, cp: ts.Operator, node: ts.Node}))
 	})
 	t.Run("postgres", func(t *testing.T) { t.Parallel(); fn(t, newLandEnv(t, newEnv(t))) })
 }

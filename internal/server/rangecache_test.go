@@ -14,19 +14,20 @@ import (
 	"github.com/majorcontext/motte/client"
 	"github.com/majorcontext/motte/internal/gitpack"
 	"github.com/majorcontext/motte/internal/server"
+	"github.com/majorcontext/motte/internal/testhook"
 	"github.com/majorcontext/motte/testserver"
 )
 
 func TestRangeCacheBytesZeroTurnsTheCacheOff(t *testing.T) {
 	t.Parallel()
-	ts := testserver.StartLocal(t)
+	ts := testserver.Start(t)
 	pack, idx, names := gitpack.Build([]gitpack.Object{{Type: gitpack.Blob, Data: []byte("cached or not")}})
 	sum := sha256.Sum256(pack)
 	if err := ts.Client(ts.ImportGrant(t, repoText)).ImportPack(context.Background(), hex.EncodeToString(sum[:]), idx, pack); err != nil {
 		t.Fatal(err)
 	}
 	for size, wantCached := range map[int64]bool{0: false, 64 << 20: true} {
-		srv := server.New(server.Config{Meta: ts.Meta, Bucket: ts.Bucket, Verifier: ts.Verifier, RangeCacheBytes: size})
+		srv := server.New(server.Config{Meta: testhook.Of(ts).Meta, Bucket: testhook.Of(ts).Bucket, Verifier: testhook.Of(ts).Verifier, RangeCacheBytes: size})
 		hs := func() string { hs := httptest.NewServer(srv.Handler()); t.Cleanup(hs.Close); return hs.URL }()
 		read := client.New(hs, client.StaticGrant(ts.ReadGrant(t, repoText)))
 		if _, err := read.Object(t.Context(), names[0].String()); err != nil {

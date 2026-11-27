@@ -24,6 +24,7 @@ import (
 	"github.com/majorcontext/motte/internal/pgtest"
 	"github.com/majorcontext/motte/internal/server"
 	mstore "github.com/majorcontext/motte/internal/store"
+	"github.com/majorcontext/motte/internal/testhook"
 	"github.com/majorcontext/motte/meta"
 	"github.com/majorcontext/motte/meta/sqlite"
 	"github.com/majorcontext/tools/testcount"
@@ -35,17 +36,11 @@ const DSNEnv = pgtest.DSNEnv
 // Server is a running store. Its control-plane key signs every scope. Its node key signs only node grants.
 type Server struct {
 	URL string
-	// Pool reaches the schema of the server, for a test that sets up a state no route can make. StartLocal leaves it nil.
+	// Pool reaches the schema of the server, for a test that sets up a state no route can make. A SQLite server leaves it nil.
 	Pool *pgxpool.Pool
 	// Replicas are the URLs of the extra servers that WithReplicas started on the state and keys of this one.
 	Replicas []string
-	// Meta, Bucket and Verifier are the state and the keys of the server, for a test that sets up a state no route can
-	// make or runs a server with a configuration that no option sets.
-	//
-	// Deprecated: use WithReplicas and WithFaults. A caller outside this module still reads Meta.
-	Meta     meta.Store
-	Bucket   bucket.Store
-	Verifier *grant.Verifier
+	store    meta.Store
 	// Operator is the control-plane signer.
 	Operator grant.Signer
 	// Node is the node signer.
@@ -120,7 +115,7 @@ func WithIdentity(v identity.Verifier, rules identity.Rules) Option {
 	}
 }
 
-// WithFaults applies faults to the server and its replicas. Server.Meta and Server.Bucket stay without them.
+// WithFaults applies faults to the server and its replicas.
 func WithFaults(f Faults) Option { return func(o *options) { o.faults = &f } }
 
 // WithReplicas starts n more servers on the state and keys of the first, each with its own instance name. Their URLs
@@ -159,12 +154,6 @@ func Start(t testing.TB, opts ...Option) *Server {
 	}
 	return startSQLite(t, o)
 }
-
-// StartLocal runs a server on a temporary SQLite database and a temporary filesystem bucket. It needs no other
-// service and never skips. Pool is nil.
-//
-// Deprecated: use Start, which runs on SQLite by default. A caller outside this module still calls StartLocal.
-func StartLocal(t testing.TB) *Server { return startSQLite(t, options{}) }
 
 func startSQLite(t testing.TB, o options) *Server {
 	t.Helper()
@@ -225,9 +214,11 @@ func run(t testing.TB, store meta.Store, o options) *Server {
 		return ts
 	}
 	s := &Server{
-		Meta: store, Bucket: bkt, Verifier: verifier, Operator: grant.Signer{Kid: "cp", Key: cpKey}, Node: grant.Signer{Kid: "node", Key: nodeKey},
+		store: store, Operator: grant.Signer{Kid: "cp", Key: cpKey}, Node: grant.Signer{Kid: "node", Key: nodeKey},
 		Expire: time.Now().Add(time.Hour),
 	}
+	testhook.Register(s, testhook.Stack{Meta: store, Bucket: bkt, Verifier: verifier})
+	t.Cleanup(func() { testhook.Unregister(s) })
 	s.URL = build("").URL
 	for i := range o.replicas {
 		s.Replicas = append(s.Replicas, build(fmt.Sprintf("replica-%d", i+1)).URL)
@@ -239,7 +230,7 @@ func run(t testing.TB, store meta.Store, o options) *Server {
 // cursor that the server no longer holds.
 func (s *Server) PruneEvents(t testing.TB, before time.Time) {
 	t.Helper()
-	if err := s.Meta.PruneEvents(context.Background(), before); err != nil {
+	if err := s.store.PruneEvents(context.Background(), before); err != nil {
 		t.Fatal(err)
 	}
 }

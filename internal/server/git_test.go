@@ -24,6 +24,7 @@ import (
 	"github.com/majorcontext/motte/internal/pktline"
 	"github.com/majorcontext/motte/internal/server"
 	"github.com/majorcontext/motte/internal/store"
+	"github.com/majorcontext/motte/internal/testhook"
 	"github.com/majorcontext/motte/testserver"
 	"github.com/majorcontext/tools/testcount"
 )
@@ -132,11 +133,11 @@ func gitCloneFetchAndPush(t *testing.T, on backend) {
 
 func TestSmallRequestsNeedLittleMemory(t *testing.T) {
 	t.Parallel()
-	ts := testserver.StartLocal(t)
-	srv := server.New(server.Config{Meta: ts.Meta, Bucket: ts.Bucket, Verifier: ts.Verifier})
+	ts := testserver.Start(t)
+	srv := server.New(server.Config{Meta: testhook.Of(ts).Meta, Bucket: testhook.Of(ts).Bucket, Verifier: testhook.Of(ts).Verifier})
 	web := httptest.NewServer(srv.Handler())
 	t.Cleanup(web.Close)
-	e := &env{Server: ts, t: t, url: web.URL, cp: ts.Operator, node: ts.Node}
+	e := &env{Server: ts, Stack: testhook.Of(ts), t: t, url: web.URL, cp: ts.Operator, node: ts.Node}
 	path, err := e.Client(e.operator()).CreateRepo(context.Background(), "widgets", "o1")
 	if err != nil {
 		t.Fatal(err)
@@ -341,12 +342,12 @@ func TestGitOnBothBackends(t *testing.T) {
 
 func TestTheMemoryBudgetAndTheFetchSlotsOnOneServer(t *testing.T) {
 	t.Parallel()
-	ts := testserver.StartLocal(t)
-	srv := server.New(server.Config{Meta: ts.Meta, Bucket: ts.Bucket, Verifier: ts.Verifier, Limits: server.Limits{FetchLarge: 1, FetchSlots: 1}})
+	ts := testserver.Start(t)
+	srv := server.New(server.Config{Meta: testhook.Of(ts).Meta, Bucket: testhook.Of(ts).Bucket, Verifier: testhook.Of(ts).Verifier, Limits: server.Limits{FetchLarge: 1, FetchSlots: 1}})
 	web := httptest.NewServer(srv.Handler())
 	t.Cleanup(web.Close)
 	ts.URL = web.URL
-	l := newLandEnv(t, &env{Server: ts, t: t, url: web.URL, cp: ts.Operator, node: ts.Node})
+	l := newLandEnv(t, &env{Server: ts, Stack: testhook.Of(ts), t: t, url: web.URL, cp: ts.Operator, node: ts.Node})
 	t.Run("a land finishes while requests hold the memory budget", func(t *testing.T) {
 		var o objSet
 		c1 := o.commit(map[string]string{"f1": "1"}, "", "one", l.root)
