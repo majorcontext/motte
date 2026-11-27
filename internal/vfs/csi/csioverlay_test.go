@@ -18,7 +18,9 @@ import (
 	"testing"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
 	"github.com/majorcontext/motte/internal/vfs/lower"
@@ -579,4 +581,25 @@ func TestControlSocketPathStaysUnderTheLimit(t *testing.T) {
 	if !strings.Contains(err.Error(), "socket path") {
 		t.Errorf("err = %v, want it to name the socket path", err)
 	}
+}
+
+func TestServeAnswersWhileTheCacheSweepRuns(t *testing.T) {
+	t.Parallel()
+	p, _ := newOverlayPlugin(t)
+	started, release := make(chan struct{}), make(chan struct{})
+	p.SweepCache = func(string) { close(started); <-release }
+	sock := filepath.Join(p.StateDir, "s.sock")
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- p.Serve(ctx, sock) }()
+	<-started
+	conn, err := grpc.NewClient("unix://"+sock, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	must(t, err)
+	defer conn.Close()
+	if _, err := csi.NewIdentityClient(conn).Probe(ctx, &csi.ProbeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	cancel()
+	<-done
 }

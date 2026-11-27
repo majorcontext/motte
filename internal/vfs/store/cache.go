@@ -3,8 +3,10 @@ package store
 import (
 	"context"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -226,6 +228,10 @@ func (c *Cache) size(s gitpack.SHA) int64 {
 
 const tmpPrefix = ".tmp-"
 
+// liveTmpPrefix names the temporary files of this process. A walk of the cache removes a temporary file only when it
+// lacks this mark, so it never removes the file of a live writer, whatever the clock says.
+var liveTmpPrefix = tmpPrefix + strconv.FormatUint(rand.Uint64(), 16) + "-"
+
 // tier2Written is the number of blob bytes that this process wrote to the node cache.
 var tier2Written atomic.Int64
 
@@ -276,7 +282,7 @@ func (c *Cache) writeBlob(s gitpack.SHA, b []byte) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(p), tmpPrefix)
+	tmp, err := os.CreateTemp(filepath.Dir(p), liveTmpPrefix)
 	if err != nil {
 		return err
 	}
@@ -304,11 +310,14 @@ func (c *Cache) ReadBlob(ctx context.Context, e Entry) ([]byte, error) {
 	return os.ReadFile(p)
 }
 
-// RemoveStrayTemps removes the temporary files that an earlier process left in dir. It runs before the first read of
-// the cache: a file of a live writer carries the same prefix.
+// RemoveStrayTemps removes the temporary files that an earlier process left in dir. It keeps the files that this
+// process writes.
 func RemoveStrayTemps(dir string) {
 	_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
-		if err == nil && !d.IsDir() && strings.HasPrefix(d.Name(), tmpPrefix) {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if name := d.Name(); strings.HasPrefix(name, tmpPrefix) && !strings.HasPrefix(name, liveTmpPrefix) {
 			_ = os.Remove(p)
 		}
 		return nil

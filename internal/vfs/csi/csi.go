@@ -60,6 +60,8 @@ type NodePlugin struct {
 	StatsEvery time.Duration
 
 	mnt mounter
+	// SweepCache replaces the walk of the node cache that Serve starts in the background.
+	SweepCache func(dir string)
 	// mu guards vols and ctlOwners. It is never held across a mount, a scan of mountinfo or a delete.
 	mu        sync.Mutex
 	vols      map[string]*volume
@@ -95,11 +97,13 @@ func (p *NodePlugin) Mounts() int {
 	return n
 }
 
-// SeedCacheSize adds the size of the blob cache that an earlier process left in dir to the tier-2 figure of vfs.health.
-func (p *NodePlugin) SeedCacheSize(dir string) { store.SeedCacheSize(dir) }
-
-// RemoveStrayTemps removes the temporary files that an earlier process left in dir. Call it before Serve.
-func (p *NodePlugin) RemoveStrayTemps(dir string) { store.RemoveStrayTemps(dir) }
+// sweepCache removes the temporary files that an earlier process left in the node cache and adds the size of its blobs
+// to the tier-2 figure of vfs.health. Serve runs it in the background: it walks the whole cache, and it removes only a
+// file that no reader can name.
+func (p *NodePlugin) sweepCache(dir string) {
+	store.RemoveStrayTemps(dir)
+	store.SeedCacheSize(dir)
+}
 
 func (p *NodePlugin) volDir(id string) string { return filepath.Join(p.StateDir, "vol", id) }
 
@@ -180,6 +184,11 @@ func (p *NodePlugin) Serve(ctx context.Context, socket string) error {
 	csi.RegisterIdentityServer(s, p)
 	csi.RegisterNodeServer(s, p)
 	go func() { <-ctx.Done(); s.Stop() }()
+	sweep := p.SweepCache
+	if sweep == nil {
+		sweep = p.sweepCache
+	}
+	go sweep(filepath.Join(p.StateDir, "cache"))
 	return s.Serve(l)
 }
 

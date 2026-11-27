@@ -705,7 +705,7 @@ The packages under `internal/vfs` are the node daemon of the virtual workspace. 
 | Command | Meaning |
 |---|---|
 | `motte-vfsd mount` | Standalone, for a host that has `fusermount`; `csi` mounts with `mount(2)`. Serves the tree of one commit as the read-only lower layer of a kernel overlay. Needs `-api`, `-commit`, `-mnt`, `-upper` and `-ctl-sock`, and `MOTTE_VFS_GRANT` in the environment. It does not refresh the grant. |
-| `motte-vfsd csi` | The CSI node plugin. Needs `-api`, `-grant-key-file` and `-allowed-namespaces` (comma-separated, no wildcard). Flags `-driver` (default `vfs.motte.dev`), `-endpoint`, `-node-id`, `-state`, `-uid` and `-gid`. |
+| `motte-vfsd csi` | The CSI node plugin. Needs `-api`, `-grant-key-file` and `-allowed-namespaces` (comma-separated, no wildcard). Flags `-driver` (default `vfs.motte.dev`), `-endpoint`, `-node-id`, `-state`, `-uid` and `-gid`. The plugin serves at once. A background walk of `<state>/cache` removes the temporary files that an earlier process left (never a file of this process, which carries a per-process name mark) and adds the size of the blobs to the tier-2 figure of `vfs.health`, so the start does not wait for the size of the cache. |
 | `motte-vfsd materialize` | Writes the checkout of a commit to `-dest`. A marker file records a finished checkout, and a later run changes nothing, whatever commit it names. |
 | `motte-vfsd import` | Fetches a repository with `git`, packs it and uploads it with an `import` grant (`PUT /v1/vcs/packs/{pack_id}`). `-depth 0` imports the whole history as packs of about 48 MiB and skips the ranges that the store holds. |
 

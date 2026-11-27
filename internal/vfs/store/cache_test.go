@@ -81,11 +81,23 @@ func TestRemoveStrayTemps(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	live, err := os.CreateTemp(dir, store.LiveTmpPrefix())
+	if err != nil {
+		t.Fatal(err)
+	}
 	store.RemoveStrayTemps(filepath.Dir(dir))
 	if _, err := os.Stat(filepath.Join(dir, ".tmp-123")); err == nil {
 		t.Error("the stray temporary file stays")
 	}
+	if _, err := os.Stat(live.Name()); err != nil {
+		t.Error("the file of a live writer was removed")
+	}
 	if _, err := os.Stat(filepath.Join(dir, "cdef")); err != nil {
 		t.Error(err)
 	}
+}
+
+func TestRemoveStrayTempsOfAMissingDirectoryIsANoOp(t *testing.T) {
+	t.Parallel()
+	store.RemoveStrayTemps(filepath.Join(t.TempDir(), "absent"))
 }
