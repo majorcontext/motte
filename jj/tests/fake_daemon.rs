@@ -724,6 +724,34 @@ fn a_tree_and_its_commit_go_up_in_one_batch_at_the_flush() {
 }
 
 #[test]
+fn a_hook_waits_for_the_flush_that_stores_its_objects() {
+    use motte_jj::ctl::ObjectStore as _;
+    let d = FakeDaemon::full();
+    d.state.lock().unwrap().delay_putbatch_ms = 300;
+    let c = std::sync::Arc::new(CtlClient::new(d.path()));
+    c.put_deferred(gix::objs::Kind::Blob, b"x").unwrap();
+    let state = d.state.clone();
+    let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
+    let flushing = {
+        let c = c.clone();
+        std::thread::spawn(move || c.flush_deferred().unwrap())
+    };
+    while d.ops("putbatch") == 0 {
+        std::thread::yield_now();
+    }
+    let at = seen.clone();
+    c.after_flush(move || {
+        at.store(
+            state.lock().unwrap().putbatches_answered,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+    });
+    c.flush_deferred().unwrap();
+    flushing.join().unwrap();
+    assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[test]
 fn a_worker_past_its_deadline_makes_no_daemon_call() {
     let d = FakeDaemon::start(true);
     let c = CtlClient::new(d.path());

@@ -118,9 +118,19 @@ type Seen = Mutex<BTreeMap<PathBuf, (i64, Vec<String>)>>;
 static LAST_OPHEADS: Seen = Mutex::new(BTreeMap::new());
 static PREFETCHED: Seen = Mutex::new(BTreeMap::new());
 
+type Hooks = Mutex<BTreeMap<PathBuf, Vec<Box<dyn FnOnce() + Send>>>>;
+
+/// What runs once the objects of a socket are stored: a stamp cache says that the daemon holds
+/// the blobs, so it is saved only after the send.
+static AFTER_FLUSH: Hooks = Mutex::new(BTreeMap::new());
+
 /// The objects that `put_deferred` holds for a daemon socket until `flush_deferred` sends them in
 /// one request. A snapshot writes its blobs, trees and commit this way, and the op store flushes
 /// before it writes the operation, so no local operation names an object that the daemon lacks.
+/// One flush at a time for the process: a flush that finds the buffer empty must not run a hook
+/// while another flush still uploads the objects that the hook depends on.
+static FLUSHING: Mutex<()> = Mutex::new(());
+
 type Held = Vec<(gix::ObjectId, Kind, Vec<u8>)>;
 
 static DEFERRED: Mutex<BTreeMap<PathBuf, Held>> = Mutex::new(BTreeMap::new());
@@ -417,6 +427,26 @@ impl CtlClient {
         Ok((reply.generation, reply.heads))
     }
 
+    /// Runs `hook` after the next `flush_deferred` that stores every deferred object of this
+    /// socket; a failed send runs nothing.
+    pub fn after_flush(&self, hook: impl FnOnce() + Send + 'static) {
+        AFTER_FLUSH
+            .lock()
+            .unwrap()
+            .entry(self.path.clone())
+            .or_default()
+            .push(Box::new(hook));
+    }
+
+    fn run_after_flush(&self) {
+        let hooks = AFTER_FLUSH
+            .lock()
+            .unwrap()
+            .remove(&self.path)
+            .unwrap_or_default();
+        hooks.into_iter().for_each(|h| h());
+    }
+
     /// The generation and heads that this process last read or swapped, if any.
     pub fn last_opheads(&self) -> Option<(i64, Vec<String>)> {
         LAST_OPHEADS.lock().unwrap().get(&self.path).cloned()
@@ -672,12 +702,14 @@ impl ObjectStore for CtlClient {
     }
 
     fn flush_deferred(&self) -> StoreResult<()> {
+        let _one_at_a_time = FLUSHING.lock().unwrap_or_else(|e| e.into_inner());
         let held = DEFERRED
             .lock()
             .unwrap()
             .remove(&self.path)
             .unwrap_or_default();
         if held.is_empty() {
+            self.run_after_flush();
             return Ok(());
         }
         let objects: Vec<(Kind, &[u8])> = held.iter().map(|(_, k, d)| (*k, d.as_slice())).collect();
@@ -690,6 +722,7 @@ impl ObjectStore for CtlClient {
                 .extend(held);
             return Err(e);
         }
+        self.run_after_flush();
         Ok(())
     }
 

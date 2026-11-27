@@ -61,14 +61,12 @@ impl LockedVfsWorkingCopy {
         } = built;
         let next = loaded.with_files(stamps);
         if next != loaded {
-            // A stamp says the daemon holds the blob, so the blobs go up before it is saved.
-            crate::ctl::ObjectStore::flush_deferred(&*self.ctl)
-                .map_err(|e| snap_err("cannot store the snapshot objects", e.to_string()))?;
-        }
-        if next != loaded
-            && let Err(e) = next.save(&self.state_path)
-        {
-            eprintln!("warning: cannot write the snapshot cache: {e}");
+            let state = self.state_path.clone();
+            self.ctl.after_flush(move || {
+                if let Err(e) = next.save(&state) {
+                    eprintln!("warning: cannot write the snapshot cache: {e}");
+                }
+            });
         }
         if tree.tree_ids_and_labels() != self.tree.tree_ids_and_labels()
             || !self.st.unwritten.is_empty()

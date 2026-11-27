@@ -297,3 +297,18 @@ fn a_snapshot_whose_blobs_are_not_stored_saves_no_stamp_for_them() {
         .join("jjroot/.jj/working_copy/motte_wc_cache.json");
     assert!(!ok && !cache.exists(), "{text}");
 }
+
+#[test]
+fn a_snapshot_stores_its_blobs_trees_and_commit_in_one_call() {
+    let f = Fixture::with(FakeDaemon::full());
+    let ws = f.workspace(&files(), &[]);
+    flush(&f, &ws);
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    std::fs::write(ws.mount.join("a"), "one\n").unwrap();
+    f.daemon.state.lock().unwrap().entries = vec![serde_json::json!({"path": "a", "kind": "file"})];
+    let calls = || f.daemon.ops("put") + f.daemon.ops("putbatch");
+    let before = calls();
+    let out = f.jj_env(&ws.mount, &["motte", "snapshot"], &[]);
+    assert!(out.contains("\"snapshot\":true"), "{out}");
+    assert_eq!(calls() - before, 1, "one putbatch for the whole snapshot");
+}

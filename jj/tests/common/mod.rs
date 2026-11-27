@@ -76,6 +76,9 @@ pub struct State {
     pub putops_inflight: usize,
     /// The most `putop` requests in flight at once.
     pub putops_peak: usize,
+    /// A `putbatch` answers this many milliseconds late, and counts as answered after the wait.
+    pub delay_putbatch_ms: u64,
+    pub putbatches_answered: usize,
 }
 
 pub struct FakeDaemon {
@@ -428,6 +431,15 @@ fn serve(conn: UnixStream, state: Arc<Mutex<State>>) {
                 st = state.lock().unwrap();
             }
             st.putops_inflight -= 1;
+        }
+        let delay = st.delay_putbatch_ms > 0
+            && serde_json::from_str::<Value>(&line).is_ok_and(|v| v["op"] == "putbatch");
+        if delay {
+            let ms = st.delay_putbatch_ms;
+            drop(st);
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            state.lock().unwrap().putbatches_answered += 1;
+            st = state.lock().unwrap();
         }
         drop(st);
         let mut out = serde_json::to_vec(&rs).unwrap();
