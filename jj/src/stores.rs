@@ -13,7 +13,7 @@ use jj_lib::object_id::ObjectId as _;
 use jj_lib::object_id::PrefixResolution;
 use jj_lib::op_heads_store::{OpHeadsStore, OpHeadsStoreError, OpHeadsStoreLock};
 use jj_lib::op_store::{
-    OpStore, OpStoreResult, Operation, OperationId, RootOperationData, View, ViewId,
+    OpStore, OpStoreError, OpStoreResult, Operation, OperationId, RootOperationData, View, ViewId,
 };
 use jj_lib::repo::StoreFactories;
 use jj_lib::simple_op_heads_store::SimpleOpHeadsStore;
@@ -26,14 +26,28 @@ pub const OP_STORE_NAME: &str = "motte-op-store";
 pub const OP_HEADS_NAME: &str = "motte-op-heads";
 
 #[derive(Debug)]
-pub struct MotteOpStore(SimpleOpStore);
+pub struct MotteOpStore(SimpleOpStore, PathBuf);
 
 impl MotteOpStore {
     pub fn init(path: &Path, root: RootOperationData) -> Result<Self, BackendInitError> {
-        Ok(Self(SimpleOpStore::init(path, root)?))
+        Ok(Self(SimpleOpStore::init(path, root)?, path.to_owned()))
     }
     pub fn load(path: &Path, root: RootOperationData) -> Self {
-        Self(SimpleOpStore::load(path, root))
+        Self(SimpleOpStore::load(path, root), path.to_owned())
+    }
+
+    /// Sends the objects that the backend deferred. It runs before a view or an operation is
+    /// written, because the daemon must hold every object that a local operation names.
+    fn flush_objects(&self) -> OpStoreResult<()> {
+        let Some(repo) = self.1.parent() else {
+            return Ok(());
+        };
+        let Ok(sock) = socket_path(&repo.join("store")) else {
+            return Ok(());
+        };
+        crate::ctl::ObjectStore::flush_deferred(&CtlClient::new(sock)).map_err(|e| {
+            OpStoreError::Other(format!("cannot store the objects of the operation: {e}").into())
+        })
     }
 }
 
@@ -49,12 +63,14 @@ impl OpStore for MotteOpStore {
         self.0.read_view(id).await
     }
     async fn write_view(&self, contents: &View) -> OpStoreResult<ViewId> {
+        self.flush_objects()?;
         self.0.write_view(contents).await
     }
     async fn read_operation(&self, id: &OperationId) -> OpStoreResult<Operation> {
         self.0.read_operation(id).await
     }
     async fn write_operation(&self, contents: &Operation) -> OpStoreResult<OperationId> {
+        self.flush_objects()?;
         self.0.write_operation(contents).await
     }
     async fn resolve_operation_id_prefix(

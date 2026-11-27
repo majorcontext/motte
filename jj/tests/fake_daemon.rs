@@ -709,6 +709,21 @@ fn the_objects_of_an_upload_go_up_at_once() {
 }
 
 #[test]
+fn a_tree_and_its_commit_go_up_in_one_batch_at_the_flush() {
+    let f = Fixture::new();
+    let before = f.daemon.ops("put") + f.daemon.ops("putbatch");
+    let a: BTreeMap<&str, &str> = [("a", "1"), ("b", "2")].into();
+    let tree = f.tree(&a);
+    f.commit(tree, 1);
+    let after = f.daemon.ops("put") + f.daemon.ops("putbatch");
+    assert_eq!(
+        after - before,
+        2,
+        "one batch for the tree, one for the commit"
+    );
+}
+
+#[test]
 fn a_worker_past_its_deadline_makes_no_daemon_call() {
     let d = FakeDaemon::start(true);
     let c = CtlClient::new(d.path());

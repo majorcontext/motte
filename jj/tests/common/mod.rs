@@ -547,7 +547,9 @@ impl Fixture {
             })
             .collect();
         let t = Tree::from_sorted_entries(entries);
-        block_on(self.backend.write_tree(RepoPath::root(), &t)).unwrap()
+        let id = block_on(self.backend.write_tree(RepoPath::root(), &t)).unwrap();
+        self.backend.object_store().flush_deferred().unwrap();
+        id
     }
 
     pub fn commit(&self, tree: TreeId, seed: u8) -> String {
@@ -588,6 +590,7 @@ impl Fixture {
             secure_sig: None,
         };
         let (id, _) = block_on(self.backend.write_commit(c, None)).unwrap();
+        self.backend.object_store().flush_deferred().unwrap();
         id.hex()
     }
 

@@ -277,3 +277,23 @@ fn a_snapshot_reads_the_remote_op_heads_once_and_swaps_them_once() {
     assert_eq!(report["snapshot"], true, "{out}");
     assert_eq!(f.daemon.ops("opheads") - before, 2, "one read, one swap");
 }
+
+#[test]
+fn a_snapshot_whose_blobs_are_not_stored_saves_no_stamp_for_them() {
+    let f = Fixture::with(FakeDaemon::full());
+    let ws = f.workspace(&files(), &[]);
+    flush(&f, &ws);
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    std::fs::write(ws.mount.join("a"), "one\n").unwrap();
+    {
+        let mut st = f.daemon.state.lock().unwrap();
+        st.entries = vec![serde_json::json!({"path": "a", "kind": "file"})];
+        st.failing.insert("putbatch".into(), "internal".into());
+    }
+    let (ok, text) = f.jj_try(&ws.mount, &["motte", "snapshot"], &[]);
+    let cache = f
+        .dir
+        .path()
+        .join("jjroot/.jj/working_copy/motte_wc_cache.json");
+    assert!(!ok && !cache.exists(), "{text}");
+}

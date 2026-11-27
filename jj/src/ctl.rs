@@ -98,6 +98,14 @@ pub enum RefSwap {
 pub trait ObjectStore: Send + Sync + Debug {
     fn get(&self, id: &gix::ObjectId) -> StoreResult<(Kind, Vec<u8>)>;
     fn put(&self, kind: Kind, data: &[u8]) -> StoreResult<gix::ObjectId>;
+    /// Hands an object over to be stored before the next `flush_deferred`; the default stores it now.
+    fn put_deferred(&self, kind: Kind, data: &[u8]) -> StoreResult<gix::ObjectId> {
+        self.put(kind, data)
+    }
+    /// Stores the objects that `put_deferred` took.
+    fn flush_deferred(&self) -> StoreResult<()> {
+        Ok(())
+    }
     /// Stores several objects; a daemon that supports it takes them in one round trip.
     fn put_many(&self, objects: &[(Kind, &[u8])]) -> StoreResult<Vec<gix::ObjectId>> {
         objects.iter().map(|(k, d)| self.put(*k, d)).collect()
@@ -109,6 +117,17 @@ pub trait ObjectStore: Send + Sync + Debug {
 type Seen = Mutex<BTreeMap<PathBuf, (i64, Vec<String>)>>;
 static LAST_OPHEADS: Seen = Mutex::new(BTreeMap::new());
 static PREFETCHED: Seen = Mutex::new(BTreeMap::new());
+
+/// The objects that `put_deferred` holds for a daemon socket until `flush_deferred` sends them in
+/// one request. A snapshot writes its blobs, trees and commit this way, and the op store flushes
+/// before it writes the operation, so no local operation names an object that the daemon lacks.
+type Held = Vec<(gix::ObjectId, Kind, Vec<u8>)>;
+
+static DEFERRED: Mutex<BTreeMap<PathBuf, Held>> = Mutex::new(BTreeMap::new());
+
+/// The most bytes and objects that one socket defers; past it an object goes to the daemon now.
+const DEFER_BYTES: usize = 4 << 20;
+const DEFER_OBJECTS: usize = 1024;
 
 pub fn hash_object(kind: Kind, data: &[u8]) -> gix::ObjectId {
     gix::objs::compute_hash(HASH_KIND, kind, data).expect("sha1 hashing cannot fail")
@@ -630,7 +649,59 @@ fn not_overlay(e: StoreError) -> StoreError {
 }
 
 impl ObjectStore for CtlClient {
+    fn put_deferred(&self, kind: Kind, data: &[u8]) -> StoreResult<gix::ObjectId> {
+        let id = hash_object(kind, data);
+        if data.len() as u64 > MAX_OBJECT_BYTES {
+            return Err(too_large(data.len()));
+        }
+        if self.no_batch.load(Ordering::Relaxed) || self.known.lock().unwrap().contains(&id) {
+            return self.put(kind, data);
+        }
+        let mut all = DEFERRED.lock().unwrap();
+        let held = all.entry(self.path.clone()).or_default();
+        let bytes: usize = held.iter().map(|(_, _, d)| d.len()).sum();
+        if held.len() >= DEFER_OBJECTS || bytes + data.len() > DEFER_BYTES {
+            drop(all);
+            self.flush_deferred()?;
+            return self.put(kind, data);
+        }
+        if !held.iter().any(|(h, _, _)| *h == id) {
+            held.push((id, kind, data.to_vec()));
+        }
+        Ok(id)
+    }
+
+    fn flush_deferred(&self) -> StoreResult<()> {
+        let held = DEFERRED
+            .lock()
+            .unwrap()
+            .remove(&self.path)
+            .unwrap_or_default();
+        if held.is_empty() {
+            return Ok(());
+        }
+        let objects: Vec<(Kind, &[u8])> = held.iter().map(|(_, k, d)| (*k, d.as_slice())).collect();
+        if let Err(e) = self.put_many(&objects) {
+            DEFERRED
+                .lock()
+                .unwrap()
+                .entry(self.path.clone())
+                .or_default()
+                .extend(held);
+            return Err(e);
+        }
+        Ok(())
+    }
+
     fn get(&self, id: &gix::ObjectId) -> StoreResult<(Kind, Vec<u8>)> {
+        let held = DEFERRED.lock().unwrap().get(&self.path).and_then(|h| {
+            h.iter()
+                .find(|(i, _, _)| i == id)
+                .map(|(_, k, d)| (*k, d.clone()))
+        });
+        if let Some(found) = held {
+            return Ok(found);
+        }
         let req = Request::Get {
             sha: id.to_string(),
         };

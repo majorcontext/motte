@@ -375,7 +375,7 @@ impl NativeBackend {
         object_type: &'static str,
     ) -> BackendResult<gix::ObjectId> {
         self.store
-            .put(kind, data)
+            .put_deferred(kind, data)
             .map_err(|e| write_err(e, object_type))
     }
 

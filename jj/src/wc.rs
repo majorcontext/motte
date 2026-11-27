@@ -436,7 +436,7 @@ fn put_reads(ctl: &CtlClient, jobs: &[Job], read: &mut Vec<(usize, Vec<u8>)>, ou
     let res = if objs.is_empty() {
         Ok(vec![])
     } else {
-        ctl.put_many(&objs)
+        objs.iter().map(|(k, d)| ctl.put_deferred(*k, d)).collect()
     };
     let mut out = out.lock().unwrap();
     for (k, (i, data)) in read.drain(..).enumerate() {
