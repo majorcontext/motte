@@ -3,10 +3,8 @@ package server_test
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"errors"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,7 +16,6 @@ import (
 	"github.com/majorcontext/motte/client"
 	"github.com/majorcontext/motte/internal/bucket"
 	"github.com/majorcontext/motte/internal/gitpack"
-	"github.com/majorcontext/motte/internal/midx"
 	"github.com/majorcontext/motte/internal/server"
 	"github.com/majorcontext/motte/testserver"
 )
@@ -118,38 +115,5 @@ func TestWarmFailureKeepsTheReplicaNotReadyUntilARetrySucceeds(t *testing.T) {
 	<-done
 	if got := ready(); got != http.StatusOK {
 		t.Fatalf("ready after the retry = %d, want 200", got)
-	}
-}
-
-func TestWarmAddsAListedPackThatNoLayerNamesAndLogsTheCount(t *testing.T) {
-	t.Parallel()
-	ts := testserver.StartLocal(t)
-	pack, idx, _ := gitpack.Build([]gitpack.Object{{Type: gitpack.Blob, Data: []byte("listed")}})
-	sum := sha256.Sum256(pack)
-	id := hex.EncodeToString(sum[:])
-	key := "repos/gh/" + base64.RawURLEncoding.EncodeToString([]byte("acme/widgets")) + "/" + id
-	for k, v := range map[string][]byte{key + ".idx": idx, key + ".pack": pack} {
-		if _, err := ts.Bucket.Create(t.Context(), k, v); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := ts.Meta.AddPack(t.Context(), repoText, id, int64(len(pack))); err != nil {
-		t.Fatal(err)
-	}
-	if err := ts.Meta.AddPack(t.Context(), repoText, strings.Repeat("ab", 32), 1); err != nil {
-		t.Fatal(err)
-	}
-	var logs strings.Builder
-	srv := server.New(server.Config{Meta: ts.Meta, Bucket: ts.Bucket, Verifier: ts.Verifier, Warm: true, Logger: slog.New(slog.NewTextHandler(&logs, nil))})
-	srv.Warm(t.Context())
-	row, err := ts.Meta.Manifest(t.Context(), repoText)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if m, _ := midx.DecodeManifest(row.Body); len(m.Layers) != 1 {
-		t.Errorf("manifest has %d layers after Warm, want the 1 of the listed pack", len(m.Layers))
-	}
-	if !strings.Contains(logs.String(), "layers_added=1 dropped=1") || !strings.Contains(logs.String(), "failed=0") {
-		t.Errorf("log %q lacks layers_added=1 dropped=1 and failed=0", logs.String())
 	}
 }

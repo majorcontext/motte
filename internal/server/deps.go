@@ -25,7 +25,6 @@ type objects interface {
 	ImportPack(ctx context.Context, repo store.Repo, id string, idx, pack []byte) error
 	Warm(ctx context.Context, repos []store.Repo, parallel int) error
 	Maintain(ctx context.Context, repo store.Repo) error
-	AdoptPacks(ctx context.Context, repo store.Repo) (added, dropped int, err error)
 	CacheStats() store.CacheStats
 	MaintStats() store.MaintStats
 	GetOp(ctx context.Context, ws string, kind store.OpKind, id string) ([]byte, error)

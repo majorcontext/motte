@@ -5,13 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"sync/atomic"
 	"time"
 	"weak"
 
 	"golang.org/x/sync/errgroup"
 
-	"github.com/majorcontext/motte/internal/bucket"
 	"github.com/majorcontext/motte/internal/gitpack"
 	"github.com/majorcontext/motte/internal/midx"
 	"github.com/majorcontext/motte/meta"
@@ -252,111 +250,18 @@ func (s *Service) readLayer(h *layerH) midx.ReadFunc {
 	}
 }
 
-// loadManifest returns the manifest of repo and its generation. A repo that has packs and no manifest gets one from
-// its pack list, with one index layer for each pack. A repo with neither has an empty manifest of generation 0.
+// loadManifest returns the manifest of repo and its generation. A repo with no manifest has an empty manifest of
+// generation 0.
 func (s *Service) loadManifest(ctx context.Context, repo Repo) (midx.Manifest, int64, error) {
-	m, gen, _, err := s.loadManifestCounted(ctx, repo)
-	return m, gen, err
-}
-
-// loadManifestCounted is loadManifest that also returns the layers that this call made by writing the first manifest.
-// A call that lost the swap, or that shared the work of another call, returns 0.
-func (s *Service) loadManifestCounted(ctx context.Context, repo Repo) (midx.Manifest, int64, int, error) {
 	row, err := s.index.Manifest(ctx, repo.String())
 	if errors.Is(err, meta.ErrNotFound) {
-		return s.bootstrap(ctx, repo)
+		return midx.Manifest{}, 0, nil
 	}
 	if err != nil {
-		return midx.Manifest{}, 0, 0, err
+		return midx.Manifest{}, 0, err
 	}
 	m, err := midx.DecodeManifest(row.Body)
-	return m, row.Generation, 0, err
-}
-
-func (s *Service) bootstrap(ctx context.Context, repo Repo) (midx.Manifest, int64, int, error) {
-	type result struct {
-		m       midx.Manifest
-		gen     int64
-		made    int
-		credits *atomic.Bool
-	}
-	v, err, _ := s.loads.Do("bootstrap|"+repo.String(), func() (any, error) {
-		ctx := context.WithoutCancel(ctx)
-		packs, err := s.index.Packs(ctx, repo.String())
-		if err != nil || len(packs) == 0 {
-			return result{}, err
-		}
-		layers, _, err := s.indexLayers(ctx, repo, packs)
-		if err != nil {
-			return nil, err
-		}
-		m := midx.Manifest{Layers: layers}
-		body, err := m.Encode()
-		if err != nil {
-			return nil, err
-		}
-		gen, err := s.index.SwapManifest(ctx, repo.String(), 0, body)
-		if errors.Is(err, meta.ErrManifestStale) {
-			row, err := s.index.Manifest(ctx, repo.String())
-			if err != nil {
-				return nil, err
-			}
-			m, err := midx.DecodeManifest(row.Body)
-			return result{m: m, gen: row.Generation, credits: new(atomic.Bool)}, err
-		}
-		return result{m: m, gen: gen, made: len(layers), credits: new(atomic.Bool)}, err
-	})
-	if err != nil {
-		return midx.Manifest{}, 0, 0, err
-	}
-	r := v.(result)
-	if r.made > 0 && r.credits.CompareAndSwap(false, true) {
-		return r.m, r.gen, r.made, nil
-	}
-	return r.m, r.gen, 0, nil
-}
-
-// indexLayers makes an index layer for each pack, reading only the header of its index. A pack whose index file does
-// not exist gets no layer and is returned in gone.
-func (s *Service) indexLayers(ctx context.Context, repo Repo, packs []meta.Pack) (layers []midx.Entry, gone []meta.Pack, err error) {
-	prefix, err := repoPrefix(repo)
-	if err != nil {
-		return nil, nil, err
-	}
-	out := make([]midx.Entry, len(packs))
-	missing := make([]bool, len(packs))
-	var g errgroup.Group
-	g.SetLimit(16)
-	for i, p := range packs {
-		g.Go(func() error {
-			head, err := s.st.GetRange(ctx, prefix+"/"+p.ID+".idx", 0, gitpack.IdxHeadBytes)
-			if errors.Is(err, bucket.ErrNotFound) {
-				missing[i] = true
-				return nil
-			}
-			if err != nil {
-				return fmt.Errorf("store: index of pack %s: %w", p.ID, err)
-			}
-			s.idxBytes.Add(int64(len(head)))
-			n, err := gitpack.IdxCount(head)
-			if err != nil {
-				return err
-			}
-			out[i] = indexEntry(midx.Pack{ID: p.ID, Bytes: p.Bytes}, n)
-			return nil
-		})
-	}
-	if err := g.Wait(); err != nil {
-		return nil, nil, err
-	}
-	for i, p := range packs {
-		if missing[i] {
-			gone = append(gone, p)
-		} else {
-			layers = append(layers, out[i])
-		}
-	}
-	return layers, gone, nil
+	return m, row.Generation, err
 }
 
 func indexEntry(p midx.Pack, objects int) midx.Entry {

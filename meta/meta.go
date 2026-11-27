@@ -123,12 +123,6 @@ type Lease struct {
 	Cursor                int64
 }
 
-// Pack is a pack that a repository holds.
-type Pack struct {
-	ID    string
-	Bytes int64
-}
-
 // Retired is a file of a repo that no manifest needs. Key is relative to the prefix of the repo.
 type Retired struct {
 	Key string
@@ -251,12 +245,6 @@ type Store interface {
 	LandStore
 	UserTokenStore
 
-	// AddPack records a pack once. A repeat is a no-op.
-	AddPack(ctx context.Context, repo, packID string, bytes int64) error
-	// Packs lists the packs of a repo, oldest first, ties by id.
-	Packs(ctx context.Context, repo string) ([]Pack, error)
-	// RemovePack forgets a pack of a repo. A missing pack is not an error.
-	RemovePack(ctx context.Context, repo, packID string) error
 	// Manifest returns the manifest of a repo, or ErrNotFound.
 	Manifest(ctx context.Context, repo string) (Manifest, error)
 	// SwapManifest stores body as the manifest of repo when the stored generation is expect (0 when none is stored),
@@ -269,13 +257,10 @@ type Store interface {
 	// BeginDelete marks each of keys as deleting at now, and returns the keys that it marked. It skips a key that is
 	// deleting since after staleBefore, which another collector owns, and a key retired after retiredBefore, which a writer used and retired again. Of concurrent callers, exactly one marks a key.
 	BeginDelete(ctx context.Context, repo string, keys []string, now, staleBefore, retiredBefore time.Time) ([]string, error)
-	// ClaimRetired removes each of keys that is retired and not deleting, so no collector takes it, and reports whether
-	// any of keys is deleting. A writer that stores a file again calls it first, and waits while it reports true.
-	ClaimRetired(ctx context.Context, repo string, keys []string) (deleting bool, err error)
 	// ForgetRetired removes keys from the retired files of a repo. A missing key is not an error.
 	ForgetRetired(ctx context.Context, repo string, keys []string) error
-	// PackRepos lists the text of every repo that holds a pack, in byte order.
-	PackRepos(ctx context.Context) ([]string, error)
+	// ManifestRepos lists the text of every repo that has a manifest, in byte order.
+	ManifestRepos(ctx context.Context) ([]string, error)
 }
 
 // Fence is the state of a workspace row that every fenced write checks. A

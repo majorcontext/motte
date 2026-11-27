@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -51,7 +52,6 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"update ref is a compare and swap on the commit", updateRefRules},
 		{"one racer of many updates a ref", oneRefUpdateWins},
 		{"refs list by name within a repo", refsList},
-		{"packs list oldest first and add once", packs},
 		{"pack removal, retired files and the manifest swap", packMaintenance},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -611,48 +611,29 @@ func refsList(t *testing.T, s meta.Store) {
 	}
 }
 
-func packs(t *testing.T, s meta.Store) {
-	for _, id := range []string{"p3", "p1", "p2"} {
-		ok(t, s.AddPack(ctx, repoText, id, int64(len(id))*10))
-		time.Sleep(5 * time.Millisecond)
+func manifestRepos(t *testing.T, s meta.Store) {
+	for _, repo := range []string{"gh:acme/mr-b", "gh:acme/mr-a"} {
+		_, err := s.SwapManifest(ctx, repo, 0, []byte("x"))
+		ok(t, err)
 	}
-	ok(t, s.AddPack(ctx, repoText, "p3", 999))
-	ok(t, s.AddPack(ctx, "gh:acme/other", "p9", 1))
-	got, err := s.Packs(ctx, repoText)
-	want := []meta.Pack{{ID: "p3", Bytes: 20}, {ID: "p1", Bytes: 20}, {ID: "p2", Bytes: 20}}
-	if err != nil || len(got) != len(want) {
-		t.Fatalf("packs = %+v, %v", got, err)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("packs[%d] = %+v, want %+v: oldest first, a repeat keeps the first record", i, got[i], want[i])
+	var got []string
+	repos, err := s.ManifestRepos(ctx)
+	ok(t, err)
+	for _, r := range repos {
+		if strings.HasPrefix(r, "gh:acme/mr-") {
+			got = append(got, r)
 		}
 	}
-	if none, err := s.Packs(ctx, "gh:acme/none"); err != nil || len(none) != 0 {
-		t.Errorf("packs of an unknown repo = %+v, %v", none, err)
-	}
-	if repos, err := s.PackRepos(ctx); err != nil || len(repos) != 2 || repos[0] != "gh:acme/other" || repos[1] != repoText {
-		t.Errorf("pack repos = %v, %v, want each repo of a pack once", repos, err)
+	if len(got) != 2 || got[0] != "gh:acme/mr-a" || got[1] != "gh:acme/mr-b" {
+		t.Errorf("manifest repos = %v, want each repo with a manifest once, in byte order", got)
 	}
 }
 
 func packMaintenance(t *testing.T, s meta.Store) {
-	removePack(t, s, "gh:acme/remove")
+	manifestRepos(t, s)
 	retiredFiles(t, s, "gh:acme/retired")
 	manifestSwap(t, s, "gh:acme/swap")
 	oneManifestSwapWins(t, s, "gh:acme/race")
-}
-
-func removePack(t *testing.T, s meta.Store, repo string) {
-	ok(t, s.AddPack(ctx, repo, "p1", 1))
-	ok(t, s.AddPack(ctx, repo, "p2", 2))
-	ok(t, s.RemovePack(ctx, repo, "p1"))
-	ok(t, s.RemovePack(ctx, repo, "p1"))
-	ok(t, s.RemovePack(ctx, repo, "nope"))
-	got, err := s.Packs(ctx, repo)
-	if err != nil || len(got) != 1 || got[0].ID != "p2" {
-		t.Errorf("packs = %+v, %v; want only p2", got, err)
-	}
 }
 
 func manifestSwap(t *testing.T, s meta.Store, repo string) {
@@ -735,14 +716,10 @@ func retiredFiles(t *testing.T, s meta.Store, repo string) {
 		t.Errorf("a begin delete over a stale mark took %v, %v; want the key", again, err)
 	}
 	ok(t, s.RetireFiles(ctx, repo, []string{"c.pack"}, t0.Add(9*time.Second)))
-	busy, err := s.ClaimRetired(ctx, repo, []string{"c.pack", "a.idx"})
-	if err != nil || !busy {
-		t.Errorf("claim of a deleting file = %v, %v; want true", busy, err)
-	}
 	got, _ = s.RetiredFiles(ctx, repo)
 	for _, r := range got {
-		if r.Key == "a.idx" || (r.Key == "c.pack" && (!r.Deleting || !r.At.Equal(t0.Add(time.Second)))) {
-			t.Errorf("after the claim %+v remains: a claim removes only files that are not deleting, and a retire keeps a deleting file as it is", r)
+		if r.Key == "c.pack" && (!r.Deleting || !r.At.Equal(t0.Add(time.Second))) {
+			t.Errorf("after the retire %+v remains: a retire keeps a deleting file as it is", r)
 		}
 	}
 	ok(t, s.RetireFiles(ctx, repo, []string{"a.idx"}, t0))

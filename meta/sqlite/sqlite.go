@@ -332,40 +332,6 @@ func (s *Store) SwapOpHeads(ctx context.Context, ws string, epoch uint64, repo s
 	return meta.OpHeads{}, sqlcore.OpHeadsLost(ctx, s.probe(), ws, epoch, repo)
 }
 
-func (s *Store) AddPack(ctx context.Context, repo, packID string, bytes int64) error {
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO packs (repo, pack_id, bytes, created_at) VALUES (?, ?, ?, ?) ON CONFLICT (repo, pack_id) DO NOTHING`, repo, packID, bytes, micros()); err != nil {
-		return fmt.Errorf("sqlite: add pack: %w", err)
-	}
-	return nil
-}
-
-func (s *Store) Packs(ctx context.Context, repo string) ([]meta.Pack, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT pack_id, bytes FROM packs WHERE repo = ? ORDER BY created_at, pack_id`, repo)
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: list packs: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-	var out []meta.Pack
-	for rows.Next() {
-		var p meta.Pack
-		if err := rows.Scan(&p.ID, &p.Bytes); err != nil {
-			return nil, fmt.Errorf("sqlite: list packs: %w", err)
-		}
-		out = append(out, p)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("sqlite: list packs: %w", err)
-	}
-	return out, nil
-}
-
-func (s *Store) RemovePack(ctx context.Context, repo, packID string) error {
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM packs WHERE repo = ? AND pack_id = ?`, repo, packID); err != nil {
-		return fmt.Errorf("sqlite: remove pack: %w", err)
-	}
-	return nil
-}
-
 func (s *Store) Manifest(ctx context.Context, repo string) (meta.Manifest, error) {
 	var m meta.Manifest
 	err := s.db.QueryRowContext(ctx, `SELECT generation, body FROM pack_manifests WHERE repo = ?`, repo).Scan(&m.Generation, &m.Body)
@@ -458,21 +424,6 @@ func (s *Store) BeginDelete(ctx context.Context, repo string, keys []string, now
 	return out, nil
 }
 
-func (s *Store) ClaimRetired(ctx context.Context, repo string, keys []string) (bool, error) {
-	deleting := false
-	for _, k := range keys {
-		if _, err := s.db.ExecContext(ctx, `DELETE FROM pack_retired WHERE repo = ? AND key = ? AND deleting_at IS NULL`, repo, k); err != nil {
-			return false, fmt.Errorf("sqlite: claim retired: %w", err)
-		}
-		var n int
-		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pack_retired WHERE repo = ? AND key = ?`, repo, k).Scan(&n); err != nil {
-			return false, fmt.Errorf("sqlite: claim retired: %w", err)
-		}
-		deleting = deleting || n > 0
-	}
-	return deleting, nil
-}
-
 func (s *Store) ForgetRetired(ctx context.Context, repo string, keys []string) error {
 	for _, k := range keys {
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM pack_retired WHERE repo = ? AND key = ?`, repo, k); err != nil {
@@ -482,22 +433,22 @@ func (s *Store) ForgetRetired(ctx context.Context, repo string, keys []string) e
 	return nil
 }
 
-func (s *Store) PackRepos(ctx context.Context) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT repo FROM packs ORDER BY repo`)
+func (s *Store) ManifestRepos(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT repo FROM pack_manifests ORDER BY repo`)
 	if err != nil {
-		return nil, fmt.Errorf("sqlite: list pack repos: %w", err)
+		return nil, fmt.Errorf("sqlite: list manifest repos: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	var out []string
 	for rows.Next() {
 		var r string
 		if err := rows.Scan(&r); err != nil {
-			return nil, fmt.Errorf("sqlite: list pack repos: %w", err)
+			return nil, fmt.Errorf("sqlite: list manifest repos: %w", err)
 		}
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("sqlite: list pack repos: %w", err)
+		return nil, fmt.Errorf("sqlite: list manifest repos: %w", err)
 	}
 	return out, nil
 }

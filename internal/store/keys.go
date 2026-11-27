@@ -20,10 +20,3 @@ func uniqueKey(key, wid string) string {
 	ext := path.Ext(key)
 	return strings.TrimSuffix(key, ext) + "-" + wid + ext
 }
-
-// packIDOfKey returns the pack id of a key of a pack file or an index file: the name without its write id and extension.
-func packIDOfKey(key string) string {
-	name := strings.TrimSuffix(path.Base(key), path.Ext(key))
-	id, _, _ := strings.Cut(name, "-")
-	return id
-}

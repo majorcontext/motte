@@ -97,16 +97,12 @@ func ParseRepo(s string) (Repo, error) {
 	return Repo{Prefix: prefix, Path: path}, nil
 }
 
-// PackIndex is the metadata that the store keeps about the packs of a repo: the packs, and the manifest of layers.
+// PackIndex is the metadata that the store keeps about the packs of a repo: the manifest of layers and the retired files.
 type PackIndex interface {
-	AddPack(ctx context.Context, repo, packID string, bytes int64) error
-	Packs(ctx context.Context, repo string) ([]meta.Pack, error)
-	RemovePack(ctx context.Context, repo, packID string) error
 	RetireFiles(ctx context.Context, repo string, keys []string, at time.Time) error
 	RetiredFiles(ctx context.Context, repo string) ([]meta.Retired, error)
 	ForgetRetired(ctx context.Context, repo string, keys []string) error
 	BeginDelete(ctx context.Context, repo string, keys []string, now, staleBefore, retiredBefore time.Time) ([]string, error)
-	ClaimRetired(ctx context.Context, repo string, keys []string) (bool, error)
 	Manifest(ctx context.Context, repo string) (meta.Manifest, error)
 	SwapManifest(ctx context.Context, repo string, expect int64, body []byte) (int64, error)
 }
@@ -445,7 +441,7 @@ func (s *Service) putPack(ctx context.Context, repo Repo, id string, idx, pack [
 	if err := s.appendPack(ctx, repo, midx.Pack{ID: id, Bytes: int64(len(pack)), Key: packKey, Idx: idxKey}, idx, graph, zkey); err != nil {
 		return err
 	}
-	return s.index.AddPack(ctx, repo.String(), id, int64(len(pack)))
+	return nil
 }
 
 type bytesReader []byte

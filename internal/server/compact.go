@@ -39,7 +39,7 @@ func (s *Server) Compact(ctx context.Context) {
 }
 
 func (s *Server) compactPass(ctx context.Context) {
-	all, err := s.index.PackRepos(ctx)
+	all, err := s.index.ManifestRepos(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
 			s.logger.ErrorContext(ctx, "maintenance could not list repositories", "error", logSafe(err))

@@ -206,10 +206,6 @@ func TestEveryObjectStaysReachableThroughPushesAndMaintenance(t *testing.T) {
 	if st.CompactRuns == 0 || st.MergeRuns == 0 || st.Deleted == 0 {
 		t.Errorf("maintenance did nothing to be proud of: %+v", st)
 	}
-	packs, err := w.meta.Packs(t.Context(), repo.String())
-	if err != nil || len(packs) >= 36 {
-		t.Errorf("%d pack rows after compaction and deletion, %v; want fewer than the 36 pushed", len(packs), err)
-	}
 }
 
 func TestReadingSmallObjectsOfABigPackCostsFewSmallRanges(t *testing.T) {
@@ -1021,129 +1017,6 @@ func TestAWriteThatHoldsTheWholeMemoryBudgetStillFinishes(t *testing.T) {
 	}
 }
 
-func TestAPackRowLostAfterCompactionIsRestoredFromTheManifest(t *testing.T) {
-	t.Parallel()
-	w := newWorld(t)
-	for range 10 {
-		w.push(2)
-	}
-	if err := w.svc.Maintain(t.Context(), repo); err != nil {
-		t.Fatal(err)
-	}
-	w.pastGrace()
-	if err := w.svc.Maintain(t.Context(), repo); err != nil {
-		t.Fatal(err)
-	}
-	rows, _ := w.meta.Packs(t.Context(), repo.String())
-	for _, r := range rows {
-		if err := w.meta.RemovePack(t.Context(), repo.String(), r.ID); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := w.svc.Maintain(t.Context(), repo); err != nil {
-		t.Fatal(err)
-	}
-	if got, _ := w.meta.Packs(t.Context(), repo.String()); len(got) != len(rows) {
-		t.Errorf("%d pack rows after maintenance, want the %d that the manifest holds", len(got), len(rows))
-	}
-	w.reachable(w.cold())
-}
-
-func (w *world) listOlderPack(text string) {
-	w.t.Helper()
-	pack, idx, names := gitpack.Build([]gitpack.Object{{Type: gitpack.Blob, Data: []byte(text)}})
-	id := fmt.Sprintf("%x", sha256sum(pack))
-	prefix := "repos/native/" + b64("repo_x")
-	for k, v := range map[string][]byte{prefix + "/" + id + ".idx": idx, prefix + "/" + id + ".pack": pack} {
-		if _, err := w.mem.Create(w.t.Context(), k, v); err != nil {
-			w.t.Fatal(err)
-		}
-	}
-	if err := w.meta.AddPack(w.t.Context(), repo.String(), id, int64(len(pack))); err != nil {
-		w.t.Fatal(err)
-	}
-	w.have = append(w.have, names...)
-}
-
-func TestAPackThatAnOlderReleaseListedIsAddedToTheManifest(t *testing.T) {
-	t.Parallel()
-	w := newWorld(t)
-	w.push(3)
-	w.listOlderPack("from an older release")
-	if err := w.svc.Maintain(t.Context(), repo); err != nil {
-		t.Fatal(err)
-	}
-	w.reachable(w.cold())
-}
-
-func TestAPackRowWhoseFilesAreMissingDoesNotFailMaintenance(t *testing.T) {
-	t.Parallel()
-	w := newWorld(t)
-	w.push(2)
-	if err := w.meta.AddPack(t.Context(), repo.String(), strings.Repeat("ab", 32), 100); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.svc.Maintain(t.Context(), repo); err != nil {
-		t.Fatal(err)
-	}
-	rows, _ := w.meta.Packs(t.Context(), repo.String())
-	for _, p := range rows {
-		if p.ID == strings.Repeat("ab", 32) {
-			t.Fatal("the row without files is still listed")
-		}
-	}
-	w.reachable(w.cold())
-}
-
-func TestAdoptPacksCountsThePacksThatTheManifestLacked(t *testing.T) {
-	t.Parallel()
-	w := newWorld(t)
-	w.push(2)
-	w.listOlderPack("listed only")
-	if n, _, err := w.svc.AdoptPacks(t.Context(), repo); err != nil || n != 1 {
-		t.Fatalf("AdoptPacks = %d, %v; want 1, nil", n, err)
-	}
-	w.reachable(w.cold())
-	if n, _, err := w.svc.AdoptPacks(t.Context(), repo); err != nil || n != 0 {
-		t.Fatalf("second AdoptPacks = %d, %v; want 0, nil", n, err)
-	}
-}
-
-func TestReplicasThatBootstrapTogetherCountTheLayersOnce(t *testing.T) {
-	t.Parallel()
-	w := newWorld(t)
-	w.listOlderPack("listed only, no manifest")
-	other := w.cold()
-	got := make(chan int, 2)
-	for _, svc := range []*store.Service{w.svc, other} {
-		go func() {
-			n, _, err := svc.AdoptPacks(t.Context(), repo)
-			if err != nil {
-				t.Error(err)
-			}
-			got <- n
-		}()
-	}
-	if sum := <-got + <-got; sum != 1 {
-		t.Fatalf("two replicas counted %d layers added, want 1", sum)
-	}
-}
-
-func TestOnePassOfMaintenanceClearsABacklogOfLayers(t *testing.T) {
-	t.Parallel()
-	w := newWorld(t)
-	for i := range 700 {
-		w.listOlderPack(fmt.Sprintf("a pack of the burst %d", i))
-	}
-	if err := w.svc.Maintain(t.Context(), repo); err != nil {
-		t.Fatal(err)
-	}
-	if n := w.layers(); n > 12 {
-		t.Fatalf("%d layers after one pass over a backlog of 700; want at most 12", n)
-	}
-	w.reachable(w.cold())
-}
-
 // fillRandom fills data with bytes that do not compress, eight for each call of rng.
 func fillRandom(rng *rand.Rand, data []byte) {
 	i := 0
@@ -1375,22 +1248,5 @@ func TestAPackIsReadFromTheKeyThatTheManifestRecords(t *testing.T) {
 		if _, _, err := w.cold().Get(t.Context(), repo, sha); err != nil {
 			t.Errorf("get %s: %v", sha, err)
 		}
-	}
-}
-
-type failingSwap struct{ store.PackIndex }
-
-func (failingSwap) SwapManifest(context.Context, string, int64, []byte) (int64, error) {
-	return 0, errors.New("swap failed")
-}
-
-func TestAdoptPacksCountsNothingWhenTheManifestSwapFails(t *testing.T) {
-	t.Parallel()
-	w := newWorld(t)
-	w.push(2)
-	w.listOlderPack("listed only")
-	svc := store.New(w.mem, failingSwap{w.meta}, store.WithGrace(grace))
-	if n, _, err := svc.AdoptPacks(t.Context(), repo); err == nil || n != 0 {
-		t.Fatalf("AdoptPacks = %d, %v; want 0 and an error", n, err)
 	}
 }
