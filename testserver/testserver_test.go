@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/majorcontext/motte/api"
 	"github.com/majorcontext/motte/client"
@@ -94,4 +95,22 @@ func TestThePackageServerIsOneServerForEveryTest(t *testing.T) {
 			t.Fatal("Package returned another server")
 		}
 	})
+}
+
+func TestPruneEventsRefusesAnOlderCursorOnAnInMemoryServer(t *testing.T) {
+	t.Parallel()
+	s := testserver.Start(t, testserver.InMemory())
+	claim(t, s, "gh:acme/widgets")
+	ctx := context.Background()
+	op := s.Client(s.OperatorGrant(t))
+	if _, err := s.Client(s.MergeGrant(t, "gh:acme/widgets")).SwapRef(ctx, "a", 0, "0123456789012345678901234567890123456789"); err != nil {
+		t.Fatal(err)
+	}
+	if evs, _, err := op.Events(ctx, "", 0); err != nil || len(evs) != 1 {
+		t.Fatalf("events = %v, %v, want one", evs, err)
+	}
+	s.PruneEvents(t, time.Now().Add(time.Hour))
+	if _, _, err := op.Events(ctx, "", 0); !errors.Is(err, client.ErrEventsPruned) {
+		t.Fatalf("events after prune = %v, want ErrEventsPruned", err)
+	}
 }

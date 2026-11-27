@@ -19,6 +19,7 @@ import (
 	"github.com/majorcontext/motte/identity"
 	"github.com/majorcontext/motte/internal/bucket"
 	"github.com/majorcontext/motte/internal/bucket/fs"
+	"github.com/majorcontext/motte/internal/bucket/mem"
 	"github.com/majorcontext/motte/internal/meta/postgres"
 	"github.com/majorcontext/motte/internal/pgtest"
 	"github.com/majorcontext/motte/internal/server"
@@ -72,6 +73,7 @@ type options struct {
 	dsn      string
 	required bool
 	template string
+	memory   bool
 	limits   *Limits
 	replicas int
 	faults   *Faults
@@ -90,6 +92,10 @@ func Required() Option { return func(o *options) { o.required = true } }
 
 // Template starts a SQLite server from a copy of the migrated database file at path. It has no effect on PostgreSQL.
 func Template(path string) Option { return func(o *options) { o.template = path } }
+
+// InMemory keeps the metadata and the objects of a SQLite server in memory, so no commit waits for a disk. It has no
+// effect on PostgreSQL, and it makes Template redundant: the database starts from the migrated image.
+func InMemory() Option { return func(o *options) { o.memory = true } }
 
 // WithLimits lowers the size limits of the server for the test.
 func WithLimits(l Limits) Option { return func(o *options) { o.limits = &l } }
@@ -159,6 +165,14 @@ func StartLocal(t testing.TB) *Server { return startSQLite(t, options{}) }
 
 func startSQLite(t testing.TB, o options) *Server {
 	t.Helper()
+	if o.memory {
+		db, err := sqlite.Open(context.Background(), sqlite.Memory)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		return run(t, db, o)
+	}
 	file := filepath.Join(t.TempDir(), "meta.db")
 	if o.template != "" {
 		raw, err := os.ReadFile(o.template)
@@ -179,13 +193,16 @@ func startSQLite(t testing.TB, o options) *Server {
 
 func run(t testing.TB, store meta.Store, o options) *Server {
 	t.Helper()
-	root, err := fs.New(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
+	var bkt bucket.Store = mem.New()
+	if !o.memory {
+		root, err := fs.New(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		bkt = root.Bucket("motte")
 	}
 	cpPub, cpKey, _ := ed25519.GenerateKey(rand.Reader)
 	nodePub, nodeKey, _ := ed25519.GenerateKey(rand.Reader)
-	bkt := root.Bucket("motte")
 	verifier := grant.NewVerifier(
 		grant.Key{Kid: "cp", Public: cpPub, Scopes: []grant.Scope{grant.ScopeNode, grant.ScopeRead, grant.ScopeWrite, grant.ScopeImport, grant.ScopeOperator, grant.ScopeMerge}},
 		grant.Key{Kid: "node", Public: nodePub, Scopes: []grant.Scope{grant.ScopeNode}})
@@ -213,6 +230,15 @@ func run(t testing.TB, store meta.Store, o options) *Server {
 		s.Replicas = append(s.Replicas, build(fmt.Sprintf("replica-%d", i+1)).URL)
 	}
 	return s
+}
+
+// PruneEvents removes the events that the server wrote before the time, as retention does, for a test that needs a
+// cursor that the server no longer holds.
+func (s *Server) PruneEvents(t testing.TB, before time.Time) {
+	t.Helper()
+	if err := s.Meta.PruneEvents(context.Background(), before); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // Mint signs c with signer and sets the expiry of the server when c has none.
