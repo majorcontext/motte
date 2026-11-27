@@ -126,6 +126,12 @@ fn dirty(ui: &mut Ui, helper: &CommandHelper) -> Result<(), CommandError> {
     Ok(())
 }
 
+/// The release build sets MOTTE_VERSION to its tag; any other build reports the crate version.
+const VERSION: &str = match option_env!("MOTTE_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 fn main() -> std::process::ExitCode {
     if std::env::args_os()
         .nth(1)
@@ -141,6 +147,7 @@ fn main() -> std::process::ExitCode {
         Box::new(VfsWorkingCopyFactory { init: None }),
     );
     let code = CliRunner::init()
+        .version(VERSION)
         .add_store_factories(store_factories())
         .add_working_copy_factories(wcf)
         .add_subcommand(run_custom_command)

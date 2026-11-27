@@ -23,6 +23,7 @@ func jjCmd(args []string, out io.Writer) error {
 	outDir := fs.String("out", "", "directory for jj-linux-ARCH and jj-linux-ARCH.sha256")
 	arch := fs.String("arch", runtime.GOARCH, "amd64 or arm64")
 	src := fs.String("src", "jj", "the jj crate directory")
+	version := fs.String("version", "", "the version that jj version prints, such as the release tag")
 	dry := fs.Bool("dry-run", false, "print the commands and run none")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -39,13 +40,17 @@ func jjCmd(args []string, out io.Writer) error {
 	}
 	r := runner{dryRun: *dry, out: out}
 	plat := "linux/" + *arch
-	if err := r.run("", "docker", "run", "--rm", "--platform", plat, "-v", crate+":/w", "-w", "/w",
-		buildImage, "cargo", "build", "--release", "--locked", "--bin", "jj"); err != nil {
+	build := []string{"run", "--rm", "--platform", plat, "-v", crate + ":/w", "-w", "/w"}
+	if *version != "" {
+		build = append(build, "-e", "MOTTE_VERSION="+*version)
+	}
+	build = append(build, buildImage, "cargo", "build", "--release", "--locked", "--bin", "jj")
+	if err := r.run("", "docker", build...); err != nil {
 		return err
 	}
 	bin := filepath.Join(crate, "target", "release", "jj")
 	if err := r.run("", "docker", "run", "--rm", "--platform", plat, "-v", filepath.Dir(bin)+":/b:ro",
-		smokeImage, "/b/jj", "--help"); err != nil {
+		smokeImage, "/b/jj", "version"); err != nil {
 		return err
 	}
 	if *dry {

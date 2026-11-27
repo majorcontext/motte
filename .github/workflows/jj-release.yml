@@ -27,7 +27,7 @@ jobs:
           go-version-file: go.mod
       - name: Build, check and write the binary and its sha256 sum
         working-directory: .
-        run: go run ./internal/release/cmd/release jj -arch ${{ matrix.arch }} -out dist
+        run: go run ./internal/release/cmd/release jj -arch ${{ matrix.arch }} -version "$GITHUB_REF_NAME" -out dist
       - name: Publish
         working-directory: .
         env:
