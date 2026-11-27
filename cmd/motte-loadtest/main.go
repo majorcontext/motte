@@ -75,7 +75,11 @@ func loadSigner(keyFile, kid string) (grant.Signer, error) {
 }
 
 func (g signer) mint(scope grant.Scope) string {
-	tok, err := g.s.Mint(grant.Claims{Scope: scope, Repo: g.repo, Exp: time.Now().Add(24 * time.Hour).Unix()})
+	c := grant.Claims{Scope: scope, Repo: g.repo, Exp: time.Now().Add(24 * time.Hour).Unix()}
+	if scope == grant.ScopeMerge {
+		c.Refs = []string{"*"}
+	}
+	tok, err := g.s.Mint(c)
 	if err != nil {
 		panic(err)
 	}

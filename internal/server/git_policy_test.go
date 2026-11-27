@@ -15,6 +15,11 @@ func TestGitPushMovesOnlyTheRefsOfAMergeGrantThatNamesRefs(t *testing.T) {
 	g.commit(w, "w.txt", "w")
 	before := g.git(w, true, "ls-remote", "origin", "refs/heads/main")
 	g.git(w, true, "push", "-q", named, "HEAD:refs/heads/feature/a")
+	g.git(w, true, "push", "-q", "origin", "HEAD:refs/heads/feature/w")
+	g.git(w, false, "push", g.remote(g.path, mergeWithoutRefs(g.Server, g.text)), "HEAD:refs/heads/feature/c")
+	if got := g.git(w, true, "ls-remote", "origin", "refs/heads/feature/c"); got != "" {
+		t.Errorf("a merge grant that names no refs pushed feature/c: %q", got)
+	}
 	for _, args := range [][]string{{"HEAD:refs/heads/main"}, {":refs/heads/main"}, {"HEAD:refs/heads/feature/b", "HEAD:refs/heads/main"}} {
 		if out := g.git(w, false, append([]string{"push", named}, args...)...); !strings.Contains(out, "not in the grant") {
 			t.Errorf("push %v: %q, want a per-ref refusal that says not in the grant", args, out)

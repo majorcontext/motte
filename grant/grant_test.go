@@ -2,6 +2,7 @@ package grant
 
 import (
 	"crypto/ed25519"
+	"encoding/base64"
 	"strings"
 	"testing"
 	"time"
@@ -35,8 +36,8 @@ func TestVerify(t *testing.T) {
 	}{
 		{"node key node scope", mint(nodeKey, node), true},
 		{"control key any scope", mint(cp, Claims{Scope: ScopeOperator, Exp: 2000}), true},
-		{"control key merge scope", mint(cp, Claims{Scope: ScopeMerge, Repo: "n:a", Exp: 2000}), true},
-		{"node key merge scope", mint(nodeKey, Claims{Scope: ScopeMerge, Repo: "n:a", Exp: 2000}), false},
+		{"control key merge scope", mint(cp, Claims{Scope: ScopeMerge, Repo: "n:a", Refs: []string{"*"}, Exp: 2000}), true},
+		{"node key merge scope", mint(nodeKey, Claims{Scope: ScopeMerge, Repo: "n:a", Refs: []string{"*"}, Exp: 2000}), false},
 		{"node key import scope", mint(nodeKey, Claims{Scope: ScopeImport, Repo: "n:a", Exp: 2000}), false},
 		{"write scope with a repo", mint(cp, Claims{Scope: ScopeWrite, Repo: "n:a", Exp: 2000}), true},
 		{"node key write scope", mint(nodeKey, Claims{Scope: ScopeWrite, Repo: "n:a", Exp: 2000}), false},
@@ -60,7 +61,7 @@ func TestVerify(t *testing.T) {
 func TestMintRejectsIncompleteClaims(t *testing.T) {
 	t.Parallel()
 	_, priv, _ := ed25519.GenerateKey(nil)
-	for _, c := range []Claims{{Scope: ScopeNode, Repo: "n:a"}, {Scope: ScopeRead}, {Scope: ScopeWrite}, {Scope: ScopeMerge}, {Scope: "x"}} {
+	for _, c := range []Claims{{Scope: ScopeNode, Repo: "n:a"}, {Scope: ScopeRead}, {Scope: ScopeWrite}, {Scope: ScopeMerge}, {Scope: ScopeMerge, Repo: "n:a"}, {Scope: "x"}} {
 		if _, err := (Signer{Kid: "k", Key: priv}).Mint(c); err == nil {
 			t.Errorf("Mint(%+v) accepted", c)
 		}
@@ -81,8 +82,10 @@ func TestRefsBelongToMergeGrantsAndMustBePatterns(t *testing.T) {
 	if err != nil || verr != nil || !got.MovesRef("main") || !got.MovesRef("feature/x") || got.MovesRef("release/1") || got.MovesRef("mainx") {
 		t.Errorf("claims = %+v, %v, %v: want main and feature/* only", got, err, verr)
 	}
-	if !(Claims{Scope: ScopeMerge}).MovesRef("any") {
-		t.Error("a merge grant with no Refs moves no ref, want it to move any until a later release refuses it")
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"kid":"k","scope":"merge","repo":"n:a","exp":2000}`))
+	signed := "mg1." + payload + "." + base64.RawURLEncoding.EncodeToString(ed25519.Sign(priv, []byte(payload)))
+	if _, err := v.Verify(signed, time.Unix(1000, 0)); err == nil {
+		t.Error("Verify accepted a merge grant with no refs")
 	}
 }
 

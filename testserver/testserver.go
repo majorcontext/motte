@@ -258,10 +258,10 @@ func (s *Server) ImportGrant(t testing.TB, repo string) string {
 	return s.Mint(t, s.Operator, grant.Claims{Scope: grant.ScopeImport, Repo: repo})
 }
 
-// MergeGrant mints a merge grant.
+// MergeGrant mints a merge grant that may move any ref.
 func (s *Server) MergeGrant(t testing.TB, repo string) string {
 	t.Helper()
-	return s.Mint(t, s.Operator, grant.Claims{Scope: grant.ScopeMerge, Repo: repo})
+	return s.Mint(t, s.Operator, grant.Claims{Scope: grant.ScopeMerge, Repo: repo, Refs: []string{"*"}})
 }
 
 // Client returns a client that sends token on every call.

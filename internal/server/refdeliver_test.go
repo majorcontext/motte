@@ -139,7 +139,7 @@ func TestEventsAreDeliveredSignedInOrderAndOnceAcrossReplicas(t *testing.T) {
 		stopA, handler := b.replica("a", cfg)
 		stopB, _ := b.replica("b", cfg)
 		op := b.client(handler, grant.Claims{Scope: grant.ScopeOperator})
-		repoA, repoB := b.client(handler, grant.Claims{Scope: grant.ScopeMerge, Repo: repoText}), b.client(handler, grant.Claims{Scope: grant.ScopeMerge, Repo: "gh:acme/other"})
+		repoA, repoB := b.client(handler, grant.Claims{Scope: grant.ScopeMerge, Repo: repoText, Refs: []string{"*"}}), b.client(handler, grant.Claims{Scope: grant.ScopeMerge, Repo: "gh:acme/other", Refs: []string{"*"}})
 		ctx := context.Background()
 		for _, path := range []string{"all", "filtered"} {
 			req := api.CreateSubscriptionRequest{URL: "https://recv.invalid/" + path, Secret: secret}
@@ -202,7 +202,7 @@ func TestOldEventsArePrunedAndAnOlderCursorIsRefused(t *testing.T) {
 		b := newBubble(t)
 		stop, handler := b.replica("a", server.EventsConfig{Retention: 24 * time.Hour, Poll: 30 * time.Minute})
 		defer stop()
-		op, merge := b.client(handler, grant.Claims{Scope: grant.ScopeOperator}), b.client(handler, grant.Claims{Scope: grant.ScopeMerge, Repo: repoText})
+		op, merge := b.client(handler, grant.Claims{Scope: grant.ScopeOperator}), b.client(handler, grant.Claims{Scope: grant.ScopeMerge, Repo: repoText, Refs: []string{"*"}})
 		ctx := context.Background()
 		if _, err := merge.SwapRef(ctx, "a", 0, commitA); err != nil {
 			t.Fatal(err)
@@ -230,7 +230,7 @@ func TestAnEventOfThisReplicaIsDeliveredBeforeThePoll(t *testing.T) {
 		b := newBubble(t)
 		stop, handler := b.replica("a", server.EventsConfig{Poll: time.Hour})
 		defer stop()
-		op, merge := b.client(handler, grant.Claims{Scope: grant.ScopeOperator}), b.client(handler, grant.Claims{Scope: grant.ScopeMerge, Repo: repoText})
+		op, merge := b.client(handler, grant.Claims{Scope: grant.ScopeOperator}), b.client(handler, grant.Claims{Scope: grant.ScopeMerge, Repo: repoText, Refs: []string{"*"}})
 		ctx := context.Background()
 		if _, err := op.CreateSubscription(ctx, api.CreateSubscriptionRequest{URL: "https://recv.invalid/all", Secret: secret}); err != nil {
 			t.Fatal(err)

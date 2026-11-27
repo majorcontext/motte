@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"github.com/majorcontext/motte/api"
 	"github.com/majorcontext/motte/client"
 	"github.com/majorcontext/motte/grant"
+	"github.com/majorcontext/motte/testserver"
 )
 
 func TestProtectedRefsAdmitOnlyAMergeGrant(t *testing.T) {
@@ -104,9 +106,26 @@ func TestMergeGrantStaysInItsRepoAndCheckedKey(t *testing.T) {
 	if got, err := e.Client(e.MergeGrant(t, "gh:acme/other")).Ref(ctx, "main"); err != nil || got.Commit != commitA {
 		t.Errorf("a merge grant reads its refs: %v, %v", got, err)
 	}
-	forged := e.mint(e.node, grant.Claims{Scope: grant.ScopeMerge, Repo: repoText})
+	forged := e.mint(e.node, grant.Claims{Scope: grant.ScopeMerge, Repo: repoText, Refs: []string{"*"}})
 	_, err := e.Client(forged).SwapRef(ctx, "main", 0, commitA)
 	refuses(t, err, client.ErrUnauthorized, 401)
+
+	e.want(e.claim("ws1", 1, repoText), 200, "")
+	bare := e.Client(mergeWithoutRefs(e.Server, repoText))
+	_, err = bare.SwapRef(ctx, "main", 0, commitA)
+	refuses(t, err, client.ErrUnauthorized, 401)
+	refuses(t, bare.DeleteRef(ctx, "main", 1), client.ErrUnauthorized, 401)
+	_, err = bare.Land(ctx, repoText, api.LandRequest{Ref: "main", Base: commitA, Head: commitB})
+	refuses(t, err, client.ErrUnauthorized, 401)
+	if _, err := e.Client(e.nodeGrant("ws1", 1)).SwapRef(ctx, "feature/n", 0, commitA); err != nil {
+		t.Errorf("a node grant swap: %v", err)
+	}
+}
+
+// mergeWithoutRefs signs a merge grant that names no refs, which Mint refuses to make.
+func mergeWithoutRefs(s *testserver.Server, repo string) string {
+	payload := base64.RawURLEncoding.EncodeToString(fmt.Appendf(nil, `{"kid":%q,"scope":"merge","repo":%q,"exp":%d}`, s.Operator.Kid, repo, s.Expire.Unix()))
+	return "mg1." + payload + "." + base64.RawURLEncoding.EncodeToString(ed25519.Sign(s.Operator.Key, []byte(payload)))
 }
 
 func TestMainOfANewRepoIsNotProtected(t *testing.T) {

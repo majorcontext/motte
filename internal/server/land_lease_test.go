@@ -77,7 +77,11 @@ func newLeaseBubble(t *testing.T) *leaseBubble {
 	go func() { _ = b.srv.Run(run); close(done) }()
 	b.stopServer = func() { cancel(); <-done; b.srv.Close() }
 	mint := func(s grant.Scope) string {
-		tok, err := grant.Signer{Kid: "cp", Key: key}.Mint(grant.Claims{Scope: s, Repo: repoText, Exp: time.Now().Add(time.Hour).Unix()})
+		c := grant.Claims{Scope: s, Repo: repoText, Exp: time.Now().Add(time.Hour).Unix()}
+		if s == grant.ScopeMerge {
+			c.Refs = []string{"*"}
+		}
+		tok, err := grant.Signer{Kid: "cp", Key: key}.Mint(c)
 		if err != nil {
 			t.Fatal(err)
 		}

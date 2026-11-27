@@ -49,8 +49,8 @@ type Claims struct {
 	Owner   string `json:"owner,omitempty"`
 	Subject string `json:"subject,omitempty"`
 	// Refs are the ref patterns that a merge grant may move: a ref name, or a prefix that ends in "*". A merge grant
-	// with Refs moves only the refs that a pattern matches. A merge grant without Refs moves any ref, until a later
-	// release refuses it. No other scope carries Refs.
+	// moves only the refs that a pattern matches, and a merge grant without Refs is not valid. No other scope carries
+	// Refs.
 	Refs []string `json:"refs,omitempty"`
 	Exp  int64    `json:"exp"`
 }
@@ -58,13 +58,16 @@ type Claims struct {
 // MaxRefs is the most patterns that a grant holds.
 const MaxRefs = 64
 
-// MovesRef reports whether the grant may move the ref name. It is true for a grant with no Refs.
+// MovesRef reports whether a pattern of the grant matches the ref name.
 func (c Claims) MovesRef(name string) bool {
-	return len(c.Refs) == 0 || slices.ContainsFunc(c.Refs, func(p string) bool { return refname.Match(p, name) })
+	return slices.ContainsFunc(c.Refs, func(p string) bool { return refname.Match(p, name) })
 }
 
 func (c Claims) valid() bool {
 	if len(c.Refs) > 0 && (c.Scope != ScopeMerge || len(c.Refs) > MaxRefs || slices.ContainsFunc(c.Refs, func(p string) bool { return !refname.ValidPattern(p) })) {
+		return false
+	}
+	if c.Scope == ScopeMerge && len(c.Refs) == 0 {
 		return false
 	}
 	switch c.Scope {
