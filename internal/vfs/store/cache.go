@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 
 	"go.opentelemetry.io/otel/attribute"
 
@@ -276,16 +277,13 @@ func (c *Cache) writeBlob(s gitpack.SHA, b []byte) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(p), tmpPrefix)
+	tmp, err := createLockedTemp(filepath.Dir(p))
 	if err != nil {
 		return err
 	}
+	defer tmp.Close()
 	if _, err := tmp.Write(b); err != nil {
-		_ = tmp.Close()
 		_ = os.Remove(tmp.Name())
-		return err
-	}
-	if err := tmp.Close(); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp.Name(), p); err != nil {
@@ -293,6 +291,33 @@ func (c *Cache) writeBlob(s gitpack.SHA, b []byte) error {
 	}
 	tier2Written.Add(int64(len(b)))
 	return nil
+}
+
+// createLockedTemp creates a temporary file in dir and holds an exclusive flock on it until the caller closes it. The
+// sweep of the cache removes only a temporary file that it can lock, and the kernel drops the lock of a process that
+// exits, so a file that the sweep can lock has no live writer. The sweep may remove the file between the create and
+// the lock; the writer then starts again.
+func createLockedTemp(dir string) (*os.File, error) {
+	for {
+		f, err := os.CreateTemp(dir, tmpPrefix)
+		if err != nil {
+			return nil, err
+		}
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+			_ = f.Close()
+			_ = os.Remove(f.Name())
+			return nil, err
+		}
+		fi, err := f.Stat()
+		if err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+		if pi, err := os.Stat(f.Name()); err == nil && os.SameFile(fi, pi) {
+			return f, nil
+		}
+		_ = f.Close()
+	}
 }
 
 // ReadBlob returns blob bytes from the node cache.
@@ -304,11 +329,19 @@ func (c *Cache) ReadBlob(ctx context.Context, e Entry) ([]byte, error) {
 	return os.ReadFile(p)
 }
 
-// RemoveStrayTemps removes the temporary files that an earlier process left in dir. It runs before the first read of
-// the cache: a file of a live writer carries the same prefix.
+// RemoveStrayTemps removes the temporary files that a dead writer left in dir. It keeps every temporary file that it
+// cannot lock: a live writer, in this process or another one that shares the cache, holds the lock.
 func RemoveStrayTemps(dir string) {
 	_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
-		if err == nil && !d.IsDir() && strings.HasPrefix(d.Name(), tmpPrefix) {
+		if err != nil || d.IsDir() || !strings.HasPrefix(d.Name(), tmpPrefix) {
+			return nil
+		}
+		f, err := os.Open(p)
+		if err != nil {
+			return nil
+		}
+		defer f.Close()
+		if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil {
 			_ = os.Remove(p)
 		}
 		return nil

@@ -1,10 +1,16 @@
 package store_test
 
 import (
+	"bufio"
 	"context"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/majorcontext/tools/testcount"
 
 	"github.com/majorcontext/motte/internal/gitpack"
 	"github.com/majorcontext/motte/internal/vfs/store"
@@ -87,5 +93,53 @@ func TestRemoveStrayTemps(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "cdef")); err != nil {
 		t.Error(err)
+	}
+}
+
+func TestRemoveStrayTempsOfAMissingDirectoryIsANoOp(t *testing.T) {
+	t.Parallel()
+	store.RemoveStrayTemps(filepath.Join(t.TempDir(), "absent"))
+}
+
+const writerEnv = "MOTTE_TEST_TMP_WRITER"
+
+func init() {
+	if dir := os.Getenv(writerEnv); dir != "" {
+		f, err := store.CreateLockedTempForTest(dir)
+		if err != nil {
+			os.Exit(2)
+		}
+		fmt.Println(f.Name())
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		os.Exit(0)
+	}
+}
+
+// TestRemoveStrayTempsKeepsTheFileOfALiveWriterInAnotherProcess: a sweep that removed the temporary file of a live writer
+// in a second process that shares the node cache would make the rename of that writer fail with ENOENT.
+func TestRemoveStrayTempsKeepsTheFileOfALiveWriterInAnotherProcess(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cmd := testcount.Command(t, os.Args[0])
+	cmd.Env = append(os.Environ(), writerEnv+"="+dir)
+	in, _ := cmd.StdinPipe()
+	out, _ := cmd.StdoutPipe()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	name, err := bufio.NewReader(out).ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	name = strings.TrimSpace(name)
+	store.RemoveStrayTemps(dir)
+	if _, err := os.Stat(name); err != nil {
+		t.Fatal("the sweep removed the file of a live writer")
+	}
+	_ = in.Close()
+	_ = cmd.Wait()
+	store.RemoveStrayTemps(dir)
+	if _, err := os.Stat(name); err == nil {
+		t.Error("the sweep kept the file of a writer that exited")
 	}
 }
