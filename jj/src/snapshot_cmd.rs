@@ -93,6 +93,7 @@ async fn snapshot(
     let ctl = daemon(ws.repo_path()).map_err(cmd_err)?;
     let mount = ws.workspace().workspace_root().to_owned();
     syncfs(&mount).map_err(|e| cmd_err(format!("syncfs on the mount failed: {e}")))?;
+    ctl.prefetch_opheads();
     let pre = ctl.token().map_err(cmd_err)?;
     drop(ws);
     FORCE_FULL.store(force, Ordering::Relaxed);

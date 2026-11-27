@@ -262,3 +262,18 @@ fn a_snapshot_of_a_file_over_16_mib_names_the_file_and_the_limit() {
         "{text}"
     );
 }
+
+#[test]
+fn a_snapshot_reads_the_remote_op_heads_once_and_swaps_them_once() {
+    let f = Fixture::with(FakeDaemon::full());
+    let ws = f.workspace(&files(), &[]);
+    flush(&f, &ws);
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    std::fs::write(ws.mount.join("a"), "one\n").unwrap();
+    f.daemon.state.lock().unwrap().entries = vec![serde_json::json!({"path": "a", "kind": "file"})];
+    let before = f.daemon.ops("opheads");
+    let out = f.jj_env(&ws.mount, &["motte", "snapshot"], &[]);
+    let report: Value = serde_json::from_str(out.lines().last().unwrap()).unwrap();
+    assert_eq!(report["snapshot"], true, "{out}");
+    assert_eq!(f.daemon.ops("opheads") - before, 2, "one read, one swap");
+}

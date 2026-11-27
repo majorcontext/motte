@@ -252,6 +252,11 @@ async fn unflushed(
 /// Sets the remote op heads to `head`, rereading them when another writer wins the swap, and returns
 /// the generation under which `head` is the remote head: the one of the swap, which only grows.
 fn set_remote_head(ctl: &CtlClient, head: &str) -> Result<i64, CommandError> {
+    if let Some((generation, heads)) = ctl.last_opheads()
+        && heads == [head]
+    {
+        return Ok(generation);
+    }
     loop {
         let (generation, heads) = ctl.opheads(None).map_err(cmd_err)?;
         if heads == [head] {

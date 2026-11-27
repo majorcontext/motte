@@ -3,7 +3,7 @@
 
 mod wire;
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::Debug;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -103,6 +103,12 @@ pub trait ObjectStore: Send + Sync + Debug {
         objects.iter().map(|(k, d)| self.put(*k, d)).collect()
     }
 }
+
+/// The op heads that the last successful `opheads` call of this process saw for each socket, and
+/// the read that `prefetch_opheads` made ahead of the swap.
+type Seen = Mutex<BTreeMap<PathBuf, (i64, Vec<String>)>>;
+static LAST_OPHEADS: Seen = Mutex::new(BTreeMap::new());
+static PREFETCHED: Seen = Mutex::new(BTreeMap::new());
 
 pub fn hash_object(kind: Kind, data: &[u8]) -> gix::ObjectId {
     gix::objs::compute_hash(HASH_KIND, kind, data).expect("sha1 hashing cannot fail")
@@ -385,7 +391,32 @@ impl CtlClient {
             }
             other => other?,
         };
+        LAST_OPHEADS
+            .lock()
+            .unwrap()
+            .insert(self.path.clone(), (reply.generation, reply.heads.clone()));
         Ok((reply.generation, reply.heads))
+    }
+
+    /// The generation and heads that this process last read or swapped, if any.
+    pub fn last_opheads(&self) -> Option<(i64, Vec<String>)> {
+        LAST_OPHEADS.lock().unwrap().get(&self.path).cloned()
+    }
+
+    /// Reads the remote op heads on a thread, so that the swap of the next op-heads update finds
+    /// them. A stale read only costs the swap its retry: the swap is a compare-and-swap.
+    pub fn prefetch_opheads(&self) {
+        let c = CtlClient::new(self.path.clone());
+        std::thread::spawn(move || {
+            if let Ok(seen) = c.opheads(None) {
+                PREFETCHED.lock().unwrap().insert(c.path.clone(), seen);
+            }
+        });
+    }
+
+    /// The read of `prefetch_opheads`, once.
+    pub fn take_prefetched_opheads(&self) -> Option<(i64, Vec<String>)> {
+        PREFETCHED.lock().unwrap().remove(&self.path)
     }
 
     /// Records the head operation and the mount commit of the workspace with the control plane. A

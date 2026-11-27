@@ -195,7 +195,12 @@ impl OpHeadsStore for MotteOpHeadsStore {
         let remote = match &ctl {
             Some(c) => {
                 let c = c.clone();
-                match within(deadline, move || c.opheads(None)).map_err(write_err)? {
+                match within(deadline, move || {
+                    c.take_prefetched_opheads()
+                        .map_or_else(|| c.opheads(None), Ok)
+                })
+                .map_err(write_err)?
+                {
                     Mirrored::Done(r) => Some(r),
                     Mirrored::Behind => {
                         behind = true;
