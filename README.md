@@ -19,7 +19,7 @@ The store service, the client, the workspace daemon and the jj backend exist. Ea
 
 ## Run locally
 
-Run motte with no other service: `go test ./...` runs the tests that need no database, and the section Run locally of `docs/architecture.md` starts the service on SQLite and a directory. The service serves TLS when `MOTTE_TLS_CERT` and `MOTTE_TLS_KEY` are set, and runs behind any reverse proxy or tunnel otherwise.
+Run motte with no other service: `go test ./...` runs the tests and can start PostgreSQL from local binaries, and the section Run locally of `docs/architecture.md` starts the service on SQLite and a directory. The service serves TLS when `MOTTE_TLS_CERT` and `MOTTE_TLS_KEY` are set, and runs behind any reverse proxy or tunnel otherwise.
 
 Read `docs/architecture.md` for the design. Read `AGENTS.md` before you change the repository.
 
