@@ -85,6 +85,8 @@ pub struct State {
     pub reads_inflight: HashMap<String, usize>,
     /// The most delayed reads of each op in flight at once.
     pub reads_peak: HashMap<String, usize>,
+    /// The most delayed reads of any op in flight at once.
+    pub reads_peak_all: usize,
 }
 
 pub struct FakeDaemon {
@@ -431,6 +433,8 @@ fn serve(conn: UnixStream, state: Arc<Mutex<State>>) {
                 .or_insert(1);
             let peak = st.reads_peak.entry(op.clone()).or_default();
             *peak = (*peak).max(n);
+            let all = st.reads_inflight.values().sum();
+            st.reads_peak_all = st.reads_peak_all.max(all);
             drop(st);
             std::thread::sleep(delay);
             st = state.lock().unwrap();

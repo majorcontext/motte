@@ -153,6 +153,29 @@ fn a_restore_reads_the_op_log_and_the_commits_at_once() {
     assert_eq!(log.lines().count(), 15, "{log}");
 }
 
+/// Catches a restore that reads on more connections than the caller allowed: a caller lowers the
+/// width when many workspaces wake at once.
+#[test]
+fn a_restore_reads_on_no_more_connections_than_its_prefetch_width() {
+    let f = Fixture::with(FakeDaemon::full());
+    let ws = f.workspace(&files(), &[]);
+    for _ in 0..6 {
+        f.jj(&ws.mount, &["new"]);
+    }
+    let out = flush(&f, &ws);
+    let (mount, root) = (mount_of(&f, "mount2"), f.dir.path().join("root2"));
+    let mut args = restore_args(&f, &ws, &out, &mount, &root);
+    args.extend(["--prefetch-width".to_owned(), "1".to_owned()]);
+    f.daemon.state.lock().unwrap().read_delay_ms = 20;
+    f.jj_env(
+        &mount,
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
+        &[],
+    );
+    let all = f.daemon.state.lock().unwrap().reads_peak_all;
+    assert_eq!(all, 1, "{all} reads were in flight at once");
+}
+
 fn restore_args(
     f: &Fixture,
     ws: &Workspace,

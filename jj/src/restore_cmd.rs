@@ -63,8 +63,22 @@ pub(crate) struct RestoreArgs {
     /// Commit that the workspace was initialized on, whose parents the store does not serve
     #[arg(long)]
     base: String,
+    /// Daemon connections that the restore reads on at once [default: $MOTTE_RESTORE_PREFETCH, or
+    /// 64]
+    #[arg(long)]
+    prefetch_width: Option<usize>,
     #[command(flatten)]
     origin: OriginArgs,
+}
+
+/// The daemon connections that a restore reads on at once: the flag, else the environment variable
+/// `MOTTE_RESTORE_PREFETCH`, else 64. A variable that is no number counts as unset, and 0 counts
+/// as 1. The caller lowers it without a release when many workspaces
+/// wake at once and the store needs the load spread out.
+fn prefetch_width(flag: Option<usize>) -> usize {
+    flag.or_else(|| std::env::var("MOTTE_RESTORE_PREFETCH").ok()?.parse().ok())
+        .unwrap_or(DEFAULT_PREFETCH_WIDTH)
+        .max(1)
 }
 
 pub(crate) async fn restore(
@@ -91,12 +105,13 @@ pub(crate) async fn restore(
         .write(ui, helper, workspace.repo_path(), &args.base)?;
 
     let repo_path = workspace.repo_path().to_owned();
-    let mut early = prefetch(&ctl, &repo, &head)?;
+    let width = prefetch_width(args.prefetch_width);
+    let mut early = prefetch(&ctl, &repo, &head, width)?;
     let mut view_heads = HashSet::new();
     let fetched = fetch_op_log(&ctl, &repo, &repo_path, &head, &mut early, &mut view_heads).await?;
     drop(early);
     let view_heads: Vec<CommitId> = view_heads.into_iter().collect();
-    native(&repo)?.prefetch_commits(&view_heads, PREFETCH_WORKERS);
+    native(&repo)?.prefetch_commits(&view_heads, width);
     let heads = repo_path.join("op_heads").join("heads");
     for entry in std::fs::read_dir(&heads).map_err(cmd_err)? {
         std::fs::remove_file(entry.map_err(cmd_err)?.path()).map_err(cmd_err)?;
@@ -118,8 +133,9 @@ pub(crate) async fn restore(
     Ok(())
 }
 
-/// Daemon connections that a restore reads on at once.
-const PREFETCH_WORKERS: usize = 16;
+/// Daemon connections that a restore reads on at once unless the caller sets it. A restore reads
+/// one object for each operation, view and commit, at about one store round trip each.
+const DEFAULT_PREFETCH_WIDTH: usize = 64;
 
 /// The most bytes of op log objects that a restore holds before it writes them.
 const PREFETCH_BYTES: usize = 64 << 20;
@@ -133,20 +149,25 @@ fn native(repo: &ReadonlyRepo) -> Result<&NativeBackend, CommandError> {
 type Early = HashMap<(&'static str, String), Vec<u8>>;
 
 /// Reads the restore list of `head`, then its commits into the commit cache of the backend and
-/// its op log objects into the returned map, all at once. A head flushed without a list reads
+/// its op log objects into the returned map, all at once, on `width` connections between them. A head flushed without a list reads
 /// nothing here.
 fn prefetch(
     ctl: &CtlClient,
     repo: &ReadonlyRepo,
     head: &OperationId,
+    width: usize,
 ) -> Result<Early, CommandError> {
     let Some(list) = get_restore_list(ctl, &head.hex()).map_err(cmd_err)? else {
         return Ok(Early::new());
     };
     let backend = native(repo)?;
+    if width < 2 {
+        backend.prefetch_commits(&list.commits, 1);
+        return Ok(prefetch_ops(ctl, &list.ops, 1, PREFETCH_BYTES));
+    }
     Ok(std::thread::scope(|scope| {
-        scope.spawn(|| backend.prefetch_commits(&list.commits, PREFETCH_WORKERS));
-        prefetch_ops(ctl, &list.ops, PREFETCH_WORKERS, PREFETCH_BYTES)
+        scope.spawn(|| backend.prefetch_commits(&list.commits, width / 2));
+        prefetch_ops(ctl, &list.ops, width - width / 2, PREFETCH_BYTES)
     }))
 }
 
