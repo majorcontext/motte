@@ -139,6 +139,18 @@ struct Batch {
 static DEFERRED: Mutex<BTreeMap<PathBuf, Batch>> = Mutex::new(BTreeMap::new());
 static FLUSHING: Mutex<()> = Mutex::new(());
 
+/// Sends what every socket still defers. A command runs it when it ends, so that no object that it
+/// wrote dies with the process when the command wrote no operation, which is what sends them
+/// otherwise. A failure is a warning, because the command has already reported its outcome.
+pub fn flush_all_deferred() {
+    let paths: Vec<PathBuf> = DEFERRED.lock().unwrap().keys().cloned().collect();
+    for path in paths {
+        if let Err(e) = CtlClient::new(&path).flush_deferred() {
+            eprintln!("warning: cannot store the objects that this command wrote: {e}");
+        }
+    }
+}
+
 /// The most bytes and objects that one socket defers; past it an object goes to the daemon now.
 const DEFER_BYTES: usize = 4 << 20;
 const DEFER_OBJECTS: usize = 1024;

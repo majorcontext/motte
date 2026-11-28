@@ -41,6 +41,7 @@ pub(crate) async fn flush(ui: &mut Ui, helper: &CommandHelper) -> Result<(), Com
     for _ in 0..FLUSH_TRIES {
         let ws = helper.workspace_helper(ui).await?;
         if let Some(published) = publish(&ws, &ctl, helper.settings(), false).await? {
+            verify_mount(&ctl, &published.commit)?;
             writeln!(
                 ui.stdout(),
                 "{}",
@@ -52,6 +53,77 @@ pub(crate) async fn flush(ui: &mut Ui, helper: &CommandHelper) -> Result<(), Com
     Err(cmd_err(format!(
         "the op head moved during each of {FLUSH_TRIES} tries of the flush"
     )))
+}
+
+/// Fails unless the store holds the mount commit and its tree. A caller trusts a flush to delete
+/// the only other copy of the workspace, and a mount of a commit whose tree the store lacks fails.
+/// A daemon without the `has` op skips the tree check.
+fn verify_mount(ctl: &CtlClient, commit: &str) -> Result<(), CommandError> {
+    let oid = gix::ObjectId::from_hex(commit.as_bytes()).map_err(cmd_err)?;
+    let (_, raw) = ctl.get(&oid).map_err(cmd_err)?;
+    let tree =
+        gix::ObjectId::from_hex(crate::init_cmd::commit_tree(&raw)?.as_bytes()).map_err(cmd_err)?;
+    match ctl.has(&[tree]) {
+        Ok(present) if present == [true] => Ok(()),
+        Ok(_) => Err(cmd_err(format!(
+            "the store lacks tree {tree} of the mount commit {commit}"
+        ))),
+        Err(e) if e.is(&Code::UnknownOp) => Ok(()),
+        Err(e) => Err(cmd_err(e)),
+    }
+}
+
+#[derive(clap::Args, Clone, Debug)]
+pub(crate) struct RematerializeArgs {
+    /// A mount commit that a flush of a conflicted working copy stored
+    #[arg(long)]
+    commit: String,
+}
+
+/// Stores again the tree with conflict markers that the mount commit `commit` names, from the
+/// working-copy commit that its message names. Any workspace of the repository can run it. The
+/// tree is rebuilt with the settings of this workspace, and the command fails when it comes out
+/// different from the one that the commit names.
+pub(crate) async fn rematerialize(
+    ui: &mut Ui,
+    helper: &CommandHelper,
+    args: RematerializeArgs,
+) -> Result<(), CommandError> {
+    let ws = helper.workspace_helper_no_snapshot(ui).await?;
+    let ctl = daemon(ws.repo_path()).map_err(cmd_err)?;
+    let oid = gix::ObjectId::from_hex(args.commit.as_bytes()).map_err(cmd_err)?;
+    let (_, raw) = ctl.get(&oid).map_err(cmd_err)?;
+    let named = crate::init_cmd::commit_tree(&raw)?.to_owned();
+    let text = String::from_utf8_lossy(&raw);
+    let wc_hex = text
+        .lines()
+        .find_map(|l| l.strip_prefix("materialized working copy "))
+        .ok_or_else(|| cmd_err("the commit is no mount commit of a conflicted working copy"))?;
+    let wc_id = CommitId::try_from_hex(wc_hex).ok_or_else(|| cmd_err("bad commit id"))?;
+    let store = ws.repo().store();
+    let wc = store.get_commit_async(&wc_id).await.map_err(cmd_err)?;
+    let tree = materialized_tree(store, &wc.tree(), helper.settings())
+        .await
+        .map_err(cmd_err)?;
+    store
+        .backend_impl::<NativeBackend>()
+        .ok_or_else(|| cmd_err("this repo has no native backend"))?
+        .object_store()
+        .flush_deferred()
+        .map_err(cmd_err)?;
+    if tree.hex() != named {
+        return Err(cmd_err(format!(
+            "rebuilt tree {} differs from tree {named} of the commit; set the conflict marker style of the workspace that flushed it",
+            tree.hex()
+        )));
+    }
+    verify_mount(&ctl, &args.commit)?;
+    writeln!(
+        ui.stdout(),
+        "stored tree {named} of mount commit {}",
+        args.commit
+    )?;
+    Ok(())
 }
 
 pub(crate) struct Published {
@@ -329,6 +401,15 @@ async fn mount_commit(
     }
     let tree = materialized_tree(repo.store(), &wc.tree(), settings)
         .await
+        .map_err(cmd_err)?;
+    // The backend defers the blobs and trees that it writes until an operation or a view is
+    // written, and a flush writes neither: without this the commit would name a tree that the
+    // daemon never got.
+    repo.store()
+        .backend_impl::<NativeBackend>()
+        .ok_or_else(|| cmd_err("this repo has no native backend"))?
+        .object_store()
+        .flush_deferred()
         .map_err(cmd_err)?;
     let body = format!(
         "tree {}\nauthor motte <motte@invalid> 0 +0000\ncommitter motte <motte@invalid> 0 +0000\n\nmaterialized working copy {}\n",

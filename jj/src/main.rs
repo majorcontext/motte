@@ -56,6 +56,8 @@ enum MotteCommand {
     Snapshot(snapshot_cmd::SnapshotArgs),
     /// Rebuild the .jj of a workspace from the op log in the store
     Restore(restore_cmd::RestoreArgs),
+    /// Store again the tree with conflict markers that a mount commit names
+    Rematerialize(publish_cmd::RematerializeArgs),
     /// Link the .jj under a root into a new mount of the working-copy commit of its op head
     Attach(restore_cmd::AttachArgs),
     /// Print the work-tree diff for harness as JSON, read-only: no snapshot, no operation
@@ -87,6 +89,7 @@ async fn run_custom_command(
         MotteCommand::Init(args) => init_cmd::init(ui, helper, args).await,
         MotteCommand::Verify => verify_cmd::verify(ui, helper).await,
         MotteCommand::Flush => publish_cmd::flush(ui, helper).await,
+        MotteCommand::Rematerialize(args) => publish_cmd::rematerialize(ui, helper, args).await,
         MotteCommand::Sync(args) => publish_cmd::sync(ui, helper, args).await,
         MotteCommand::Snapshot(args) => snapshot_cmd::run(ui, helper, args).await,
         MotteCommand::Restore(args) => restore_cmd::restore(ui, helper, args).await,
@@ -153,6 +156,7 @@ fn main() -> std::process::ExitCode {
         .add_subcommand(run_custom_command)
         .add_dispatch_hook(command_lock::hook)
         .run();
+    motte_jj::ctl::flush_all_deferred();
     motte_jj::trace::shutdown();
     code.into()
 }

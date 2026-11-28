@@ -462,6 +462,39 @@ fn a_native_fetch_keeps_a_local_commit_with_an_immutable_descendant() {
     assert!(!text.contains("landed as"), "{text}");
 }
 
+/// Catches a conflicted flush whose mount commit names a tree that the store lacks, and a
+/// rematerialize that does not store it again.
+#[test]
+fn a_flush_of_a_conflicted_working_copy_stores_every_object_of_its_mount_commit() {
+    let f = Fixture::with(FakeDaemon::full());
+    let ws = native(&f);
+    bookmark(&f, &ws, "x", "x");
+    f.jj(&ws.mount, &["new", &ws.commit]);
+    bookmark(&f, &ws, "o", "o");
+    f.jj(&ws.mount, &["new", "x", "o"]);
+    let out = f.jj(&ws.mount, &["motte", "flush"]);
+    let commit = &out.rsplit("\"commit\":\"").next().unwrap()[..40];
+    let tree = walk_stored(&f, commit);
+    f.daemon.state.lock().unwrap().objects.remove(&tree);
+    f.jj(&ws.mount, &["motte", "rematerialize", "--commit", commit]);
+    walk_stored(&f, commit);
+}
+
+/// Requires every object that `commit` reaches in the store of the daemon, and returns its tree.
+fn walk_stored(f: &Fixture, commit: &str) -> String {
+    let st = f.daemon.state.lock().unwrap();
+    let root = String::from_utf8_lossy(&st.objects[commit].1[5..45]).into_owned();
+    let mut todo = vec![root.clone()];
+    while let Some(id) = todo.pop() {
+        let (kind, data) = st.objects.get(&id).expect("the store holds the object");
+        if kind == "tree" {
+            let tree = gix::objs::TreeRef::from_bytes(data, gix::hash::Kind::Sha1).unwrap();
+            todo.extend(tree.entries.iter().map(|e| e.oid.to_string()));
+        }
+    }
+    root
+}
+
 #[test]
 fn a_native_push_of_more_than_1000_new_commits_is_refused() {
     let f = Fixture::with(FakeDaemon::full());
