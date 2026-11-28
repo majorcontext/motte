@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use common::{FakeDaemon, Fixture, Workspace, write_tree};
+use motte_jj::head_index;
 use serde_json::Value;
 
 fn files() -> BTreeMap<&'static str, &'static str> {
@@ -132,7 +133,11 @@ fn a_restore_reads_the_op_log_and_the_commits_at_once() {
     let out = flush(&f, &ws);
     let (mount, root) = (mount_of(&f, "mount2"), f.dir.path().join("root2"));
     let args = restore_args(&f, &ws, &out, &mount, &root);
-    f.daemon.state.lock().unwrap().read_delay_ms = 20;
+    let mut st = f.daemon.state.lock().unwrap();
+    st.op_objects
+        .retain(|_, d| !d.starts_with(b"motte head index"));
+    st.read_delay_ms = 20;
+    drop(st);
     let text = f.jj_env(
         &mount,
         &args.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -193,9 +198,139 @@ fn a_restore_traces_each_phase() {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     f.jj_env(&mount, &args, &[("OTEL_EXPORTER_OTLP_ENDPOINT", &url)]);
     let body = String::from_utf8_lossy(&posts.recv().unwrap()).into_owned();
-    for phase in "init list prefetch op_walk view_heads index adopt".split(' ') {
+    for phase in "init record head view_heads index adopt".split(' ') {
         assert!(body.contains(&format!("jj.restore.{phase}")), "{phase}");
     }
+}
+
+/// Catches a restore whose reads grow with the op log, one or more for each operation: a box that
+/// wakes after a long life must wake as fast as a new one.
+#[test]
+fn a_restore_does_not_read_each_operation_of_a_long_op_log() {
+    let f = Fixture::with(FakeDaemon::full());
+    let ws = f.workspace(&files(), &[]);
+    let reads = |name: &str| {
+        let (mount, root) = (
+            mount_of(&f, name),
+            f.dir.path().join(format!("{name}-root")),
+        );
+        let args = restore_args(&f, &ws, &flush(&f, &ws), &mount, &root);
+        let before = f.daemon.ops("get") + f.daemon.ops("getop");
+        f.jj_env(
+            &mount,
+            &args.iter().map(String::as_str).collect::<Vec<_>>(),
+            &[],
+        );
+        (f.daemon.ops("get") + f.daemon.ops("getop") - before, mount)
+    };
+    let (short, _) = reads("short");
+    for _ in 0..24 {
+        f.jj(&ws.mount, &["new"]);
+    }
+    let (long, mount) = reads("long");
+    // jj keeps the index as a chain of about log2(commits) segments, read in one parallel round.
+    assert!(
+        long <= short + 3,
+        "{short} reads became {long} after 24 more operations"
+    );
+    let ops = || {
+        f.jj_env(
+            &mount,
+            &["op", "log", "--no-graph", "-T", "id ++ \"\\n\""],
+            &[],
+        )
+    };
+    let log = ops();
+    assert!(
+        log.lines().count() > 24,
+        "the older operations are not readable: {log}"
+    );
+    let restored = |name: &str| {
+        let (m, root) = (
+            mount_of(&f, name),
+            f.dir.path().join(format!("{name}-root")),
+        );
+        let args = restore_args(&f, &ws, &flush(&f, &ws), &m, &root);
+        f.jj_env(
+            &m,
+            &args.iter().map(String::as_str).collect::<Vec<_>>(),
+            &[],
+        );
+        m
+    };
+    let gc = f.jj_try(&restored("gc"), &["util", "gc"], &[]);
+    assert!(gc.0, "gc failed after a restore of the head: {}", gc.1);
+    let key = (
+        "operations".to_owned(),
+        log.lines().nth(20).unwrap().to_owned(),
+    );
+    let good = f
+        .daemon
+        .state
+        .lock()
+        .unwrap()
+        .op_objects
+        .insert(key.clone(), b"junk".to_vec());
+    let fresh = restored("fresh");
+    let probe = || {
+        f.jj_try(&fresh, &["op", "log", "--no-graph", "-T", "id"], &[])
+            .0
+    };
+    assert!(!probe(), "junk bytes were read as an operation");
+    f.daemon
+        .state
+        .lock()
+        .unwrap()
+        .op_objects
+        .insert(key, good.unwrap());
+    assert!(probe(), "the read did not retry after junk bytes");
+}
+
+/// Catches a restore that trusts a record of another head, or a chain that the store does not
+/// hold whole: either would load an index that lacks commits of the head, or make jj rebuild it from
+/// the whole op log. Both must restore by the walk instead.
+#[test]
+fn a_restore_walks_the_op_log_when_the_index_record_does_not_fit_the_head() {
+    let f = Fixture::with(FakeDaemon::full());
+    let ws = f.workspace(&files(), &[]);
+    let old = flush(&f, &ws);
+    for _ in 0..4 {
+        f.jj(&ws.mount, &["new"]);
+    }
+    let out = flush(&f, &ws);
+    let (head, earlier) = (out["op"].as_str().unwrap(), old["op"].as_str().unwrap());
+    let key = |op: &str| ("views".to_owned(), head_index::record_name(op));
+    let restore = |name: &str| {
+        let (mount, root) = (
+            mount_of(&f, name),
+            f.dir.path().join(format!("{name}-root")),
+        );
+        let args = restore_args(&f, &ws, &out, &mount, &root);
+        let text = f.jj_env(
+            &mount,
+            &args.iter().map(String::as_str).collect::<Vec<_>>(),
+            &[],
+        );
+        assert!(text.contains("walks the op log"), "{text}");
+        let log = f.jj_env(
+            &mount,
+            &["log", "--no-graph", "-T", "commit_id ++ \"\\n\""],
+            &[],
+        );
+        assert_eq!(log.lines().count(), 7, "{log}");
+    };
+    let mut st = f.daemon.state.lock().unwrap();
+    let theirs = st.op_objects[&key(earlier)].clone();
+    let ours = st.op_objects.insert(key(head), theirs).unwrap();
+    drop(st);
+    restore("other-record");
+    let segment = String::from_utf8_lossy(&ours).lines().last().unwrap()[8..].to_owned();
+    let mut st = f.daemon.state.lock().unwrap();
+    st.op_objects.insert(key(head), ours);
+    st.op_objects
+        .remove(&("views".to_owned(), head_index::segment_name(&segment)));
+    drop(st);
+    restore("missing-segment");
 }
 
 fn restore_args(

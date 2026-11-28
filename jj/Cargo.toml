@@ -20,6 +20,7 @@ jj-cli = { version = "=0.47.1", default-features = false, features = ["git"] }
 gix = { version = "=0.90.0", default-features = false, features = ["sha1"] }
 async-trait = "0.1"
 base64 = "0.22"
+blake2 = "0.11"
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
 itertools = "0.15"

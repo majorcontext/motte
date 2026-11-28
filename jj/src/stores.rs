@@ -52,15 +52,92 @@ fn local_only() -> bool {
 }
 pub const OP_HEADS_NAME: &str = "motte-op-heads";
 
+/// An op log object that the daemon sent, in a scratch op store of its own until it is checked:
+/// bytes that do not decode, or do not hash to their ID, never reach the op store.
+struct Scratch {
+    store: SimpleOpStore,
+    file: PathBuf,
+    target: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+impl Scratch {
+    /// Moves the file into the op store when `object`, decoded from it, hashes to `id`.
+    fn publish<T: jj_lib::content_hash::ContentHash>(
+        &self,
+        object: &T,
+        id: &[u8],
+    ) -> OpStoreResult<()> {
+        if jj_lib::content_hash::blake2b_hash(object).as_slice() != id {
+            return Err(OpStoreError::Other(
+                format!(
+                    "the daemon sent bytes that are not {}",
+                    self.target.display()
+                )
+                .into(),
+            ));
+        }
+        std::fs::rename(&self.file, &self.target).map_err(|e| OpStoreError::Other(e.into()))
+    }
+}
+
 #[derive(Debug)]
-pub struct MotteOpStore(SimpleOpStore, PathBuf);
+pub struct MotteOpStore(SimpleOpStore, PathBuf, RootOperationData);
 
 impl MotteOpStore {
     pub fn init(path: &Path, root: RootOperationData) -> Result<Self, BackendInitError> {
-        Ok(Self(SimpleOpStore::init(path, root)?, path.to_owned()))
+        Ok(Self(
+            SimpleOpStore::init(path, root.clone())?,
+            path.to_owned(),
+            root,
+        ))
     }
     pub fn load(path: &Path, root: RootOperationData) -> Self {
-        Self(SimpleOpStore::load(path, root), path.to_owned())
+        Self(
+            SimpleOpStore::load(path, root.clone()),
+            path.to_owned(),
+            root,
+        )
+    }
+
+    /// Reads an object of the op log that this repo lacks from the daemon into a scratch op store
+    /// beside this one: a restore of the head only fetches the head, and a command that walks the op
+    /// log, such as `jj op log`, reads the older operations and views here when it reaches them.
+    /// `None` when there is no daemon or it lacks the object; the caller then reads the local store,
+    /// which reports the absence.
+    fn fetch(&self, kind: &'static str, hex: &str) -> OpStoreResult<Option<Scratch>> {
+        let Some(sock) = self
+            .1
+            .parent()
+            .and_then(|repo| socket_path(&repo.join("store")).ok())
+        else {
+            return Ok(None);
+        };
+        let other = |e: String| OpStoreError::Other(e.into());
+        let data = match CtlClient::new(sock).getop(kind, hex) {
+            Ok(data) => data,
+            Err(e) if e.is(&Code::NotFound) => return Ok(None),
+            Err(e) => {
+                return Err(other(format!(
+                    "cannot read {kind}/{hex} from the daemon: {e}"
+                )));
+            }
+        };
+        let dir = tempfile::Builder::new()
+            .prefix(".motte-fetch")
+            .tempdir_in(&self.1)
+            .map_err(|e| other(e.to_string()))?;
+        for sub in ["operations", "views"] {
+            std::fs::create_dir(dir.path().join(sub)).map_err(|e| other(e.to_string()))?;
+        }
+        let file = dir.path().join(kind).join(hex);
+        std::fs::write(&file, data).map_err(|e| other(e.to_string()))?;
+        Ok(Some(Scratch {
+            store: SimpleOpStore::load(dir.path(), self.2.clone()),
+            file,
+            target: self.1.join(kind).join(hex),
+            _dir: dir,
+        }))
     }
 
     /// Sends the objects that the backend deferred. It runs before a view or an operation is
@@ -90,14 +167,32 @@ impl OpStore for MotteOpStore {
         self.0.root_operation_id()
     }
     async fn read_view(&self, id: &ViewId) -> OpStoreResult<View> {
-        self.0.read_view(id).await
+        match self.0.read_view(id).await {
+            Err(OpStoreError::ObjectNotFound { .. }) => {}
+            other => return other,
+        }
+        let Some(scratch) = self.fetch("views", &id.hex())? else {
+            return self.0.read_view(id).await;
+        };
+        let view = scratch.store.read_view(id).await?;
+        scratch.publish(&view, id.as_bytes())?;
+        Ok(view)
     }
     async fn write_view(&self, contents: &View) -> OpStoreResult<ViewId> {
         self.flush_objects()?;
         self.0.write_view(contents).await
     }
     async fn read_operation(&self, id: &OperationId) -> OpStoreResult<Operation> {
-        self.0.read_operation(id).await
+        match self.0.read_operation(id).await {
+            Err(OpStoreError::ObjectNotFound { .. }) => {}
+            other => return other,
+        }
+        let Some(scratch) = self.fetch("operations", &id.hex())? else {
+            return self.0.read_operation(id).await;
+        };
+        let op = scratch.store.read_operation(id).await?;
+        scratch.publish(&op, id.as_bytes())?;
+        Ok(op)
     }
     async fn write_operation(&self, contents: &Operation) -> OpStoreResult<OperationId> {
         self.flush_objects()?;
@@ -110,6 +205,19 @@ impl OpStore for MotteOpStore {
         self.0.resolve_operation_id_prefix(prefix).await
     }
     async fn gc(&self, head_ids: &[OperationId], keep_newer: SystemTime) -> OpStoreResult<()> {
+        // The collector of the simple store walks the reachable operations with local reads
+        // only, and a restore of the head alone left the older ones in the store.
+        let root = self.root_operation_id().clone();
+        let mut seen = std::collections::HashSet::new();
+        let mut todo = head_ids.to_vec();
+        while let Some(id) = todo.pop() {
+            if id == root || !seen.insert(id.clone()) {
+                continue;
+            }
+            let op = self.read_operation(&id).await?;
+            self.read_view(&op.view_id).await?;
+            todo.extend(op.parents);
+        }
         self.0.gc(head_ids, keep_newer).await
     }
 }

@@ -15,6 +15,7 @@ use jj_lib::repo::{ReadonlyRepo, Repo as _};
 use jj_lib::revset::ResolvedRevsetExpression;
 use motte_jj::backend::NativeBackend;
 use motte_jj::ctl::{Code, CtlClient, ObjectStore, StoreError};
+use motte_jj::head_index;
 use motte_jj::stores::{
     FLUSHED_FILE, MIRROR_BUDGET, Mirrored, RESTORE_LIST_MAX, RestoreList, UNSYNCED_FILE,
     clear_drained, clear_unsynced, merge_remote, put_ops, put_restore_list, put_shallow,
@@ -42,6 +43,14 @@ pub(crate) async fn flush(ui: &mut Ui, helper: &CommandHelper) -> Result<(), Com
         let ws = helper.workspace_helper(ui).await?;
         if let Some(published) = publish(&ws, &ctl, helper.settings(), false).await? {
             verify_mount(&ctl, &published.commit)?;
+            if published.index.is_some()
+                && head_index::get(&ctl, &published.head).map_err(cmd_err)? != published.index
+            {
+                return Err(cmd_err(format!(
+                    "the store lacks the commit index of operation {}",
+                    published.head
+                )));
+            }
             writeln!(
                 ui.stdout(),
                 "{}",
@@ -133,6 +142,8 @@ pub(crate) struct Published {
     pub reported: bool,
     /// The op-heads generation under which `head` is the remote head.
     pub generation: i64,
+    /// The commit index of `head` that the store got, if any.
+    pub index: Option<head_index::HeadIndex>,
 }
 
 /// Stores the op log and the working copy of the loaded head, sets the remote op head to it and
@@ -162,10 +173,19 @@ pub(crate) async fn publish(
         .ok_or_else(|| cmd_err("this repo has no native backend"))?
         .shallow_roots()
         .map_err(cmd_err)?;
-    let list = restore_list(&repo).await?;
+    let list = restore_list(&repo, ws.repo_path()).await?;
+    let repo_path = ws.repo_path().to_owned();
+    let index_dir = repo_path.join("index");
+    let view = repo.operation().view_id().hex();
+    let index = head_index::local(&index_dir, &head, &view).map_err(cmd_err)?;
     let (ops, shallow, listed) = std::thread::scope(|scope| {
         let shallow = scope.spawn(|| put_shallow(ctl, &head, &roots));
-        let listed = scope.spawn(|| put_restore_list(ctl, &head, &list));
+        let listed = scope.spawn(|| {
+            put_restore_list(ctl, &head, &list)?;
+            index.as_ref().map_or(Ok(()), |index| {
+                head_index::put(ctl, &index_dir, &repo_path, &head, index)
+            })
+        });
         let ops = put_ops(ctl, ws.repo_path(), &pending, None);
         let joined = |r: std::thread::Result<Result<(), StoreError>>, what: &str| {
             r.unwrap_or_else(|_| Err(StoreError::Local(format!("the {what} upload panicked"))))
@@ -200,6 +220,7 @@ pub(crate) async fn publish(
         commit,
         reported,
         generation,
+        index,
     }))
 }
 
@@ -207,8 +228,12 @@ pub(crate) async fn publish(
 /// ancestors of its visible heads, newest first, each cut at `RESTORE_LIST_MAX`. The walk of the
 /// ancestors stops at the cut, so the cost of a flush does not grow with the index. The hidden heads
 /// of earlier operations are in their views, which a restore reads from the list.
-async fn restore_list(repo: &Arc<ReadonlyRepo>) -> Result<RestoreList, CommandError> {
+async fn restore_list(
+    repo: &Arc<ReadonlyRepo>,
+    repo_path: &Path,
+) -> Result<RestoreList, CommandError> {
     let root = repo.op_store().root_operation_id().clone();
+    let ops_dir = repo_path.join("op_store").join("operations");
     let mut ops = Vec::new();
     let mut seen = HashSet::new();
     let mut todo = VecDeque::from([repo.op_id().clone()]);
@@ -217,6 +242,11 @@ async fn restore_list(repo: &Arc<ReadonlyRepo>) -> Result<RestoreList, CommandEr
             break;
         }
         if id == root || !seen.insert(id.clone()) {
+            continue;
+        }
+        // A restore of the head alone leaves the older operations in the store; reading one here
+        // would fetch the whole op log, one round trip after another.
+        if !ops_dir.join(id.hex()).exists() {
             continue;
         }
         let op = repo.op_store().read_operation(&id).await.map_err(cmd_err)?;

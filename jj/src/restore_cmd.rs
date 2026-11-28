@@ -13,7 +13,8 @@ use jj_lib::ref_name::WorkspaceName;
 use jj_lib::repo::{ReadonlyRepo, Repo as _};
 use jj_lib::workspace::Workspace;
 use motte_jj::backend::NativeBackend;
-use motte_jj::ctl::{CtlClient, ObjectStore as _};
+use motte_jj::ctl::{CtlClient, ObjectStore as _, StoreError};
+use motte_jj::head_index;
 use motte_jj::stores::{
     FLUSHED_FILE, LocalOnly, RESTORE_LIST_MAX, get_restore_list, get_shallow, prefetch_ops,
 };
@@ -112,12 +113,7 @@ pub(crate) async fn restore(
 
     let repo_path = workspace.repo_path().to_owned();
     let width = prefetch_width(args.prefetch_width);
-    let mut early = prefetch(&ctl, &repo, &head, width)?;
-    let mut view_heads = HashSet::new();
-    let phase = span("jj.restore.op_walk");
-    let fetched = fetch_op_log(&ctl, &repo, &repo_path, &head, &mut early, &mut view_heads).await?;
-    drop(phase);
-    drop(early);
+    let (fetched, view_heads) = restore_op_log(ui, &ctl, &repo, &repo_path, &head, width).await?;
     let view_heads: Vec<CommitId> = view_heads.into_iter().collect();
     let phase = span("jj.restore.view_heads");
     native(&repo)?.prefetch_commits(&view_heads, width);
@@ -161,6 +157,129 @@ fn native(repo: &ReadonlyRepo) -> Result<&NativeBackend, CommandError> {
 
 type Early = HashMap<(&'static str, String), Vec<u8>>;
 
+/// Brings the op log of `head` into the repo: from the commit index record of the head when it
+/// fits, else by the walk. Returns the IDs of the operations it wrote, one for each line, and the
+/// heads and working-copy commits of the views that it read.
+async fn restore_op_log(
+    ui: &mut Ui,
+    ctl: &CtlClient,
+    repo: &ReadonlyRepo,
+    repo_path: &Path,
+    head: &OperationId,
+    width: usize,
+) -> Result<(String, HashSet<CommitId>), CommandError> {
+    let index_dir = repo_path.join("index");
+    let phase = span("jj.restore.record");
+    let index = head_index::get(ctl, &head.hex())
+        .map_err(cmd_err)?
+        .filter(|i| Some(i.version) == head_index::local_version(&index_dir));
+    drop(phase);
+    let mut view_heads = HashSet::new();
+    let mut fetched = None;
+    if let Some(index) = &index {
+        let phase = span("jj.restore.head");
+        match head_only(ctl, repo, repo_path, head, index, width, &mut view_heads).await {
+            Ok(f) => fetched = Some(f),
+            Err(e) => {
+                writeln!(
+                    ui.warning_default(),
+                    "the commit index of the head is unusable, so the restore walks the op log: {}",
+                    e.error
+                )?;
+                forget_head(repo_path, head, index);
+                view_heads.clear();
+            }
+        }
+        drop(phase);
+    }
+    let fetched = match fetched {
+        Some(f) => f,
+        None => {
+            let mut early = prefetch(ctl, repo, head, width)?;
+            let _phase = span("jj.restore.op_walk");
+            fetch_op_log(
+                ctl,
+                repo,
+                repo_path,
+                head,
+                &mut early,
+                &mut view_heads,
+                true,
+            )
+            .await?
+        }
+    };
+    Ok((fetched, view_heads))
+}
+
+/// Restores the head alone from its index record: reads the head operation, its view and the
+/// segments, then checks that the record belongs to this head and that the index holds every head
+/// and working-copy commit of its view. Returns the IDs of the operations it wrote.
+async fn head_only(
+    ctl: &CtlClient,
+    repo: &ReadonlyRepo,
+    repo_path: &Path,
+    head: &OperationId,
+    index: &head_index::HeadIndex,
+    width: usize,
+    view_heads: &mut HashSet<CommitId>,
+) -> Result<String, CommandError> {
+    let index_dir = repo_path.join("index");
+    let mut early = fetch_head(ctl, &index_dir, repo_path, head, index, width)?;
+    let fetched = fetch_op_log(ctl, repo, repo_path, head, &mut early, view_heads, false).await?;
+    let op = repo.loader().load_operation(head).await.map_err(cmd_err)?;
+    if op.view_id().hex() != index.view {
+        return Err(cmd_err("the record names another view than the head"));
+    }
+    let at_head = repo.loader().load_at(&op).await.map_err(cmd_err)?;
+    let view = at_head.view().store_view();
+    for id in view.head_ids.iter().chain(view.wc_commit_ids.values()) {
+        if !at_head.index().has_id(id).await.map_err(cmd_err)? {
+            return Err(cmd_err(format!("the index lacks commit {}", id.hex())));
+        }
+    }
+    Ok(fetched)
+}
+
+/// Removes what a failed `head_only` wrote, so the op log walk fetches the head again and jj
+/// builds the index from the op log.
+fn forget_head(repo_path: &Path, head: &OperationId, index: &head_index::HeadIndex) {
+    head_index::forget(&repo_path.join("index"), &head.hex());
+    let ops = repo_path.join("op_store");
+    let _ = std::fs::remove_file(ops.join("operations").join(head.hex()));
+    let _ = std::fs::remove_file(ops.join("views").join(&index.view));
+}
+
+/// Reads the head operation and its view into the returned map and the commit index of the head
+/// into the index store, on `width` connections at once between them. The op log walk then
+/// stops at the head, and the op store reads an older operation from the daemon when a command
+/// reaches it.
+fn fetch_head(
+    ctl: &CtlClient,
+    index_dir: &Path,
+    repo_path: &Path,
+    head: &OperationId,
+    index: &head_index::HeadIndex,
+    width: usize,
+) -> Result<Early, CommandError> {
+    let ops = [(head.hex(), index.view.clone())];
+    let download = |w| head_index::download(ctl, index_dir, repo_path, &head.hex(), index, w);
+    if width < 2 {
+        download(1).map_err(cmd_err)?;
+        return Ok(prefetch_ops(ctl, &ops, 1, PREFETCH_BYTES));
+    }
+    let op_width = if width < 4 { 1 } else { 2 };
+    std::thread::scope(|scope| {
+        let segments = scope.spawn(|| download(width - op_width));
+        let early = prefetch_ops(ctl, &ops, op_width, PREFETCH_BYTES);
+        segments
+            .join()
+            .unwrap_or_else(|_| Err(StoreError::Local("the index download panicked".into())))
+            .map(|()| early)
+    })
+    .map_err(cmd_err)
+}
+
 /// Reads the restore list of `head`, then its commits into the commit cache of the backend and
 /// its op log objects into the returned map, all at once, on `width` connections between them. A head flushed without a list reads
 /// nothing here.
@@ -200,6 +319,7 @@ async fn fetch_op_log(
     head: &OperationId,
     early: &mut Early,
     view_heads: &mut HashSet<CommitId>,
+    walk: bool,
 ) -> Result<String, CommandError> {
     let op_store = repo_path.join("op_store");
     let root = repo.op_store().root_operation_id().clone();
@@ -234,7 +354,9 @@ async fn fetch_op_log(
                 view_heads.insert(id.clone());
             }
         }
-        todo.extend(op.parent_ids().iter().cloned());
+        if walk {
+            todo.extend(op.parent_ids().iter().cloned());
+        }
     }
     Ok(fetched)
 }
