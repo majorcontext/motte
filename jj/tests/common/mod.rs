@@ -598,6 +598,27 @@ impl Fixture {
 
     /// Writes a commit with the given parents, and returns its ID.
     pub fn commit_on(&self, parents: &[CommitId], tree: TreeId, seed: u32) -> String {
+        let change_id = ChangeId::from_bytes(
+            &[
+                seed.to_le_bytes(),
+                seed.to_le_bytes(),
+                seed.to_le_bytes(),
+                seed.to_le_bytes(),
+            ]
+            .concat(),
+        );
+        self.commit_with_change(parents, tree, change_id, &format!("commit {seed}\n"))
+    }
+
+    /// Writes a commit with the given parents and change ID, as a land that rebases a commit does,
+    /// and returns its ID.
+    pub fn commit_with_change(
+        &self,
+        parents: &[CommitId],
+        tree: TreeId,
+        change_id: ChangeId,
+        description: &str,
+    ) -> String {
         let sig = Signature {
             name: "t".into(),
             email: "t@example.com".into(),
@@ -611,16 +632,8 @@ impl Fixture {
             predecessors: vec![],
             root_tree: Merge::resolved(tree),
             conflict_labels: Merge::resolved(String::new()),
-            change_id: ChangeId::from_bytes(
-                &[
-                    seed.to_le_bytes(),
-                    seed.to_le_bytes(),
-                    seed.to_le_bytes(),
-                    seed.to_le_bytes(),
-                ]
-                .concat(),
-            ),
-            description: format!("commit {seed}\n"),
+            change_id,
+            description: description.to_owned(),
             author: sig.clone(),
             committer: sig,
             secure_sig: None,

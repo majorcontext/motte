@@ -280,6 +280,23 @@ pub(crate) async fn record(
             follow_local(ui, &mut tx, name, tip, before).await?;
         }
     }
+    let before: Vec<Option<CommitId>> = tips
+        .iter()
+        .map(|t| {
+            wanted
+                .iter()
+                .zip(old)
+                .find(|(name, _)| **name == t.name)
+                .and_then(|(_, r)| r.target.as_normal().cloned())
+        })
+        .collect();
+    for (local, landed) in settle_landed(&mut tx, tips, &before).await? {
+        lines.push(format!(
+            "{}: landed as {}",
+            short(&local.hex()),
+            short(&landed.hex())
+        ));
+    }
     for name in gone {
         let symbol = RefName::new(name).to_remote_symbol(RemoteName::new(REMOTE));
         tx.repo_mut().set_remote_bookmark(
@@ -297,6 +314,143 @@ pub(crate) async fn record(
         writeln!(ui.stdout(), "{line}").map_err(CommandError::from)?;
     }
     Ok(())
+}
+
+/// The most new commits on the first-parent chain of each fetched tip that `settle_landed` looks at.
+const LANDED_WALK: usize = 64;
+
+/// Records each visible local commit that a fetched commit landed as rewritten into it, so the two
+/// do not show as divergent: a land that rebases a branch keeps the change ID and makes a new
+/// commit. The walk of each tip stops at the commit that the remote bookmark named before, in
+/// `before`, or at one of its ancestors, so it reads only the new commits. The local commit
+/// qualifies when it shares the change ID of a commit on that walk, is neither its ancestor nor
+/// its descendant, and its change applied to the parent
+/// of the landed commit gives exactly the landed tree. A local commit that differs, such as one
+/// amended after the push, stays, and the divergence shows. Descendants of a hidden commit move
+/// onto the landed one. Returns each pair of local and landed commit.
+async fn settle_landed(
+    tx: &mut jj_cli::cli_util::WorkspaceCommandTransaction<'_>,
+    tips: &[Tip],
+    before: &[Option<CommitId>],
+) -> Result<Vec<(CommitId, CommitId)>, Fail> {
+    let mut settled: Vec<(CommitId, CommitId)> = vec![];
+    let mut seen = HashSet::new();
+    for (tip, before) in tips.iter().zip(before) {
+        let mut next = Some(tip.id.clone());
+        for _ in 0..LANDED_WALK {
+            let Some(id) = next.take() else { break };
+            if id == *tx.repo().store().root_commit_id() || !seen.insert(id.clone()) {
+                break;
+            }
+            if let Some(b) = before
+                && tx
+                    .repo()
+                    .index()
+                    .is_ancestor(&id, b)
+                    .await
+                    .map_err(refused)?
+            {
+                break;
+            }
+            let landed = tx
+                .repo()
+                .store()
+                .get_commit_async(&id)
+                .await
+                .map_err(refused)?;
+            next = landed.parent_ids().first().cloned();
+            let Some(targets) = tx
+                .repo()
+                .resolve_change_id(landed.change_id())
+                .await
+                .map_err(refused)?
+            else {
+                continue;
+            };
+            let locals: Vec<CommitId> = targets
+                .visible_with_offsets()
+                .map(|(_, c)| c.clone())
+                .filter(|c| *c != id && !settled.iter().any(|(l, _)| l == c))
+                .collect();
+            for local_id in locals {
+                if qualifies(tx, tips, &landed, &local_id).await? {
+                    tx.repo_mut()
+                        .set_rewritten_commit(local_id.clone(), id.clone());
+                    settled.push((local_id, id.clone()));
+                }
+            }
+        }
+    }
+    if !settled.is_empty() {
+        tx.repo_mut().rebase_descendants().await.map_err(refused)?;
+    }
+    Ok(settled)
+}
+
+fn refused(e: impl std::fmt::Display) -> Fail {
+    Fail::new(Outcome::Refused, e.to_string())
+}
+
+/// Whether `local_id` is the commit that `landed` landed: a single-parent commit like it, not in
+/// the fetched history, neither its ancestor nor its descendant, whose change applied to the parent
+/// of `landed` gives exactly its tree, and whose descendants, itself included, are all rewritable.
+/// A merge is never one, because its delta over the merged parents hides what the other parents
+/// bring.
+async fn qualifies(
+    tx: &jj_cli::cli_util::WorkspaceCommandTransaction<'_>,
+    tips: &[Tip],
+    landed: &jj_lib::commit::Commit,
+    local_id: &CommitId,
+) -> Result<bool, Fail> {
+    let index = tx.repo().index();
+    for tip in tips {
+        if index
+            .is_ancestor(local_id, &tip.id)
+            .await
+            .map_err(refused)?
+        {
+            return Ok(false);
+        }
+    }
+    if index
+        .is_ancestor(landed.id(), local_id)
+        .await
+        .map_err(refused)?
+    {
+        return Ok(false);
+    }
+    let local = tx
+        .repo()
+        .store()
+        .get_commit_async(local_id)
+        .await
+        .map_err(refused)?;
+    if local.parent_ids().len() != 1 || landed.parent_ids().len() != 1 {
+        return Ok(false);
+    }
+    let rebased = jj_lib::merged_tree::MergedTree::merge(jj_lib::merge::Merge::from_vec(vec![
+        (
+            landed.parent_tree(index).await.map_err(refused)?,
+            String::new(),
+        ),
+        (
+            local.parent_tree(index).await.map_err(refused)?,
+            String::new(),
+        ),
+        (local.tree(), String::new()),
+    ]))
+    .await
+    .map_err(refused)?;
+    if rebased.tree_ids() != landed.tree_ids() {
+        return Ok(false);
+    }
+    let rewritten =
+        jj_lib::revset::ResolvedRevsetExpression::commits(vec![local_id.clone()]).descendants();
+    Ok(tx
+        .base_workspace_helper()
+        .check_rewritable_expr(&rewritten)
+        .await
+        .is_ok())
 }
 
 /// Records the shallow roots and makes each fetched tip a head.
