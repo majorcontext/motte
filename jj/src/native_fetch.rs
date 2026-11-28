@@ -14,6 +14,16 @@ use crate::fetch::{self, Tip};
 use crate::fetch_objects::{self, Walk};
 use crate::push::{self, Fail, Outcome, REMOTE, store_fail};
 
+/// The refs that are branches. The store keeps a tag and any other ref under its full name, which
+/// starts with `refs/`, and none of them is a bookmark.
+fn branches(stored: &HashMap<String, String>) -> HashMap<String, String> {
+    stored
+        .iter()
+        .filter(|(name, _)| !name.starts_with("refs/"))
+        .map(|(name, commit)| (name.clone(), commit.clone()))
+        .collect()
+}
+
 pub async fn fetch(
     ui: &mut Ui,
     ws: &mut WorkspaceCommandHelper,
@@ -45,6 +55,8 @@ pub async fn fetch(
         .collect();
     let wanted = if !names.is_empty() && named.is_empty() {
         vec![]
+    } else if names.is_empty() {
+        fetch::wanted(ui, &named, &branches(&stored), Some(default_branch))?
     } else {
         fetch::wanted(ui, &named, &stored, Some(default_branch))?
     };

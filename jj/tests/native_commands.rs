@@ -11,6 +11,7 @@ use std::net::TcpListener;
 use common::{FakeDaemon, Fixture, UNSET, Workspace};
 use gix::objs::Kind;
 use jj_lib::backend::CommitId;
+use jj_lib::object_id::ObjectId as _;
 use motte_jj::ctl::hash_object;
 
 const NATIVE: [&str; 5] = [
@@ -321,6 +322,26 @@ fn a_native_fetch_without_names_takes_at_most_100_bookmarks_and_the_default_firs
         remote.contains(&"b098@origin") && !remote.contains(&"b099@origin"),
         "name order"
     );
+}
+
+/// Catches a fetch without names that takes a tag as a bookmark: the store keeps a tag under its
+/// full ref name, and an annotated tag names no commit, so the fetch refused every bookmark.
+#[test]
+fn a_native_fetch_without_names_skips_refs_that_are_not_branches() {
+    let f = Fixture::with(FakeDaemon::full());
+    let ws = native(&f);
+    let tree = f.tree(&files());
+    f.daemon
+        .state
+        .lock()
+        .unwrap()
+        .refs
+        .insert("refs/tags/v1".into(), (tree.hex(), 2));
+    let (_, text, outcome) = run(&f, &ws, &["motte", "fetch"]);
+    assert_eq!(outcome, "ok", "{text}");
+    assert!(!text.contains("refs/tags/v1"), "{text}");
+    let (_, text, outcome) = run(&f, &ws, &["motte", "fetch", "-b", "refs/tags/v1"]);
+    assert_eq!(outcome, "refused", "{text}");
 }
 
 #[test]
