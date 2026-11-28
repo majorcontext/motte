@@ -127,3 +127,33 @@ fn an_object_over_16_mib_is_refused_before_it_is_sent() {
     assert!(err.to_string().contains("16 MiB"), "{err}");
     assert_eq!(d.state.lock().unwrap().lines, 0, "the object was sent");
 }
+
+/// Catches a prefetch of the op log that holds every body it reads: views can be large, and a
+/// restore of a long op log would hold them all before it writes any. The bodies past the budget
+/// are left to the walk.
+#[test]
+fn an_op_prefetch_keeps_no_more_than_its_byte_budget() {
+    let d = FakeDaemon::full();
+    let ops: Vec<(String, String)> = (0..3).map(|i| (format!("a{i}"), format!("b{i}"))).collect();
+    {
+        let mut st = d.state.lock().unwrap();
+        for (op, view) in &ops {
+            st.op_objects
+                .insert(("operations".into(), op.clone()), vec![0; 100]);
+            st.op_objects
+                .insert(("views".into(), view.clone()), vec![0; 1000]);
+        }
+    }
+    let ctl = CtlClient::new(d.path());
+    let got = motte_jj::stores::prefetch_ops(&ctl, &ops, 4, 2500);
+    let bytes: usize = got.values().map(Vec::len).sum();
+    assert!(bytes <= 2500, "kept {bytes} bytes");
+    assert_eq!(
+        got.keys().filter(|(kind, _)| *kind == "operations").count(),
+        3,
+        "{:?}",
+        got.keys()
+    );
+    let all = motte_jj::stores::prefetch_ops(&ctl, &ops, 4, usize::MAX);
+    assert_eq!(all.len(), 6);
+}

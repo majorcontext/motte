@@ -1,21 +1,24 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::io::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
+use futures::{StreamExt as _, TryStreamExt as _};
 use jj_cli::cli_util::{CommandHelper, WorkspaceCommandHelper};
 use jj_cli::command_error::CommandError;
 use jj_cli::ui::Ui;
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::OperationId;
-use jj_lib::repo::Repo as _;
+use jj_lib::repo::{ReadonlyRepo, Repo as _};
+use jj_lib::revset::ResolvedRevsetExpression;
 use motte_jj::backend::NativeBackend;
 use motte_jj::ctl::{Code, CtlClient, ObjectStore, StoreError};
 use motte_jj::stores::{
-    FLUSHED_FILE, MIRROR_BUDGET, Mirrored, UNSYNCED_FILE, clear_drained, clear_unsynced,
-    merge_remote, put_ops, put_shallow, read_heads, settle, within,
+    FLUSHED_FILE, MIRROR_BUDGET, Mirrored, RESTORE_LIST_MAX, RestoreList, UNSYNCED_FILE,
+    clear_drained, clear_unsynced, merge_remote, put_ops, put_restore_list, put_shallow,
+    read_heads, settle, within,
 };
 use motte_jj::wc::materialized_tree;
 
@@ -87,18 +90,23 @@ pub(crate) async fn publish(
         .ok_or_else(|| cmd_err("this repo has no native backend"))?
         .shallow_roots()
         .map_err(cmd_err)?;
-    let (ops, shallow) = std::thread::scope(|scope| {
+    let list = restore_list(&repo).await?;
+    let (ops, shallow, listed) = std::thread::scope(|scope| {
         let shallow = scope.spawn(|| put_shallow(ctl, &head, &roots));
+        let listed = scope.spawn(|| put_restore_list(ctl, &head, &list));
         let ops = put_ops(ctl, ws.repo_path(), &pending, None);
+        let joined = |r: std::thread::Result<Result<(), StoreError>>, what: &str| {
+            r.unwrap_or_else(|_| Err(StoreError::Local(format!("the {what} upload panicked"))))
+        };
         (
             ops,
-            shallow
-                .join()
-                .unwrap_or_else(|_| Err(StoreError::Local("the shallow upload panicked".into()))),
+            joined(shallow.join(), "shallow"),
+            joined(listed.join(), "restore list"),
         )
     });
     ops.map_err(cmd_err)?;
     shallow.map_err(cmd_err)?;
+    listed.map_err(cmd_err)?;
     let _lock = repo.op_heads_store().lock().await.map_err(cmd_err)?;
     if read_heads(ws.repo_path()).map_err(cmd_err)? != [head.clone()] {
         return Ok(None);
@@ -121,6 +129,39 @@ pub(crate) async fn publish(
         reported,
         generation,
     }))
+}
+
+/// The restore list of the loaded head: its operations back to the root, newest first, and the
+/// ancestors of its visible heads, newest first, each cut at `RESTORE_LIST_MAX`. The walk of the
+/// ancestors stops at the cut, so the cost of a flush does not grow with the index. The hidden heads
+/// of earlier operations are in their views, which a restore reads from the list.
+async fn restore_list(repo: &Arc<ReadonlyRepo>) -> Result<RestoreList, CommandError> {
+    let root = repo.op_store().root_operation_id().clone();
+    let mut ops = Vec::new();
+    let mut seen = HashSet::new();
+    let mut todo = VecDeque::from([repo.op_id().clone()]);
+    while let Some(id) = todo.pop_front() {
+        if ops.len() == RESTORE_LIST_MAX {
+            break;
+        }
+        if id == root || !seen.insert(id.clone()) {
+            continue;
+        }
+        let op = repo.op_store().read_operation(&id).await.map_err(cmd_err)?;
+        ops.push((id.hex(), op.view_id.hex()));
+        todo.extend(op.parents);
+    }
+    let heads: Vec<CommitId> = repo.view().heads().iter().cloned().collect();
+    let commits = ResolvedRevsetExpression::commits(heads)
+        .ancestors()
+        .evaluate(repo.as_ref())
+        .map_err(cmd_err)?
+        .stream()
+        .take(RESTORE_LIST_MAX)
+        .try_collect()
+        .await
+        .map_err(cmd_err)?;
+    Ok(RestoreList { ops, commits })
 }
 
 /// Drains the op log at every local head, not only the loaded one. Under the op-heads lock it

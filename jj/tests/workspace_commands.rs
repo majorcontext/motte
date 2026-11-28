@@ -113,6 +113,46 @@ fn a_restore_rebuilds_the_workspace_from_the_op_log_in_the_store() {
     assert!(st.contains("The working copy has no changes."), "{st}");
 }
 
+/// Catches a restore that reads the op log and the commits of the index one after another: each
+/// object names the next, so without the restore list of the flush a restore costs one daemon
+/// round trip for each operation, view and commit.
+#[test]
+fn a_restore_reads_the_op_log_and_the_commits_at_once() {
+    let f = Fixture::with(FakeDaemon::full());
+    let ws = f.workspace(&files(), &[]);
+    for _ in 0..12 {
+        f.jj(&ws.mount, &["new"]);
+    }
+    let out = flush(&f, &ws);
+    let (mount, root) = (mount_of(&f, "mount2"), f.dir.path().join("root2"));
+    let args = restore_args(&f, &ws, &out, &mount, &root);
+    f.daemon.state.lock().unwrap().read_delay_ms = 20;
+    let text = f.jj_env(
+        &mount,
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
+        &[],
+    );
+    assert!(
+        text.contains("Restored motte workspace at operation"),
+        "{text}"
+    );
+    let peaks = f.daemon.state.lock().unwrap().reads_peak.clone();
+    for op in ["get", "getop"] {
+        let peak = peaks.get(op).copied().unwrap_or(0);
+        assert!(
+            peak >= 4,
+            "at most {peak} {op} reads were in flight at once"
+        );
+    }
+    f.daemon.state.lock().unwrap().read_delay_ms = 0;
+    let log = f.jj_env(
+        &mount,
+        &["log", "--no-graph", "-T", "commit_id ++ \"\\n\""],
+        &[],
+    );
+    assert_eq!(log.lines().count(), 15, "{log}");
+}
+
 fn restore_args(
     f: &Fixture,
     ws: &Workspace,

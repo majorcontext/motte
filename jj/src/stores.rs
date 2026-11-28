@@ -539,3 +539,128 @@ pub fn store_factories() -> StoreFactories {
     );
     f
 }
+
+/// The most entries of each kind that a restore list carries.
+pub const RESTORE_LIST_MAX: usize = 4096;
+
+/// What a restore of an op log head reads before it walks the op log and builds the index: the
+/// operations with their views, and the commits of the index. Each walk reads one object after
+/// another, because an object names the next one; with the list a restore reads them all at once
+/// first. An entry that the walk does not need costs one read and nothing else.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RestoreList {
+    /// Operation and view IDs, as hex.
+    pub ops: Vec<(String, String)>,
+    pub commits: Vec<CommitId>,
+}
+
+impl RestoreList {
+    fn encode(&self) -> String {
+        let mut body = String::new();
+        for (op, view) in &self.ops {
+            body.push_str(&format!("op {op} {view}\n"));
+        }
+        for c in &self.commits {
+            body.push_str(&format!("commit {}\n", c.hex()));
+        }
+        body.push('\n');
+        body
+    }
+
+    fn decode(data: &[u8]) -> Self {
+        let mut list = Self::default();
+        for line in String::from_utf8_lossy(data).lines() {
+            let mut words = line.split(' ');
+            match (words.next(), words.next(), words.next()) {
+                (Some("op"), Some(op), Some(view)) if is_hex(op) && is_hex(view) => {
+                    list.ops.push((op.to_owned(), view.to_owned()));
+                }
+                (Some("commit"), Some(id), None) => list.commits.extend(CommitId::try_from_hex(id)),
+                _ => {}
+            }
+        }
+        list
+    }
+}
+
+fn is_hex(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The name of the restore list of `head`: a "views" object, like the shallow roots, under a hash
+/// that no view and no head has.
+fn restore_list_name(head: &str) -> String {
+    jj_lib::content_hash::blake2b_hash(&format!("motte restore list {head}"))
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+pub fn put_restore_list(ctl: &CtlClient, head: &str, list: &RestoreList) -> Result<(), StoreError> {
+    ctl.putop("views", &restore_list_name(head), list.encode().as_bytes())
+}
+
+/// The restore list of `head`; `None` when the head was flushed without one.
+pub fn get_restore_list(ctl: &CtlClient, head: &str) -> Result<Option<RestoreList>, StoreError> {
+    match ctl.getop("views", &restore_list_name(head)) {
+        Ok(data) => Ok(Some(RestoreList::decode(&data))),
+        Err(e) if e.is(&Code::NotFound) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Reads the op log objects of `ops` on `workers` daemon connections at once, keyed by kind and
+/// ID, and keeps at most `max_bytes` of them. An object that fails to read, or that would pass the
+/// budget, is absent, and the walk reads it again.
+pub fn prefetch_ops(
+    ctl: &CtlClient,
+    ops: &[(String, String)],
+    workers: usize,
+    max_bytes: usize,
+) -> std::collections::HashMap<(&'static str, String), Vec<u8>> {
+    let jobs: Vec<(&'static str, &str)> = ops
+        .iter()
+        .take(RESTORE_LIST_MAX)
+        .flat_map(|(op, view)| [("operations", op.as_str()), ("views", view.as_str())])
+        .collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let got = std::sync::Mutex::new((std::collections::HashMap::new(), 0usize));
+    std::thread::scope(|scope| {
+        for _ in 0..workers.min(jobs.len()) {
+            scope.spawn(|| {
+                while let Some((kind, id)) =
+                    jobs.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+                {
+                    if let Ok(data) = ctl.getop(kind, id) {
+                        let (map, size) = &mut *got.lock().unwrap();
+                        if *size + data.len() <= max_bytes {
+                            *size += data.len();
+                            map.insert((*kind, (*id).to_owned()), data);
+                        }
+                    }
+                }
+            });
+        }
+    });
+    got.into_inner().unwrap().0
+}
+
+#[cfg(test)]
+mod restore_list_tests {
+    use super::*;
+
+    /// Catches a list that does not survive its own encoding, and an unknown line that breaks the
+    /// read of a list from a newer writer.
+    #[test]
+    fn a_restore_list_reads_back_and_skips_unknown_lines() {
+        let list = RestoreList {
+            ops: vec![("ab".into(), "cd".into())],
+            commits: vec![CommitId::from_hex(
+                "0123456789abcdef0123456789abcdef01234567",
+            )],
+        };
+        let mut body = list.encode();
+        body.push_str("future 1 2\nop zz cd\n");
+        assert_eq!(RestoreList::decode(body.as_bytes()), list);
+    }
+}

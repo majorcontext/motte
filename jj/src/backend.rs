@@ -190,6 +190,8 @@ impl Debug for NativeBackend {
     }
 }
 
+const COMMIT_CACHE: usize = 8192;
+
 fn cache_cap(n: usize) -> std::num::NonZeroUsize {
     std::num::NonZeroUsize::new(n).unwrap()
 }
@@ -221,7 +223,7 @@ impl NativeBackend {
             write_change_id_header,
             prefetched: Mutex::new(HashMap::new()),
             tree_cache: Mutex::new(clru::CLruCache::new(cache_cap(16384))),
-            commit_cache: Mutex::new(clru::CLruCache::new(cache_cap(8192))),
+            commit_cache: Mutex::new(clru::CLruCache::new(cache_cap(COMMIT_CACHE))),
         })
     }
 
@@ -387,6 +389,55 @@ impl NativeBackend {
         let mut buf = Vec::with_capacity(entries_hint(&tree));
         tree.write_to(&mut buf).map_err(|e| write_err(e, "tree"))?;
         self.put(Kind::Tree, &buf, "tree")
+    }
+
+    fn commit_from_data(&self, id: &CommitId, data: &[u8]) -> BackendResult<Commit> {
+        let mut commit = self.commit_from_git(id, data)?;
+        if commit.parents.is_empty() {
+            commit.parents.push(self.root_commit_id.clone());
+        }
+        if let Some(extra) = self.read_extra(id) {
+            if !extra.change_id.is_empty() {
+                commit.change_id = ChangeId::new(extra.change_id);
+            }
+            for p in extra.predecessors {
+                commit.predecessors.push(CommitId::new(p));
+            }
+        }
+        Ok(commit)
+    }
+
+    /// Reads `ids` into the commit cache on `workers` daemon connections at once, so that a walk
+    /// over them, such as an index build, waits for no round trip per commit. Past the capacity of
+    /// the cache a read would evict an earlier one, so the rest is left to the walk. A read that
+    /// fails is left to the walk too, which reports the failure.
+    pub fn prefetch_commits(&self, ids: &[CommitId], workers: usize) {
+        let ids: Vec<&CommitId> = ids
+            .iter()
+            .filter(|id| **id != self.root_commit_id)
+            .take(COMMIT_CACHE / 2)
+            .collect();
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..workers.min(ids.len()) {
+                scope.spawn(|| {
+                    while let Some(id) =
+                        ids.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+                    {
+                        if self.commit_cache.lock().unwrap().contains(*id) {
+                            continue;
+                        }
+                        let Ok(commit) = self
+                            .get_object(*id, Kind::Commit)
+                            .and_then(|data| self.commit_from_data(id, &data))
+                        else {
+                            continue;
+                        };
+                        self.commit_cache.lock().unwrap().put((*id).clone(), commit);
+                    }
+                });
+            }
+        });
     }
 
     fn read_extra(&self, id: &CommitId) -> Option<Extra> {
@@ -823,18 +874,7 @@ impl Backend for NativeBackend {
             return Ok(c.clone());
         }
         let data = self.get_object(id, Kind::Commit)?;
-        let mut commit = self.commit_from_git(id, &data)?;
-        if commit.parents.is_empty() {
-            commit.parents.push(self.root_commit_id.clone());
-        }
-        if let Some(extra) = self.read_extra(id) {
-            if !extra.change_id.is_empty() {
-                commit.change_id = ChangeId::new(extra.change_id);
-            }
-            for p in extra.predecessors {
-                commit.predecessors.push(CommitId::new(p));
-            }
-        }
+        let commit = self.commit_from_data(id, &data)?;
         self.commit_cache
             .lock()
             .unwrap()

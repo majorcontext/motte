@@ -79,6 +79,12 @@ pub struct State {
     /// A `putbatch` answers this many milliseconds late, and counts as answered after the wait.
     pub delay_putbatch_ms: u64,
     pub putbatches_answered: usize,
+    /// Each `get`, `getop` and `getbatch` answers this many milliseconds late, outside the state
+    /// lock, as a daemon that reads every object over the network does.
+    pub read_delay_ms: u64,
+    pub reads_inflight: HashMap<String, usize>,
+    /// The most delayed reads of each op in flight at once.
+    pub reads_peak: HashMap<String, usize>,
 }
 
 pub struct FakeDaemon {
@@ -412,6 +418,24 @@ fn serve(conn: UnixStream, state: Arc<Mutex<State>>) {
             return;
         }
         let rs = reply(&mut st, &line);
+        let read = serde_json::from_str::<Value>(&line)
+            .ok()
+            .and_then(|v| v["op"].as_str().map(str::to_owned))
+            .filter(|op| matches!(op.as_str(), "get" | "getop" | "getbatch"));
+        if let Some(op) = read.filter(|_| st.read_delay_ms > 0) {
+            let delay = std::time::Duration::from_millis(st.read_delay_ms);
+            let n = *st
+                .reads_inflight
+                .entry(op.clone())
+                .and_modify(|n| *n += 1)
+                .or_insert(1);
+            let peak = st.reads_peak.entry(op.clone()).or_default();
+            *peak = (*peak).max(n);
+            drop(st);
+            std::thread::sleep(delay);
+            st = state.lock().unwrap();
+            *st.reads_inflight.get_mut(&op).unwrap() -= 1;
+        }
         let lost = st.lose_answer_of.clone().filter(|op| {
             serde_json::from_str::<Value>(&line).is_ok_and(|v| v["op"] == op.as_str())
         });
