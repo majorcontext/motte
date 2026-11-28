@@ -940,6 +940,8 @@ func TestACollectorThatStallsPastTheLeaseLeavesAFileStoredAgainReadable(t *testi
 	<-stalled
 	w.clock.Advance(11 * time.Minute).MustWait(t.Context())
 	other := w.cold()
+	// The put must write the pack again to race the collector; held objects would skip the write.
+	store.WriteEveryPut(other)
 	if err := other.Maintain(t.Context(), repo); err != nil {
 		t.Fatal(err)
 	}
@@ -1266,5 +1268,22 @@ func TestASecondReadOfAnOpLogObjectReadsNoBucket(t *testing.T) {
 	}
 	if charge := w.svc.OpCacheUsed() - used; charge < 256 {
 		t.Errorf("an empty op log object charged %d bytes, not its entry", charge)
+	}
+}
+
+// TestAPutOfHeldObjectsWritesNoPack: a jj workspace stores its conflict tree again at each start, and a pack write of
+// objects that the repo holds costs a bucket write of about half a second.
+func TestAPutOfHeldObjectsWritesNoPack(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	objs := []gitpack.Object{{Type: gitpack.Blob, Data: []byte("readme")}, {Type: gitpack.Blob, Data: []byte("tree")}}
+	first, err := w.svc.PutObjects(t.Context(), repo, objs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writes := w.spy.writes.Load()
+	again, err := w.svc.PutObjects(t.Context(), repo, objs)
+	if err != nil || !slices.Equal(again, first) || w.spy.writes.Load() != writes {
+		t.Errorf("second put = %v, %v after %d writes, want %v and none", again, err, w.spy.writes.Load()-writes, first)
 	}
 }

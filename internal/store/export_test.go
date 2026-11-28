@@ -8,3 +8,6 @@ func SizedLayer(objects int) midx.Entry { return midx.Entry{Objects: objects, Si
 
 // OpCacheUsed is the charge that the op log cache holds.
 func (s *Service) OpCacheUsed() int64 { return s.opcache.used.Load() }
+
+// WriteEveryPut makes every put of s write its pack, held objects too.
+func WriteEveryPut(s *Service) { s.heldCheck = 0 }

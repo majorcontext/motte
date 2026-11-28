@@ -142,7 +142,9 @@ type Service struct {
 	ocache *clockCache
 	// opcache keeps op log objects by bucket key. An object never changes under its key: PutOp creates it once.
 	opcache *clockCache
-	rcache  *rangeCache
+	// heldCheck is the most objects of a put that allHeld looks up first.
+	heldCheck int
+	rcache    *rangeCache
 	// rflight bounds the bytes of the bucket reads that outlive the requests that began them.
 	rflight    *semaphore.Weighted
 	readBudget int64
@@ -279,7 +281,7 @@ func (s *Service) tryReserveInline(bytes int64) (release func()) {
 }
 
 func New(st bucket.Store, index PackIndex, opts ...Option) *Service {
-	s := &Service{st: st, index: index, clk: clock.Real(), logger: slog.Default(), grace: DefaultGrace, open: map[string]*openPack{}, budget: semaphore.NewWeighted(MemoryBudget), inline: semaphore.NewWeighted(inlineBudget), landed: semaphore.NewWeighted(LandBudget), icache: newClockCache(maxIndexBytes), ocache: newClockCache(maxObjectCacheBytes), opcache: newClockCache(maxOpCacheBytes), rcache: newRangeCache(DefaultRangeCacheBytes), rflight: semaphore.NewWeighted(DefaultReadBudget), readBudget: DefaultReadBudget, slowAfter: slowReadAfter, graphCap: midx.MaxGraphCommits}
+	s := &Service{st: st, index: index, clk: clock.Real(), logger: slog.Default(), grace: DefaultGrace, open: map[string]*openPack{}, budget: semaphore.NewWeighted(MemoryBudget), inline: semaphore.NewWeighted(inlineBudget), landed: semaphore.NewWeighted(LandBudget), icache: newClockCache(maxIndexBytes), ocache: newClockCache(maxObjectCacheBytes), opcache: newClockCache(maxOpCacheBytes), heldCheck: heldCheckMax, rcache: newRangeCache(DefaultRangeCacheBytes), rflight: semaphore.NewWeighted(DefaultReadBudget), readBudget: DefaultReadBudget, slowAfter: slowReadAfter, graphCap: midx.MaxGraphCommits}
 	for _, o := range opts {
 		o(s)
 	}
@@ -342,6 +344,28 @@ func (s *Service) GetOp(ctx context.Context, ws string, kind OpKind, id string) 
 	return data, nil
 }
 
+// heldCheckMax is the most objects of a put that the service first looks up, unless heldCheck of the service is set. A small put is often of objects that the
+// repo holds, such as the conflict tree that a jj workspace stores again at each start, and a pack write costs a
+// bucket round trip; a large put is of new objects, and the lookups would cost more than they save.
+const heldCheckMax = 64
+
+// allHeld returns the names of objs when the repo holds every one of them, so that the put writes no pack. A failed
+// lookup answers false, and the put writes the pack.
+func (s *Service) allHeld(ctx context.Context, repo Repo, objs []gitpack.Object) ([]gitpack.SHA, bool) {
+	if len(objs) > s.heldCheck {
+		return nil, false
+	}
+	names := make([]gitpack.SHA, len(objs))
+	for i, o := range objs {
+		names[i] = gitpack.Hash(o.Type, o.Data)
+	}
+	held, err := s.Has(ctx, repo, names)
+	if err != nil || slices.Contains(held, false) {
+		return nil, false
+	}
+	return names, true
+}
+
 // PutObjects stores objects as one pack and returns their names in order.
 func (s *Service) PutObjects(ctx context.Context, repo Repo, objs []gitpack.Object) ([]gitpack.SHA, error) {
 	if len(objs) == 0 || len(objs) > MaxBatch {
@@ -359,6 +383,9 @@ func (s *Service) PutObjects(ctx context.Context, repo Repo, objs []gitpack.Obje
 	}
 	if size > MaxPackBytes {
 		return nil, ErrTooLarge
+	}
+	if names, ok := s.allHeld(ctx, repo, objs); ok {
+		return names, nil
 	}
 	pack, idx, names := gitpack.Build(objs)
 	sum := sha256.Sum256(pack)
