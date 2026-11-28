@@ -344,6 +344,124 @@ fn a_native_fetch_without_names_skips_refs_that_are_not_branches() {
     assert_eq!(outcome, "refused", "{text}");
 }
 
+/// Lands `name` the way ward does when main moved: main gets a commit of its own, and the commit of
+/// `name` is rebased onto it with its change ID and the file `a` set to `body`.
+fn land_rebased(f: &Fixture, ws: &Workspace, name: &str, body: &str) -> String {
+    let change = f.jj(
+        &ws.mount,
+        &[
+            "log",
+            "-r",
+            name,
+            "--no-graph",
+            "-T",
+            "change_id.normal_hex()",
+        ],
+    );
+    let base = CommitId::try_from_hex(&ws.commit).unwrap();
+    let moved = f.commit_on(
+        &[base],
+        f.tree(&[("a", "1"), ("b", "2"), ("c", "3")].into()),
+        7,
+    );
+    let landed = f.commit_with_change(
+        &[CommitId::try_from_hex(&moved).unwrap()],
+        f.tree(&[("a", body), ("b", "2"), ("c", "3")].into()),
+        jj_lib::backend::ChangeId::try_from_hex(&change).unwrap(),
+        &format!("{name}\n"),
+    );
+    f.daemon
+        .state
+        .lock()
+        .unwrap()
+        .refs
+        .insert("main".into(), (landed.clone(), 3));
+    landed
+}
+
+/// Catches a fetch that leaves the pushed commit beside the commit that landed it: a land that
+/// rebases keeps the change ID, so both show as divergent until the local one is hidden.
+#[test]
+fn a_native_fetch_hides_the_local_commit_that_landed() {
+    let f = Fixture::with(FakeDaemon::full());
+    let ws = native(&f);
+    bookmark(&f, &ws, "topic", "x");
+    f.jj(&ws.mount, &["new"]);
+    let landed = land_rebased(&f, &ws, "topic", "x");
+    let (_, text, outcome) = run(&f, &ws, &["motte", "fetch", "-b", "main"]);
+    assert_eq!(outcome, "ok", "{text}");
+    assert!(
+        text.contains(&format!("landed as {}", &landed[..12])),
+        "{text}"
+    );
+    let parent = f.jj(
+        &ws.mount,
+        &["log", "-r", "@-", "--no-graph", "-T", "commit_id"],
+    );
+    assert_eq!(
+        parent, landed,
+        "the working copy moves onto the landed commit"
+    );
+    let topic = f.jj(
+        &ws.mount,
+        &["log", "-r", "topic", "--no-graph", "-T", "commit_id"],
+    );
+    assert_eq!(topic, landed, "the bookmark follows the rewrite");
+}
+
+/// Catches a fetch that hides a local commit with edits that the land does not hold.
+#[test]
+fn a_native_fetch_keeps_a_local_commit_that_differs_from_the_landed_one() {
+    let f = Fixture::with(FakeDaemon::full());
+    let ws = native(&f);
+    let local = bookmark(&f, &ws, "topic", "x");
+    f.jj(&ws.mount, &["new"]);
+    land_rebased(&f, &ws, "topic", "y");
+    let (_, text, outcome) = run(&f, &ws, &["motte", "fetch", "-b", "main"]);
+    assert_eq!(outcome, "ok", "{text}");
+    assert!(!text.contains("landed as"), "{text}");
+    let parent = f.jj(
+        &ws.mount,
+        &["log", "-r", "@-", "--no-graph", "-T", "commit_id"],
+    );
+    assert_eq!(parent, local, "the amended local commit stays");
+}
+
+/// Catches a fetch that hides a local merge: its delta over the merged parents is empty, so a
+/// landed commit without the second parent would match it and drop what that parent brings.
+#[test]
+fn a_native_fetch_keeps_a_local_merge() {
+    let f = Fixture::with(FakeDaemon::full());
+    let ws = native(&f);
+    bookmark(&f, &ws, "x", "x");
+    f.jj(&ws.mount, &["new", &ws.commit]);
+    bookmark(&f, &ws, "o", "o");
+    f.jj(&ws.mount, &["new", "x", "o", "-m", "e"]);
+    f.jj(&ws.mount, &["bookmark", "create", "e", "-r", "@"]);
+    f.jj(&ws.mount, &["new"]);
+    land_rebased(&f, &ws, "e", "1");
+    let (_, text, _) = run(&f, &ws, &["motte", "fetch", "-b", "main"]);
+    assert!(!text.contains("landed as"), "{text}");
+}
+
+/// Catches a fetch that rewrites an immutable descendant of the local commit.
+#[test]
+fn a_native_fetch_keeps_a_local_commit_with_an_immutable_descendant() {
+    let f = Fixture::with(FakeDaemon::full());
+    let ws = native(&f);
+    bookmark(&f, &ws, "topic", "x");
+    f.jj(&ws.mount, &["new", "-m", "dd"]);
+    f.jj(&ws.mount, &["new"]);
+    land_rebased(&f, &ws, "topic", "x");
+    let config = "revset-aliases.\"immutable_heads()\"=\"description(substring:dd)\"";
+    let (_, text, _) = run(
+        &f,
+        &ws,
+        &["--config", config, "motte", "fetch", "-b", "main"],
+    );
+    assert!(!text.contains("landed as"), "{text}");
+}
+
 #[test]
 fn a_native_push_of_more_than_1000_new_commits_is_refused() {
     let f = Fixture::with(FakeDaemon::full());
