@@ -9,11 +9,12 @@ import (
 	"github.com/majorcontext/motte/internal/clock"
 )
 
-// CallStats counts calls by kind between two reads. Each call is counted, never sampled.
+// CallStats counts calls by kind between two reads, and since it was made. Each call is counted, never sampled.
 type CallStats struct {
 	clk clock.Clock
 	mu  sync.Mutex
 	by  map[string]*CallWindow
+	all map[string]*CallWindow
 }
 
 // CallWindow is what the calls of one kind did since the last Take.
@@ -25,7 +26,7 @@ type CallWindow struct {
 
 // NewCallStats returns a recorder that reads time from clk; nil is the real clock.
 func NewCallStats(clk clock.Clock) *CallStats {
-	return &CallStats{clk: clock.Or(clk), by: map[string]*CallWindow{}}
+	return &CallStats{clk: clock.Or(clk), by: map[string]*CallWindow{}, all: map[string]*CallWindow{}}
 }
 
 // Begin starts timing a call of kind. The returned function ends it. A nil receiver records nothing.
@@ -41,14 +42,16 @@ func (c *CallStats) record(kind string, d time.Duration) {
 	d = max(d, 0)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	w := c.by[kind]
-	if w == nil {
-		w = &CallWindow{Kind: kind}
-		c.by[kind] = w
+	for _, m := range []map[string]*CallWindow{c.by, c.all} {
+		w := m[kind]
+		if w == nil {
+			w = &CallWindow{Kind: kind}
+			m[kind] = w
+		}
+		w.Count++
+		w.Total += d
+		w.Max = max(w.Max, d)
 	}
-	w.Count++
-	w.Total += d
-	w.Max = max(w.Max, d)
 }
 
 // Take returns the windows of the kinds that had calls, sorted by kind, and resets them.
@@ -60,6 +63,22 @@ func (c *CallStats) Take() []CallWindow {
 		out = append(out, *w)
 	}
 	clear(c.by)
+	sort.Slice(out, func(i, j int) bool { return out[i].Kind < out[j].Kind })
+	return out
+}
+
+// Totals returns what the calls of each kind did since the recorder was made, sorted by kind. Take does not reset
+// them, so a caller can read them before and after one command and subtract.
+func (c *CallStats) Totals() []CallWindow {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]CallWindow, 0, len(c.all))
+	for _, w := range c.all {
+		out = append(out, *w)
+	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Kind < out[j].Kind })
 	return out
 }

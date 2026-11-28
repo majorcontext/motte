@@ -26,3 +26,26 @@ func TestCallStatsTimesWithTheInjectedClock(t *testing.T) {
 		t.Errorf("second Take = %+v, want none", again)
 	}
 }
+
+// TestTotalsSurviveTake: the stats log takes the window every 30 s, and a caller that measures one command reads the
+// totals before and after it; a Take that reset the totals would break that difference.
+func TestTotalsSurviveTake(t *testing.T) {
+	t.Parallel()
+	clk := quartz.NewMock(t)
+	c := tel.NewCallStats(clk)
+	call := func(d time.Duration) {
+		end := c.Begin("k")
+		clk.Advance(d)
+		end()
+	}
+	call(3 * time.Second)
+	c.Take()
+	call(time.Second)
+	if got := c.Totals(); len(got) != 1 || got[0] != (tel.CallWindow{Kind: "k", Count: 2, Total: 4 * time.Second, Max: 3 * time.Second}) {
+		t.Errorf("Totals = %+v, want 2 calls of k, 4 s in total, 3 s at most", got)
+	}
+	var none *tel.CallStats
+	if got := none.Totals(); got != nil {
+		t.Errorf("nil Totals = %+v", got)
+	}
+}

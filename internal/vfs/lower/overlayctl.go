@@ -35,7 +35,14 @@ func (v *VFS) Dirty(ctx context.Context) ([]ctl.DirtyEntry, upperdir.Token, erro
 
 // Stats returns the counters of the node cache.
 func (v *VFS) Stats() ctl.Stats {
-	return ctl.Stats{BlobHits: v.c.BlobHits.Load(), BlobMisses: v.c.BlobMisses.Load(), TreeCalls: v.c.TreeMisses.Load()}
+	st := ctl.Stats{BlobHits: v.c.BlobHits.Load(), BlobMisses: v.c.BlobMisses.Load(), TreeCalls: v.c.TreeMisses.Load()}
+	if totals := v.calls.Totals(); len(totals) > 0 {
+		st.Calls = make(map[string]ctl.CallTotal, len(totals))
+		for _, w := range totals {
+			st.Calls[w.Kind] = ctl.CallTotal{Count: w.Count, TotalUS: w.Total.Microseconds(), MaxUS: w.Max.Microseconds()}
+		}
+	}
+	return st
 }
 
 // Cache is the node cache of the mount.

@@ -133,6 +133,15 @@ type Stats struct {
 	BlobHits   int64 `json:"blob_hits"`
 	BlobMisses int64 `json:"blob_misses"`
 	TreeCalls  int64 `json:"tree_calls"`
+	// Calls holds, by kind of call, what the calls did since the workspace opened. It never resets.
+	Calls map[string]CallTotal `json:"calls,omitempty"`
+}
+
+// CallTotal is what the calls of one kind did since the workspace opened.
+type CallTotal struct {
+	Count   uint64 `json:"count"`
+	TotalUS int64  `json:"total_us"`
+	MaxUS   int64  `json:"max_us"`
 }
 
 type (

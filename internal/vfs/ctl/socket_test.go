@@ -74,7 +74,8 @@ func TestListenRefusesAnOpenDirectory(t *testing.T) {
 }
 
 // TestStatsRecordCountsControlAndStoreCalls: an operator must see how many control calls of each op the daemon
-// served and which store requests they caused, or the time of one snapshot cannot be attributed.
+// served and which store requests they caused, in the log and in the stats answer, or the time of one snapshot or
+// one command cannot be attributed.
 func TestStatsRecordCountsControlAndStoreCalls(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
@@ -82,6 +83,12 @@ func TestStatsRecordCountsControlAndStoreCalls(t *testing.T) {
 	d.send(`{"op":"put","type":"blob","data":"eA=="}`)
 	d.send(`{"op":"opheads"}`)
 	d.send(`{"op":"opheads"}`)
+	calls, _ := d.send(`{"op":"stats"}`)["calls"].(map[string]any)
+	for kind, want := range map[string]float64{"ctl_put": 1, "ctl_opheads": 2, "store_object_put": 1} {
+		if c, _ := calls[kind].(map[string]any); c["count"] != want {
+			t.Errorf("stats answer calls[%s] = %v, want count %v", kind, calls[kind], want)
+		}
+	}
 	d.vfs.Close()
 	var rec map[string]any
 	for _, l := range bytes.Split(buf.Bytes(), []byte("\n")) {
