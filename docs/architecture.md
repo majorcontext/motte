@@ -507,7 +507,7 @@ Every external provider sits behind an interface that its consumer owns. A provi
 
 ## jj backend
 
-The crate `jj/` builds the binary `jj`: jj 0.47.1 (`jj-lib` and `jj-cli`, pinned exactly) with four shims and the subcommand `jj motte`. The binary keeps the name `jj` because it is jj with extra stores. A release attaches it for linux amd64 and arm64, with sha256 sums. `go run ./internal/release/cmd/release jj` builds it and `publish` sends it (see Release entry points).
+The crate `jj/` builds the binary `jj`: jj 0.47.1 (`jj-lib` and `jj-cli`, pinned exactly) with four shims and the subcommand `jj motte`. The binary keeps the name `jj` because it is jj with extra stores. A release attaches it for linux amd64 and arm64, with sha256 sums. The released binary has no debug info and no symbols; the release profile of the crate keeps debug info for local profiling. `go run ./internal/release/cmd/release jj` builds it and `publish` sends it (see Release entry points).
 
 ### Shims
 

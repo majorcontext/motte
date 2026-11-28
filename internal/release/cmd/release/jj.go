@@ -40,7 +40,10 @@ func jjCmd(args []string, out io.Writer) error {
 	}
 	r := runner{dryRun: *dry, out: out}
 	plat := "linux/" + *arch
-	build := []string{"run", "--rm", "--platform", plat, "-v", crate + ":/w", "-w", "/w"}
+	// The crate keeps debug info in its release profile for local profiling; the released binary drops it, which
+	// cuts it from about 370 MB to about 40 MB in every image that ships it.
+	build := []string{"run", "--rm", "--platform", plat, "-v", crate + ":/w", "-w", "/w",
+		"-e", "CARGO_PROFILE_RELEASE_DEBUG=0", "-e", "CARGO_PROFILE_RELEASE_STRIP=symbols"}
 	if *version != "" {
 		build = append(build, "-e", "MOTTE_VERSION="+*version)
 	}
