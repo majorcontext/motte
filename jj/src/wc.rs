@@ -118,7 +118,7 @@ struct StateFile {
 }
 
 /// The operation that the state names while a checkout writes the mount; no op store holds it.
-const UNFINISHED_CHECKOUT: &str = concat!(
+pub const UNFINISHED_CHECKOUT: &str = concat!(
     "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
     "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 );

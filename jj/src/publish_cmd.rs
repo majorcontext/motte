@@ -36,6 +36,18 @@ pub(crate) struct SyncArgs {
 const FLUSH_TRIES: usize = 3;
 
 pub(crate) async fn flush(ui: &mut Ui, helper: &CommandHelper) -> Result<(), CommandError> {
+    let ws = helper.workspace_helper_no_snapshot(ui).await?;
+    if ws.working_copy().operation_id().hex() == motte_jj::wc::UNFINISHED_CHECKOUT {
+        drop(ws);
+        recover_unfinished_checkout(ui, helper).await.map_err(|e| {
+            cmd_err(format!(
+                "{STALE_AFTER_CHECKOUT}; the flush could not recover: {}",
+                e.error
+            ))
+        })?;
+    } else {
+        drop(ws);
+    }
     let repo_path = helper.workspace_loader()?.repo_path().to_owned();
     let ctl = daemon(&repo_path).map_err(cmd_err)?;
     motte_jj::wc::FORCE_FULL.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -131,6 +143,55 @@ pub(crate) async fn rematerialize(
         ui.stdout(),
         "stored tree {named} of mount commit {}",
         args.commit
+    )?;
+    Ok(())
+}
+
+/// What a command prints when a checkout that did not finish left the working copy stale. A
+/// caller names it in its own report.
+pub(crate) const STALE_AFTER_CHECKOUT: &str = "the working copy is stale after a checkout that \
+     did not finish; run `jj workspace update-stale`";
+
+/// The stderr line of a flush that made a recovery commit, followed by its change ID, so that a
+/// caller tells the agent without reading prose.
+pub(crate) const RECOVERY_LINE: &str = "motte: recovery-commit";
+
+/// After a checkout that did not finish, makes the recovery commit that `jj workspace
+/// update-stale` makes: a new working-copy commit on the old one, which the snapshot of the flush
+/// then fills with the whole mount, so no file that only the mount holds is lost and the old
+/// commit stays as it was. A flush is the save before a stop, which must not wait for a turn.
+async fn recover_unfinished_checkout(
+    ui: &mut Ui,
+    helper: &CommandHelper,
+) -> Result<(), CommandError> {
+    let mut workspace = helper.load_workspace()?;
+    let name = workspace.workspace_name().to_owned();
+    let loader = workspace.repo_loader().clone();
+    let mut locked = workspace
+        .start_working_copy_mutation()
+        .await
+        .map_err(cmd_err)?;
+    // The command lock of a flush is shared, so another flush or an update-stale can recover
+    // between the first check and this lock.
+    if locked.locked_wc().old_operation_id().hex() != motte_jj::wc::UNFINISHED_CHECKOUT {
+        return Ok(());
+    }
+    let repo = loader.load_at_head(Some(&name)).await.map_err(cmd_err)?;
+    let (repo, commit) = jj_lib::working_copy::create_and_check_out_recovery_commit(
+        locked.locked_wc(),
+        &repo,
+        name,
+        "RECOVERY COMMIT FROM `jj motte flush`\n\nA checkout of the working copy did not finish, so \
+         the mount held a part of it.\nThis commit holds the mount as the flush found it, on the \
+         commit that the working copy\nnamed before the checkout.\n",
+    )
+    .await
+    .map_err(cmd_err)?;
+    locked.finish(repo.op_id().clone()).await.map_err(cmd_err)?;
+    writeln!(
+        ui.status(),
+        "{RECOVERY_LINE} {}",
+        commit.change_id().reverse_hex()
     )?;
     Ok(())
 }

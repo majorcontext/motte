@@ -36,6 +36,34 @@ pub struct FetchArgs {
     remote: String,
 }
 
+/// Set while `jj motte follow` fetches: the fetch then takes no snapshot, records the refs only
+/// (follow settles landed commits itself, after its own snapshot), and writes its lines to
+/// stderr, so that the stdout of follow holds its report alone.
+static QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Fetches the bookmark `branch` of origin as `jj motte fetch -b <branch>` does, with no snapshot
+/// and no settling of landed commits, writing its lines to stderr.
+pub(crate) async fn quietly(ui: &mut Ui, helper: &CommandHelper, branch: &str) -> Result<(), Fail> {
+    QUIET.store(true, std::sync::atomic::Ordering::Relaxed);
+    let args = FetchArgs {
+        bookmark: vec![branch.to_owned()],
+        remote: REMOTE.to_owned(),
+    };
+    let result = fetch(ui, helper, &args).await;
+    QUIET.store(false, std::sync::atomic::Ordering::Relaxed);
+    result
+}
+
+fn report(ui: &mut Ui, line: &str) -> Result<(), Fail> {
+    let quiet = QUIET.load(std::sync::atomic::Ordering::Relaxed);
+    if quiet {
+        writeln!(ui.status(), "{line}").map_err(CommandError::from)?;
+    } else {
+        writeln!(ui.stdout(), "{line}").map_err(CommandError::from)?;
+    }
+    Ok(())
+}
+
 pub(crate) struct Tip {
     pub name: String,
     pub id: CommitId,
@@ -63,7 +91,11 @@ async fn fetch(ui: &mut Ui, helper: &CommandHelper, args: &FetchArgs) -> Result<
     let mut names = args.bookmark.clone();
     names.sort();
     names.dedup();
-    let mut ws = helper.workspace_helper(ui).await?;
+    let mut ws = if QUIET.load(std::sync::atomic::Ordering::Relaxed) {
+        helper.workspace_helper_no_snapshot(ui).await?
+    } else {
+        helper.workspace_helper(ui).await?
+    };
     if let Some(native) =
         repo_config::native(helper.settings()).map_err(|e| Fail::new(Outcome::Refused, e))?
     {
@@ -135,7 +167,7 @@ pub(crate) fn compare(
 
 pub(crate) fn up_to_date(ui: &mut Ui, wanted: &[String]) -> Result<(), Fail> {
     for name in wanted {
-        writeln!(ui.stdout(), "{name}: up to date").map_err(CommandError::from)?;
+        report(ui, &format!("{name}: up to date"))?;
     }
     Ok(())
 }
@@ -290,7 +322,12 @@ pub(crate) async fn record(
                 .and_then(|(_, r)| r.target.as_normal().cloned())
         })
         .collect();
-    for (local, landed) in settle_landed(&mut tx, tips, &before).await? {
+    let settled = if QUIET.load(std::sync::atomic::Ordering::Relaxed) {
+        vec![]
+    } else {
+        settle_landed(&mut tx, tips, &before).await?
+    };
+    for (local, landed) in settled {
         lines.push(format!(
             "{}: landed as {}",
             short(&local.hex()),
@@ -308,10 +345,19 @@ pub(crate) async fn record(
         );
         lines.push(format!("{name}: deleted on {REMOTE}"));
     }
-    tx.finish(ui, format!("fetch {} from {REMOTE}", names(tips, gone)))
-        .await?;
+    let description = format!("fetch {} from {REMOTE}", names(tips, gone));
+    if QUIET.load(std::sync::atomic::Ordering::Relaxed) {
+        // The refs only: finishing as a command would make a new working-copy commit when the
+        // fetched branch reaches `@`, and check it out.
+        tx.into_inner()
+            .commit(description)
+            .await
+            .map_err(CommandError::from)?;
+    } else {
+        tx.finish(ui, description).await?;
+    }
     for line in lines {
-        writeln!(ui.stdout(), "{line}").map_err(CommandError::from)?;
+        report(ui, &line)?;
     }
     Ok(())
 }
@@ -328,7 +374,7 @@ const LANDED_WALK: usize = 64;
 /// of the landed commit gives exactly the landed tree. A local commit that differs, such as one
 /// amended after the push, stays, and the divergence shows. Descendants of a hidden commit move
 /// onto the landed one. Returns each pair of local and landed commit.
-async fn settle_landed(
+pub(crate) async fn settle_landed(
     tx: &mut jj_cli::cli_util::WorkspaceCommandTransaction<'_>,
     tips: &[Tip],
     before: &[Option<CommitId>],

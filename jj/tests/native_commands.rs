@@ -461,19 +461,194 @@ fn walk_stored(f: &Fixture, commit: &str) -> String {
     root
 }
 
-/// Catches a snapshot that takes the files of a checkout that failed part of the way for edits.
+/// Catches a snapshot that takes the files of a checkout that failed part of the way for edits,
+/// and a flush that loses an edit of the mount or changes the old commit when it recovers.
 #[test]
 fn a_snapshot_over_a_checkout_that_did_not_finish_stops() {
     let f = Fixture::with(FakeDaemon::full());
     let ws = native(&f);
     bookmark(&f, &ws, "x", "2");
     f.jj(&ws.mount, &["new", &ws.commit]);
+    let show = |r: &str| {
+        f.jj(
+            &ws.mount,
+            &["file", "show", "--ignore-working-copy", "-r", r, "a"],
+        )
+    };
+    let old = f.jj(
+        &ws.mount,
+        &["log", "-r", "@", "--no-graph", "-T", "commit_id"],
+    );
+    let before = show(&old);
     std::fs::set_permissions(&ws.mount, PermissionsExt::from_mode(0o555)).unwrap();
     assert!(!f.jj_try(&ws.mount, &["edit", "x"], &[]).0);
     f.jj(&ws.mount, &["undo", "--ignore-working-copy"]);
     let (ok, text) = f.jj_try(&ws.mount, &["status"], &[]);
     std::fs::set_permissions(&ws.mount, PermissionsExt::from_mode(0o755)).unwrap();
     assert!(!ok && text.contains("update-stale"), "{text}");
+    assert_eq!(follow(&f, &ws, &[])["skipped"], "stale");
+    edit(&f, &ws, "mount");
+    let (ok, text) = f.jj_try(&ws.mount, &["motte", "flush"], &[]);
+    let line = text
+        .lines()
+        .find_map(|l| l.strip_prefix("motte: recovery-commit "));
+    assert!(ok, "{text}");
+    assert_eq!(show(line.expect("the recovery line")), "mount", "{text}");
+    assert_eq!(show(&old), before, "the recovery changed the old commit");
+}
+
+/// Moves main in the store to a new commit on the start commit whose file `a` is `body`.
+fn move_main(f: &Fixture, ws: &Workspace, body: &str) -> String {
+    let base = CommitId::try_from_hex(&ws.commit).unwrap();
+    let tree = f.tree(&[("a", body), ("b", "2")].into());
+    let main = f.commit_on(&[base], tree, 9);
+    f.daemon
+        .state
+        .lock()
+        .unwrap()
+        .refs
+        .insert("main".into(), (main.clone(), 5));
+    main
+}
+
+fn follow(f: &Fixture, ws: &Workspace, extra: &[&str]) -> serde_json::Value {
+    let out = f.jj(&ws.mount, &[&["motte", "follow", "--json"], extra].concat());
+    let json = out.lines().next().unwrap_or_default();
+    serde_json::from_str(json).unwrap_or_else(|e| panic!("{e}: {out}"))
+}
+
+/// Catches a follow that breaks the contract of its caller: an unmoved branch that changes
+/// anything, a rebase that misses the branch of the working copy or reports no conflict, a
+/// fetch-only run that rebases, and a held lock that does not answer busy.
+#[test]
+fn a_follow_rebases_the_branch_of_the_working_copy_onto_the_moved_default_branch() {
+    let f = Fixture::with(FakeDaemon::full());
+    let ws = native(&f);
+    bookmark(&f, &ws, "topic", "x");
+    assert_eq!(follow(&f, &ws, &[])["skipped"], "unchanged");
+    let at = || {
+        f.jj(
+            &ws.mount,
+            &["log", "-r", "@", "--no-graph", "-T", "commit_id"],
+        )
+    };
+    let start = at();
+    f.daemon
+        .state
+        .lock()
+        .unwrap()
+        .refs
+        .insert("main".into(), (start.clone(), 4));
+    assert_eq!(follow(&f, &ws, &["--fetch-only"])["skipped"], "fetch_only");
+    assert_eq!(
+        at(),
+        start,
+        "a fetch-only follow of a fast-forward land changed @"
+    );
+    let main = move_main(&f, &ws, "1");
+    let fetched = follow(&f, &ws, &["--fetch-only"]);
+    assert_eq!(
+        (&fetched["skipped"], &fetched["new"]),
+        (&"fetch_only".into(), &main.clone().into())
+    );
+    let on = |c: &str| {
+        f.jj(
+            &ws.mount,
+            &[
+                "log",
+                "-r",
+                &format!("{c} & ::@"),
+                "--no-graph",
+                "-T",
+                "commit_id",
+            ],
+        )
+    };
+    assert_eq!(on(&main), "", "a fetch-only follow rebased");
+    let lock = std::fs::File::open(ws.jj_root.join(".jj/repo/motte_command.lock")).unwrap();
+    lock.lock().unwrap();
+    assert_eq!(follow(&f, &ws, &[])["skipped"], "busy");
+    lock.unlock().unwrap();
+    let main = move_main(&f, &ws, "y");
+    let out = follow(&f, &ws, &[]);
+    assert_eq!(
+        (&out["moved"], &out["new"], &out["skipped"]),
+        (&true.into(), &main.clone().into(), &"".into())
+    );
+    assert_eq!(out["rebased"].as_array().unwrap().len(), 1, "{out}");
+    assert_eq!(
+        out["conflicts"][0]["paths"],
+        serde_json::json!(["a"]),
+        "{out}"
+    );
+    assert_eq!(
+        on(&main),
+        main,
+        "the branch of the working copy is not on main"
+    );
+}
+
+/// Catches a follow that does more than it reports: settles or rebases under --fetch-only, rewrites
+/// an immutable change, counts no commits when the branch had no tip yet, or records an edit of the
+/// mount when the branch did not move.
+#[test]
+fn a_follow_changes_nothing_that_it_does_not_report() {
+    let f = Fixture::with(FakeDaemon::full());
+    let ws = native(&f);
+    bookmark(&f, &ws, "topic", "x");
+    let topic = || {
+        let args = [
+            "log",
+            "-r",
+            "topic",
+            "--ignore-working-copy",
+            "--no-graph",
+            "-T",
+            "commit_id",
+        ];
+        f.jj(&ws.mount, &args)
+    };
+    let local = topic();
+    let landed = land_rebased(&f, &ws, "topic", "x");
+    for _ in 0..2 {
+        assert_eq!(follow(&f, &ws, &["--fetch-only"])["skipped"], "fetch_only");
+    }
+    assert_eq!(
+        topic(),
+        local,
+        "a fetch-only follow settled the landed change"
+    );
+    let config = "revset-aliases.\"immutable_heads()\"=\"topic\"";
+    let args = ["--config", config, "motte", "follow", "--json"];
+    assert!(
+        !f.jj_try(&ws.mount, &args, &[]).0,
+        "follow rewrote an immutable change"
+    );
+    assert_eq!(follow(&f, &ws, &[])["moved"], false);
+    assert_eq!(
+        topic(),
+        landed,
+        "a follow after a fetch-only run did not settle"
+    );
+    f.jj(
+        &ws.mount,
+        &["bookmark", "forget", "--include-remotes", "main"],
+    );
+    let out = follow(&f, &ws, &[]);
+    assert!(
+        out["old"] == "" && out["commits"].as_u64() > Some(0),
+        "{out}"
+    );
+    let ops = || {
+        f.jj(
+            &ws.mount,
+            &["op", "log", "--ignore-working-copy", "-T", "id"],
+        )
+    };
+    let before = ops();
+    edit(&f, &ws, "dirty");
+    assert_eq!(follow(&f, &ws, &[])["skipped"], "unchanged");
+    assert_eq!(ops(), before, "an unchanged follow wrote an operation");
 }
 
 #[test]

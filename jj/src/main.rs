@@ -8,6 +8,7 @@ mod changes_cmd;
 mod command_lock;
 mod fetch;
 mod fetch_objects;
+mod follow_cmd;
 mod init_cmd;
 mod native_check;
 mod native_delete;
@@ -66,6 +67,9 @@ enum MotteCommand {
     Push(push::PushArgs),
     /// Fetch the bookmarks of origin: from the GitHub repo with git, or from the ref store of a native repo
     Fetch(fetch::FetchArgs),
+    /// Fetch the default branch of origin and rebase the branch of the working copy onto it, holding
+    /// the command lock exclusive
+    Follow(follow_cmd::FollowArgs),
 }
 
 pub(crate) fn cmd_err(e: impl std::fmt::Display) -> CommandError {
@@ -97,6 +101,7 @@ async fn run_custom_command(
         MotteCommand::Changes(args) => changes_cmd::run(ui, helper, args).await,
         MotteCommand::Push(args) => push::run(ui, helper, args).await,
         MotteCommand::Fetch(args) => fetch::run(ui, helper, args).await,
+        MotteCommand::Follow(args) => follow_cmd::follow(ui, helper, args).await,
         MotteCommand::Dirty => dirty(ui, helper),
     }
 }

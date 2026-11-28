@@ -109,7 +109,7 @@ pub async fn hook(
         .map(|l| l.repo_path().to_owned())
         .filter(|p| {
             p.is_dir()
-                && subcommand != Some("snapshot")
+                && !matches!(subcommand, Some("snapshot" | "follow"))
                 && !helper.global_args().ignore_working_copy
         });
     let _held = match acquire(repo_path.as_deref(), wait_for(subcommand)) {
