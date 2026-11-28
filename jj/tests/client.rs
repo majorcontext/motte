@@ -145,7 +145,7 @@ fn an_op_prefetch_keeps_no_more_than_its_byte_budget() {
         }
     }
     let ctl = CtlClient::new(d.path());
-    let got = motte_jj::stores::prefetch_ops(&ctl, &ops, 4, 2500);
+    let got = motte_jj::stores::prefetch_ops(&ctl, &ops, 4, 2500, None);
     let bytes: usize = got.values().map(Vec::len).sum();
     assert!(bytes <= 2500, "kept {bytes} bytes");
     assert_eq!(
@@ -154,6 +154,28 @@ fn an_op_prefetch_keeps_no_more_than_its_byte_budget() {
         "{:?}",
         got.keys()
     );
-    let all = motte_jj::stores::prefetch_ops(&ctl, &ops, 4, usize::MAX);
+    let all = motte_jj::stores::prefetch_ops(&ctl, &ops, 4, usize::MAX, None);
     assert_eq!(all.len(), 6);
+}
+
+/// Catches a speculative prefetch that waits for ever, or for each object in turn, for answers
+/// that never come: the command that runs it needs none of them.
+#[test]
+fn a_speculative_prefetch_ends_soon_after_its_deadline_when_the_daemon_does_not_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sock");
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    let c = CtlClient::speculative(&path, std::time::Duration::from_millis(50));
+    let ops: Vec<_> = (0..200)
+        .map(|i| (format!("{i:02x}"), format!("{i:02x}")))
+        .collect();
+    let start = std::time::Instant::now();
+    let deadline = start + std::time::Duration::from_millis(100);
+    let got = motte_jj::stores::prefetch_ops(&c, &ops, 1, usize::MAX, Some(deadline));
+    assert!(
+        got.is_empty() && start.elapsed().as_secs() < 2,
+        "{:?}",
+        start.elapsed()
+    );
+    drop(listener);
 }

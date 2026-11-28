@@ -213,6 +213,7 @@ pub struct CtlClient {
     idle: Mutex<Vec<Conn>>,
     known: Mutex<HashSet<gix::ObjectId>>,
     no_batch: AtomicBool,
+    read_timeout: Option<std::time::Duration>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -303,6 +304,16 @@ impl CtlClient {
             idle: Mutex::new(Vec::new()),
             known: Mutex::new(HashSet::new()),
             no_batch: AtomicBool::new(false),
+            read_timeout: None,
+        }
+    }
+
+    /// A client whose reads of an answer fail after `timeout`, for reads that only speed a
+    /// command up: an answer that never comes must not hold a command that does not need it.
+    pub fn speculative(path: impl Into<PathBuf>, timeout: std::time::Duration) -> Self {
+        Self {
+            read_timeout: Some(timeout),
+            ..Self::new(path)
         }
     }
 
@@ -319,6 +330,8 @@ impl CtlClient {
 
     fn connect(&self) -> StoreResult<Conn> {
         let w = UnixStream::connect(&self.path).map_err(|e| self.io_err(e))?;
+        w.set_read_timeout(self.read_timeout)
+            .map_err(|e| self.io_err(e))?;
         let r = w.try_clone().map_err(|e| self.io_err(e))?;
         Ok(Conn {
             w,

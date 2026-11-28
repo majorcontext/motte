@@ -82,7 +82,23 @@ impl Scratch {
 }
 
 #[derive(Debug)]
-pub struct MotteOpStore(SimpleOpStore, PathBuf, RootOperationData);
+pub struct MotteOpStore(
+    SimpleOpStore,
+    PathBuf,
+    RootOperationData,
+    std::sync::atomic::AtomicBool,
+);
+
+/// The daemon connections and the memory of the prefetch of the op log behind a restore of the
+/// head, and the most rounds it makes: a round reads the restore lists at the boundary of the local
+/// op log, so a list written before its flush took the lists of the restores behind it covers one
+/// wake.
+const PREFETCH_WIDTH: usize = 16;
+const PREFETCH_BYTES: usize = 64 << 20;
+const PREFETCH_ROUNDS: usize = 16;
+
+/// How long the speculative reads of the op log may take in all, and each read of an answer.
+pub const SPECULATIVE: Duration = Duration::from_secs(5);
 
 impl MotteOpStore {
     pub fn init(path: &Path, root: RootOperationData) -> Result<Self, BackendInitError> {
@@ -90,6 +106,7 @@ impl MotteOpStore {
             SimpleOpStore::init(path, root.clone())?,
             path.to_owned(),
             root,
+            Default::default(),
         ))
     }
     pub fn load(path: &Path, root: RootOperationData) -> Self {
@@ -97,7 +114,114 @@ impl MotteOpStore {
             SimpleOpStore::load(path, root.clone()),
             path.to_owned(),
             root,
+            Default::default(),
         )
+    }
+
+    fn ctl(&self) -> Option<CtlClient> {
+        let repo = self.1.parent()?;
+        Some(CtlClient::new(socket_path(&repo.join("store")).ok()?))
+    }
+
+    /// At the first object that the store lacks, reads the op log behind each restore of the head
+    /// into the store at once: the walk would read it one object after another, because each
+    /// operation names the next. The restore lists of the boundary of the local op log name those
+    /// objects. An object that fails to read or to check is left to the read of one object.
+    async fn prefetch(&self) {
+        if self.3.swap(true, std::sync::atomic::Ordering::SeqCst) || local_only() {
+            return;
+        }
+        let Some(sock) = self.ctl().map(|c| c.path().to_owned()) else {
+            return;
+        };
+        let ctl = CtlClient::speculative(sock, SPECULATIVE);
+        let deadline = Instant::now() + SPECULATIVE;
+        let heads = self.1.parent().map(|r| r.join("op_heads").join("heads"));
+        let mut todo: Vec<OperationId> = std::fs::read_dir(heads.unwrap_or_default())
+            .into_iter()
+            .flatten()
+            .filter_map(|e| OperationId::try_from_hex(e.ok()?.file_name().to_str()?))
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..PREFETCH_ROUNDS {
+            if Instant::now() > deadline {
+                return;
+            }
+            let mut edge = std::collections::BTreeSet::new();
+            let mut missing = Vec::new();
+            while let Some(id) = todo.pop() {
+                if id == *self.root_operation_id() || !seen.insert(id.clone()) {
+                    continue;
+                }
+                let Ok(op) = self.0.read_operation(&id).await else {
+                    continue;
+                };
+                for parent in op.parents {
+                    if self.has("operations", &parent.hex()) || parent == *self.root_operation_id()
+                    {
+                        todo.push(parent);
+                    } else {
+                        edge.insert(id.hex());
+                        missing.push(parent);
+                    }
+                }
+            }
+            let ops: Vec<(String, String)> = edge
+                .iter()
+                .take_while(|_| Instant::now() < deadline)
+                .filter_map(|head| get_restore_list(&ctl, head).ok().flatten())
+                .flat_map(|list| list.ops)
+                .filter(|(op, _)| !self.has("operations", op))
+                .collect();
+            if ops.is_empty() {
+                return;
+            }
+            self.publish_all(prefetch_ops(
+                &ctl,
+                &ops,
+                PREFETCH_WIDTH,
+                PREFETCH_BYTES,
+                Some(deadline),
+            ))
+            .await;
+            todo = missing;
+        }
+    }
+
+    fn has(&self, kind: &str, hex: &str) -> bool {
+        self.1.join(kind).join(hex).exists()
+    }
+
+    /// Moves each object of `got` that decodes and hashes to its ID into the store.
+    async fn publish_all(&self, got: std::collections::HashMap<(&'static str, String), Vec<u8>>) {
+        let Ok(dir) = tempfile::Builder::new()
+            .prefix(".motte-fetch")
+            .tempdir_in(&self.1)
+        else {
+            return;
+        };
+        let scratch = SimpleOpStore::load(dir.path(), self.2.clone());
+        for ((kind, hex), data) in got {
+            let file = dir.path().join(kind).join(&hex);
+            let written = std::fs::create_dir_all(dir.path().join(kind))
+                .and_then(|()| std::fs::write(&file, data));
+            let (Ok(()), Ok(bytes)) = (written, hex::decode(&hex)) else {
+                continue;
+            };
+            let hash = match kind {
+                "operations" => scratch
+                    .read_operation(&OperationId::new(bytes.clone()))
+                    .await
+                    .map(|o| jj_lib::content_hash::blake2b_hash(&o)),
+                _ => scratch
+                    .read_view(&ViewId::new(bytes.clone()))
+                    .await
+                    .map(|v| jj_lib::content_hash::blake2b_hash(&v)),
+            };
+            if hash.is_ok_and(|h| h.as_slice() == bytes) {
+                let _ = std::fs::rename(&file, self.1.join(kind).join(&hex));
+            }
+        }
     }
 
     /// Reads an object of the op log that this repo lacks from the daemon into a scratch op store
@@ -168,6 +292,10 @@ impl OpStore for MotteOpStore {
     }
     async fn read_view(&self, id: &ViewId) -> OpStoreResult<View> {
         match self.0.read_view(id).await {
+            Err(OpStoreError::ObjectNotFound { .. }) => self.prefetch().await,
+            other => return other,
+        }
+        match self.0.read_view(id).await {
             Err(OpStoreError::ObjectNotFound { .. }) => {}
             other => return other,
         }
@@ -183,6 +311,10 @@ impl OpStore for MotteOpStore {
         self.0.write_view(contents).await
     }
     async fn read_operation(&self, id: &OperationId) -> OpStoreResult<Operation> {
+        match self.0.read_operation(id).await {
+            Err(OpStoreError::ObjectNotFound { .. }) => self.prefetch().await,
+            other => return other,
+        }
         match self.0.read_operation(id).await {
             Err(OpStoreError::ObjectNotFound { .. }) => {}
             other => return other,
@@ -730,7 +862,7 @@ fn is_hex(s: &str) -> bool {
 
 /// The name of the restore list of `head`: a "views" object, like the shallow roots, under a hash
 /// that no view and no head has.
-fn restore_list_name(head: &str) -> String {
+pub fn restore_list_name(head: &str) -> String {
     jj_lib::content_hash::blake2b_hash(&format!("motte restore list {head}"))
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -758,6 +890,7 @@ pub fn prefetch_ops(
     ops: &[(String, String)],
     workers: usize,
     max_bytes: usize,
+    deadline: Option<Instant>,
 ) -> std::collections::HashMap<(&'static str, String), Vec<u8>> {
     let jobs: Vec<(&'static str, &str)> = ops
         .iter()
@@ -769,8 +902,11 @@ pub fn prefetch_ops(
     std::thread::scope(|scope| {
         for _ in 0..workers.min(jobs.len()) {
             scope.spawn(|| {
-                while let Some((kind, id)) =
-                    jobs.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+                // A worker takes no new read after the deadline; one read and its retry can run past it.
+                while let Some((kind, id)) = deadline
+                    .is_none_or(|d| Instant::now() < d)
+                    .then(|| jobs.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)))
+                    .flatten()
                 {
                     if let Ok(data) = ctl.getop(kind, id) {
                         let (map, size) = &mut *got.lock().unwrap();

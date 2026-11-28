@@ -18,8 +18,8 @@ use motte_jj::ctl::{Code, CtlClient, ObjectStore, StoreError};
 use motte_jj::head_index;
 use motte_jj::stores::{
     FLUSHED_FILE, MIRROR_BUDGET, Mirrored, RESTORE_LIST_MAX, RestoreList, UNSYNCED_FILE,
-    clear_drained, clear_unsynced, merge_remote, put_ops, put_restore_list, put_shallow,
-    read_heads, settle, within,
+    clear_drained, clear_unsynced, get_restore_list, merge_remote, put_ops, put_restore_list,
+    put_shallow, read_heads, settle, within,
 };
 use motte_jj::wc::materialized_tree;
 
@@ -234,7 +234,7 @@ pub(crate) async fn publish(
         .ok_or_else(|| cmd_err("this repo has no native backend"))?
         .shallow_roots()
         .map_err(cmd_err)?;
-    let list = restore_list(&repo, ws.repo_path()).await?;
+    let list = restore_list(&repo, ws.repo_path(), ctl).await?;
     let repo_path = ws.repo_path().to_owned();
     let index_dir = repo_path.join("index");
     let view = repo.operation().view_id().hex();
@@ -292,12 +292,14 @@ pub(crate) async fn publish(
 async fn restore_list(
     repo: &Arc<ReadonlyRepo>,
     repo_path: &Path,
+    ctl: &CtlClient,
 ) -> Result<RestoreList, CommandError> {
     let root = repo.op_store().root_operation_id().clone();
     let ops_dir = repo_path.join("op_store").join("operations");
     let mut ops = Vec::new();
     let mut seen = HashSet::new();
     let mut todo = VecDeque::from([repo.op_id().clone()]);
+    let mut edge = Vec::new();
     while let Some(id) = todo.pop_front() {
         if ops.len() == RESTORE_LIST_MAX {
             break;
@@ -305,14 +307,33 @@ async fn restore_list(
         if id == root || !seen.insert(id.clone()) {
             continue;
         }
-        // A restore of the head alone leaves the older operations in the store; reading one here
-        // would fetch the whole op log, one round trip after another.
-        if !ops_dir.join(id.hex()).exists() {
-            continue;
-        }
         let op = repo.op_store().read_operation(&id).await.map_err(cmd_err)?;
         ops.push((id.hex(), op.view_id.hex()));
-        todo.extend(op.parents);
+        // A restore of the head alone leaves the older operations in the store; reading one here
+        // would fetch the whole op log, one round trip after another. The list of the restored
+        // head names them.
+        for parent in op.parents {
+            if parent == root || ops_dir.join(parent.hex()).exists() {
+                todo.push_back(parent);
+            } else if !edge.contains(&id) {
+                edge.push(id.clone());
+            }
+        }
+    }
+    let mut listed: HashSet<String> = ops.iter().map(|(op, _)| op.clone()).collect();
+    // Only a faster wake depends on these lists, so a failed or slow read does not fail the flush.
+    let ctl = CtlClient::speculative(ctl.path(), motte_jj::stores::SPECULATIVE);
+    let deadline = std::time::Instant::now() + motte_jj::stores::SPECULATIVE;
+    for head in edge {
+        if std::time::Instant::now() > deadline {
+            break;
+        }
+        let older = get_restore_list(&ctl, &head.hex()).ok().flatten();
+        for entry in older.into_iter().flat_map(|list| list.ops) {
+            if ops.len() < RESTORE_LIST_MAX && listed.insert(entry.0.clone()) {
+                ops.push(entry);
+            }
+        }
     }
     let heads: Vec<CommitId> = repo.view().heads().iter().cloned().collect();
     let commits = ResolvedRevsetExpression::commits(heads)

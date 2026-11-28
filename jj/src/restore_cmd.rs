@@ -266,12 +266,12 @@ fn fetch_head(
     let download = |w| head_index::download(ctl, index_dir, repo_path, &head.hex(), index, w);
     if width < 2 {
         download(1).map_err(cmd_err)?;
-        return Ok(prefetch_ops(ctl, &ops, 1, PREFETCH_BYTES));
+        return Ok(prefetch_ops(ctl, &ops, 1, PREFETCH_BYTES, None));
     }
     let op_width = if width < 4 { 1 } else { 2 };
     std::thread::scope(|scope| {
         let segments = scope.spawn(|| download(width - op_width));
-        let early = prefetch_ops(ctl, &ops, op_width, PREFETCH_BYTES);
+        let early = prefetch_ops(ctl, &ops, op_width, PREFETCH_BYTES, None);
         segments
             .join()
             .unwrap_or_else(|_| Err(StoreError::Local("the index download panicked".into())))
@@ -298,11 +298,11 @@ fn prefetch(
     let backend = native(repo)?;
     if width < 2 {
         backend.prefetch_commits(&list.commits, 1);
-        return Ok(prefetch_ops(ctl, &list.ops, 1, PREFETCH_BYTES));
+        return Ok(prefetch_ops(ctl, &list.ops, 1, PREFETCH_BYTES, None));
     }
     Ok(std::thread::scope(|scope| {
         scope.spawn(|| backend.prefetch_commits(&list.commits, width / 2));
-        prefetch_ops(ctl, &list.ops, width - width / 2, PREFETCH_BYTES)
+        prefetch_ops(ctl, &list.ops, width - width / 2, PREFETCH_BYTES, None)
     }))
 }
 

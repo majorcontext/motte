@@ -286,6 +286,53 @@ fn a_restore_does_not_read_each_operation_of_a_long_op_log() {
     assert!(probe(), "the read did not retry after junk bytes");
 }
 
+/// Catches a first walk of the op log after a wake that reads the older operations one after
+/// another, each named by the one before: a box woke twice, so the older half of its op log is
+/// behind two restores of the head.
+#[test]
+fn a_first_op_log_after_two_wakes_reads_the_older_operations_at_once() {
+    let f = Fixture::with(FakeDaemon::full());
+    let (mut ws, mut out) = (f.workspace(&files(), &[]), Value::Null);
+    for wake in ["one", "two"] {
+        for _ in 0..12 {
+            f.jj(&ws.mount, &["new"]);
+        }
+        let (mount, root) = (
+            mount_of(&f, wake),
+            f.dir.path().join(format!("{wake}-root")),
+        );
+        out = flush(&f, &ws);
+        let args = restore_args(&f, &ws, &out, &mount, &root);
+        f.jj_env(
+            &mount,
+            &args.iter().map(String::as_str).collect::<Vec<_>>(),
+            &[],
+        );
+        ws.mount = mount;
+    }
+    let mut st = f.daemon.state.lock().unwrap();
+    let list = motte_jj::stores::restore_list_name(out["op"].as_str().unwrap());
+    let listed = String::from_utf8_lossy(&st.op_objects[&("views".into(), list)]);
+    let listed = listed.matches("op ").count();
+    assert!(
+        listed > 24,
+        "the list of the head names only {listed} operations"
+    );
+    (st.read_delay_ms, st.reads_peak) = (20, Default::default());
+    drop(st);
+    let log = f.jj_env(
+        &ws.mount,
+        &["op", "log", "--no-graph", "-T", "id ++ \"\\n\""],
+        &[],
+    );
+    assert!(log.lines().count() > 24, "{log}");
+    let peak = f.daemon.state.lock().unwrap().reads_peak["getop"];
+    assert!(
+        peak >= 4,
+        "at most {peak} getop reads were in flight at once"
+    );
+}
+
 /// Catches a restore that trusts a record of another head, or a chain that the store does not
 /// hold whole: either would load an index that lacks commits of the head, or make jj rebuild it from
 /// the whole op log. Both must restore by the walk instead.
