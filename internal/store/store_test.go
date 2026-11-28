@@ -1250,3 +1250,21 @@ func TestAPackIsReadFromTheKeyThatTheManifestRecords(t *testing.T) {
 		}
 	}
 }
+
+// TestASecondReadOfAnOpLogObjectReadsNoBucket: each restore of a workspace reads its op log objects again, and an
+// object that charged only its bytes would let many tiny ones hold far more than the bound of the cache.
+func TestASecondReadOfAnOpLogObjectReadsNoBucket(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	id := strings.Repeat("ab", 64)
+	_ = w.svc.PutOp(t.Context(), "w1", store.OpView, id, nil)
+	before, used := w.spy.reads.Load(), w.svc.OpCacheUsed()
+	_, _ = w.svc.GetOp(t.Context(), "w1", store.OpView, id)
+	got, err := w.svc.GetOp(t.Context(), "w1", store.OpView, id)
+	if n := w.spy.reads.Load() - before; n != 1 || err != nil || len(got) != 0 {
+		t.Errorf("two reads made %d bucket reads, %v", n, err)
+	}
+	if charge := w.svc.OpCacheUsed() - used; charge < 256 {
+		t.Errorf("an empty op log object charged %d bytes, not its entry", charge)
+	}
+}

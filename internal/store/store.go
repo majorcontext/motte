@@ -71,6 +71,11 @@ const (
 	maxObjectCacheBytes = 64 << 20
 	// maxCachedObject is the largest commit or tree that the cache keeps.
 	maxCachedObject = 64 << 10
+	// maxOpCacheBytes is the memory of the cache of op log objects. A restore reads every operation and view of a
+	// workspace, each a bucket read, and the next restore of that workspace reads most of them again.
+	maxOpCacheBytes = 32 << 20
+	// maxCachedOp is the largest op log object that the cache keeps, so that one large view does not empty it.
+	maxCachedOp = 1 << 20
 	// readWorkers bounds the concurrent bucket reads of one prefetch or one batched lookup.
 	readWorkers = 16
 	// treeAhead is the trees of a bulk tree read that one prefetch reads in advance.
@@ -135,7 +140,9 @@ type Service struct {
 
 	icache *clockCache
 	ocache *clockCache
-	rcache *rangeCache
+	// opcache keeps op log objects by bucket key. An object never changes under its key: PutOp creates it once.
+	opcache *clockCache
+	rcache  *rangeCache
 	// rflight bounds the bytes of the bucket reads that outlive the requests that began them.
 	rflight    *semaphore.Weighted
 	readBudget int64
@@ -272,7 +279,7 @@ func (s *Service) tryReserveInline(bytes int64) (release func()) {
 }
 
 func New(st bucket.Store, index PackIndex, opts ...Option) *Service {
-	s := &Service{st: st, index: index, clk: clock.Real(), logger: slog.Default(), grace: DefaultGrace, open: map[string]*openPack{}, budget: semaphore.NewWeighted(MemoryBudget), inline: semaphore.NewWeighted(inlineBudget), landed: semaphore.NewWeighted(LandBudget), icache: newClockCache(maxIndexBytes), ocache: newClockCache(maxObjectCacheBytes), rcache: newRangeCache(DefaultRangeCacheBytes), rflight: semaphore.NewWeighted(DefaultReadBudget), readBudget: DefaultReadBudget, slowAfter: slowReadAfter, graphCap: midx.MaxGraphCommits}
+	s := &Service{st: st, index: index, clk: clock.Real(), logger: slog.Default(), grace: DefaultGrace, open: map[string]*openPack{}, budget: semaphore.NewWeighted(MemoryBudget), inline: semaphore.NewWeighted(inlineBudget), landed: semaphore.NewWeighted(LandBudget), icache: newClockCache(maxIndexBytes), ocache: newClockCache(maxObjectCacheBytes), opcache: newClockCache(maxOpCacheBytes), rcache: newRangeCache(DefaultRangeCacheBytes), rflight: semaphore.NewWeighted(DefaultReadBudget), readBudget: DefaultReadBudget, slowAfter: slowReadAfter, graphCap: midx.MaxGraphCommits}
 	for _, o := range opts {
 		o(s)
 	}
@@ -320,8 +327,19 @@ func (s *Service) GetOp(ctx context.Context, ws string, kind OpKind, id string) 
 	if err != nil {
 		return nil, err
 	}
+	if v, ok := s.opcache.get(key); ok {
+		return v.([]byte), nil
+	}
 	data, err := s.st.Get(ctx, key)
-	return data, mapNotFound(err)
+	if err != nil {
+		return nil, mapNotFound(err)
+	}
+	if len(data) <= maxCachedOp {
+		// A bucket read can return a slice with spare capacity, which the cache would keep whole.
+		kept := bytes.Clone(data)
+		s.opcache.put(key, kept, cap(kept)+len(key)+rangeEntryBytes)
+	}
+	return data, nil
 }
 
 // PutObjects stores objects as one pack and returns their names in order.
