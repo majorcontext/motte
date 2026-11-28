@@ -93,6 +93,9 @@ fn a_sync_drains_an_op_that_a_failed_update_left_behind() {
     );
 }
 
+/// Also catches a restore that sends the first operation and working-copy commit of the repo that
+/// it creates: the op log of the store replaces them at once, and sending them costs a pack write
+/// and a swap of the remote op heads at every wake.
 #[test]
 fn a_restore_rebuilds_the_workspace_from_the_op_log_in_the_store() {
     let f = Fixture::with(FakeDaemon::full());
@@ -100,6 +103,8 @@ fn a_restore_rebuilds_the_workspace_from_the_op_log_in_the_store() {
     let out = flush(&f, &ws);
     let (mount, root) = (mount_of(&f, "mount2"), f.dir.path().join("root2"));
     let args = restore_args(&f, &ws, &out, &mount, &root);
+    let writes = || ["put", "putbatch", "opheads"].map(|op| f.daemon.ops(op));
+    let before = writes();
     let text = f.jj_env(
         &mount,
         &args.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -109,6 +114,7 @@ fn a_restore_rebuilds_the_workspace_from_the_op_log_in_the_store() {
         text.contains("Restored motte workspace at operation"),
         "{text}"
     );
+    assert_eq!(writes(), before, "the restore sent its init to the daemon");
     let st = f.jj_env(&mount, &["st"], &[]);
     assert!(st.contains("The working copy has no changes."), "{st}");
 }

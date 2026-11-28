@@ -23,6 +23,33 @@ use crate::backend::{BACKEND_NAME, NativeBackend};
 use crate::ctl::{Code, CtlClient, StoreError, socket_path};
 
 pub const OP_STORE_NAME: &str = "motte-op-store";
+
+static LOCAL_ONLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// While it lives, the op store sends no deferred objects and the op heads store mirrors no
+/// update: the stores of the process stay local. A restore holds it while it creates the repo,
+/// whose first operation and working-copy commit it replaces at once with the op log of the store;
+/// sending them would cost a pack write and a swap of the remote op heads at every wake. Dropping
+/// it discards the objects that the backend deferred meanwhile.
+pub struct LocalOnly(());
+
+impl LocalOnly {
+    pub fn enter() -> Self {
+        LOCAL_ONLY.store(true, std::sync::atomic::Ordering::SeqCst);
+        Self(())
+    }
+}
+
+impl Drop for LocalOnly {
+    fn drop(&mut self) {
+        crate::ctl::discard_deferred();
+        LOCAL_ONLY.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn local_only() -> bool {
+    LOCAL_ONLY.load(std::sync::atomic::Ordering::SeqCst)
+}
 pub const OP_HEADS_NAME: &str = "motte-op-heads";
 
 #[derive(Debug)]
@@ -39,6 +66,9 @@ impl MotteOpStore {
     /// Sends the objects that the backend deferred. It runs before a view or an operation is
     /// written, because the daemon must hold every object that a local operation names.
     fn flush_objects(&self) -> OpStoreResult<()> {
+        if local_only() {
+            return Ok(());
+        }
         let Some(repo) = self.1.parent() else {
             return Ok(());
         };
@@ -107,6 +137,9 @@ impl MotteOpHeadsStore {
     /// The daemon socket. Without one the update goes on with the local heads only and marks
     /// nothing as unsynced.
     fn ctl(&self) -> Option<CtlClient> {
+        if local_only() {
+            return None;
+        }
         match socket_path(&self.dir.parent()?.join("store")) {
             Ok(sock) => Some(CtlClient::new(sock)),
             Err(e) => {

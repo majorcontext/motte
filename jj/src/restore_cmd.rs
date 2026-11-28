@@ -15,7 +15,7 @@ use jj_lib::workspace::Workspace;
 use motte_jj::backend::NativeBackend;
 use motte_jj::ctl::{CtlClient, ObjectStore as _};
 use motte_jj::stores::{
-    FLUSHED_FILE, RESTORE_LIST_MAX, get_restore_list, get_shallow, prefetch_ops,
+    FLUSHED_FILE, LocalOnly, RESTORE_LIST_MAX, get_restore_list, get_shallow, prefetch_ops,
 };
 use motte_jj::trace::span;
 use motte_jj::wc::{LockedVfsWorkingCopy, conflict_markers};
@@ -102,7 +102,9 @@ pub(crate) async fn restore(
         Some(roots) => roots,
         None => shallow_boundary(&ctl, base_oid, WALK_LIMIT)?,
     };
+    let local = LocalOnly::enter();
     let (mut workspace, repo) = new_workspace(ui, helper, &mount, &jj_root, &sock, shallow).await?;
+    drop(local);
     args.origin
         .write(ui, helper, workspace.repo_path(), &args.base)?;
 

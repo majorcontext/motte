@@ -139,6 +139,12 @@ struct Batch {
 static DEFERRED: Mutex<BTreeMap<PathBuf, Batch>> = Mutex::new(BTreeMap::new());
 static FLUSHING: Mutex<()> = Mutex::new(());
 
+/// Drops what every socket defers, unsent. Only a caller that never lets a stored object name one
+/// of them may call it.
+pub fn discard_deferred() {
+    DEFERRED.lock().unwrap().clear();
+}
+
 /// Sends what every socket still defers. A command runs it when it ends, so that no object that it
 /// wrote dies with the process when the command wrote no operation, which is what sends them
 /// otherwise. A failure is a warning, because the command has already reported its outcome.
