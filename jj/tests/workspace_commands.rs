@@ -176,6 +176,22 @@ fn a_restore_reads_on_no_more_connections_than_its_prefetch_width() {
     assert_eq!(all, 1, "{all} reads were in flight at once");
 }
 
+/// Catches a restore whose trace hides where its time went: a phase without a span.
+#[test]
+fn a_restore_traces_each_phase() {
+    let f = Fixture::with(FakeDaemon::full());
+    let ws = f.workspace(&files(), &[]);
+    let (mount, root) = (mount_of(&f, "mount2"), f.dir.path().join("root2"));
+    let args = restore_args(&f, &ws, &flush(&f, &ws), &mount, &root);
+    let (url, posts) = common::collector();
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    f.jj_env(&mount, &args, &[("OTEL_EXPORTER_OTLP_ENDPOINT", &url)]);
+    let body = String::from_utf8_lossy(&posts.recv().unwrap()).into_owned();
+    for phase in "init list prefetch op_walk view_heads index adopt".split(' ') {
+        assert!(body.contains(&format!("jj.restore.{phase}")), "{phase}");
+    }
+}
+
 fn restore_args(
     f: &Fixture,
     ws: &Workspace,

@@ -5,10 +5,8 @@
 mod common;
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
 
-use common::{FakeDaemon, Fixture, UNSET, Workspace};
+use common::{FakeDaemon, Fixture, UNSET, Workspace, collector};
 use gix::objs::Kind;
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
@@ -23,39 +21,6 @@ const NATIVE: [&str; 5] = [
 ];
 
 /// The body of each OTLP post. The command exports after it exits, so a test waits on the channel.
-type Posts = std::sync::mpsc::Receiver<Vec<u8>>;
-
-/// Accepts OTLP/HTTP posts.
-fn collector() -> (String, Posts) {
-    let l = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", l.local_addr().unwrap());
-    let (tx, got) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        for conn in l.incoming() {
-            let Ok(mut conn) = conn else { return };
-            let mut r = BufReader::new(conn.try_clone().unwrap());
-            let mut line = String::new();
-            let mut len = 0;
-            loop {
-                line.clear();
-                r.read_line(&mut line).unwrap();
-                if line.trim().is_empty() {
-                    break;
-                }
-                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                    len = v.trim().parse().unwrap();
-                }
-            }
-            let mut body = vec![0; len];
-            r.read_exact(&mut body).unwrap();
-            tx.send(body).unwrap();
-            conn.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                .unwrap();
-        }
-    });
-    (url, got)
-}
-
 const OUTCOMES: [&str; 5] = ["refused", "stale", "rejected", "network", "claim_lost"];
 
 /// Runs a push or fetch and returns its text and the one outcome that its span carries: `ok` when

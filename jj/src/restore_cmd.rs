@@ -17,6 +17,7 @@ use motte_jj::ctl::{CtlClient, ObjectStore as _};
 use motte_jj::stores::{
     FLUSHED_FILE, RESTORE_LIST_MAX, get_restore_list, get_shallow, prefetch_ops,
 };
+use motte_jj::trace::span;
 use motte_jj::wc::{LockedVfsWorkingCopy, conflict_markers};
 
 use crate::init_cmd::{
@@ -95,6 +96,7 @@ pub(crate) async fn restore(
     let sock = std::fs::canonicalize(&args.sock).map_err(cmd_err)?;
     let head = OperationId::try_from_hex(&args.op).ok_or_else(|| cmd_err("bad operation id"))?;
     let ctl = CtlClient::new(&sock);
+    let phase = span("jj.restore.init");
     let base_oid = gix::ObjectId::from_hex(args.base.as_bytes()).map_err(cmd_err)?;
     let shallow = match get_shallow(&ctl, &head.hex()).map_err(cmd_err)? {
         Some(roots) => roots,
@@ -104,14 +106,20 @@ pub(crate) async fn restore(
     args.origin
         .write(ui, helper, workspace.repo_path(), &args.base)?;
 
+    drop(phase);
+
     let repo_path = workspace.repo_path().to_owned();
     let width = prefetch_width(args.prefetch_width);
     let mut early = prefetch(&ctl, &repo, &head, width)?;
     let mut view_heads = HashSet::new();
+    let phase = span("jj.restore.op_walk");
     let fetched = fetch_op_log(&ctl, &repo, &repo_path, &head, &mut early, &mut view_heads).await?;
+    drop(phase);
     drop(early);
     let view_heads: Vec<CommitId> = view_heads.into_iter().collect();
+    let phase = span("jj.restore.view_heads");
     native(&repo)?.prefetch_commits(&view_heads, width);
+    drop(phase);
     let heads = repo_path.join("op_heads").join("heads");
     for entry in std::fs::read_dir(&heads).map_err(cmd_err)? {
         std::fs::remove_file(entry.map_err(cmd_err)?.path()).map_err(cmd_err)?;
@@ -119,8 +127,11 @@ pub(crate) async fn restore(
     std::fs::write(heads.join(head.hex()), b"").map_err(cmd_err)?;
     std::fs::write(repo_path.join(FLUSHED_FILE), fetched).map_err(cmd_err)?;
 
+    let phase = span("jj.restore.adopt");
     let wc_id = adopt_mount(&mut workspace, &ctl, &head, &args.commit, &mount, &jj_root).await?;
+    drop(phase);
     if let Some(branch) = args.origin.branch()? {
+        let _phase = span("jj.restore.branch");
         let base = CommitId::try_from_hex(&args.base).ok_or_else(|| cmd_err("bad commit id"))?;
         branch.restore(&mut workspace, &base).await?;
     }
@@ -157,9 +168,12 @@ fn prefetch(
     head: &OperationId,
     width: usize,
 ) -> Result<Early, CommandError> {
+    let phase = span("jj.restore.list");
     let Some(list) = get_restore_list(ctl, &head.hex()).map_err(cmd_err)? else {
         return Ok(Early::new());
     };
+    drop(phase);
+    let _phase = span("jj.restore.prefetch");
     let backend = native(repo)?;
     if width < 2 {
         backend.prefetch_commits(&list.commits, 1);
@@ -285,11 +299,13 @@ async fn adopt_mount(
     mount: &Path,
     jj_root: &Path,
 ) -> Result<CommitId, CommandError> {
+    let phase = span("jj.restore.index");
     let repo = workspace
         .repo_loader()
         .load_at_head(Some(workspace.workspace_name()))
         .await
         .map_err(cmd_err)?;
+    drop(phase);
     if repo.op_id() != head {
         return Err(cmd_err(format!(
             "the op log is at {}, not {}",
