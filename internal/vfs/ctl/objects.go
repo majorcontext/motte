@@ -82,10 +82,14 @@ func (s *Server) objects(ctx context.Context, rq request) any {
 		if bad != nil {
 			return *bad
 		}
+		if o, ok := s.known.get(shas[0]); ok {
+			return objectAnswer{o.t.String(), base64.StdEncoding.EncodeToString(o.data)}
+		}
 		t, data, err := s.Store.Object(ctx, shas[0])
 		if err != nil {
 			return storeFail(err)
 		}
+		s.known.add(shas[0], t, data)
 		return objectAnswer{t.String(), base64.StdEncoding.EncodeToString(data)}
 	case "put":
 		shas, err := s.putObjects(ctx, []api.Object{{Type: rq.Type, Data: rq.Data}})
@@ -107,6 +111,7 @@ func (s *Server) putObjects(ctx context.Context, in []api.Object) ([]string, *fa
 		return nil, &f
 	}
 	objs := make([]gitpack.Object, len(in))
+	names := make([]gitpack.SHA, len(in))
 	shas := make([]string, len(in))
 	for i, o := range in {
 		t := gitpack.ParseType(o.Type)
@@ -124,12 +129,18 @@ func (s *Server) putObjects(ctx context.Context, in []api.Object) ([]string, *fa
 			return nil, &f
 		}
 		objs[i] = gitpack.Object{Type: t, Data: data}
-		shas[i] = gitpack.Hash(t, data).String()
+		names[i] = gitpack.Hash(t, data)
+		shas[i] = names[i].String()
 	}
 	if len(objs) > 0 {
 		if err := s.Store.PutObjects(ctx, objs); err != nil {
 			f := storeFail(err)
 			return nil, &f
+		}
+	}
+	for i, o := range objs {
+		if o.Type != gitpack.Blob {
+			s.known.add(names[i], o.Type, o.Data)
 		}
 	}
 	return shas, nil

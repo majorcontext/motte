@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -16,7 +17,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/majorcontext/motte/internal/gitpack"
 	"github.com/majorcontext/motte/internal/vfs/ctl"
+	"github.com/majorcontext/motte/internal/vfs/store"
 )
 
 // TestOverLongLineGetsAnErrAnswer: a request line over MaxLine is answered line_too_long, not dropped with a closed
@@ -97,5 +100,34 @@ func TestStatsRecordCountsControlAndStoreCalls(t *testing.T) {
 		if _, ok := rec[k].(float64); !ok {
 			t.Errorf("%s missing from %v", k, rec)
 		}
+	}
+}
+
+// TestGetReadsAnObjectFromTheStoreOnce: jj reads the same commits and trees in each command, and each store read is a
+// network round trip, so a second get of an object must not read the store again.
+func TestGetReadsAnObjectFromTheStoreOnce(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	d := startDaemonLogged(t, 0, slog.New(slog.NewJSONHandler(&buf, nil)))
+	o := gitpack.Object{Type: gitpack.Tree, Data: store.EncodeTree([]store.Entry{{Name: "a", Mode: 0o100644, SHA: gitpack.Hash(gitpack.Blob, []byte("q"))}})}
+	if err := d.st.PutObjects(t.Context(), []gitpack.Object{o}); err != nil {
+		t.Fatal(err)
+	}
+	get := fmt.Sprintf(`{"op":"get","sha":"%s"}`, gitpack.Hash(o.Type, o.Data))
+	for range 2 {
+		if ans := d.send(get); ans["type"] != "tree" {
+			t.Fatalf("get answered %v", ans)
+		}
+	}
+	d.vfs.Close()
+	var rec map[string]any
+	for _, l := range bytes.Split(buf.Bytes(), []byte("\n")) {
+		var r map[string]any
+		if json.Unmarshal(l, &r) == nil && r["msg"] == "vfs.stats" && r["ctl_get_count"] != nil {
+			rec = r
+		}
+	}
+	if rec["ctl_get_count"] != 2.0 || rec["store_object_get_count"] != 1.0 {
+		t.Errorf("ctl_get_count = %v, store_object_get_count = %v, want 2 and 1", rec["ctl_get_count"], rec["store_object_get_count"])
 	}
 }

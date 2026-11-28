@@ -35,6 +35,8 @@ type Server struct {
 	// the connection stays open.
 	MaxLine int
 
+	known objectCache
+
 	mu    sync.Mutex
 	conns map[net.Conn]struct{}
 	wg    sync.WaitGroup
