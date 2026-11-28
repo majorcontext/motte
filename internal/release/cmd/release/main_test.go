@@ -25,7 +25,9 @@ func TestImageTags(t *testing.T) {
 	}
 }
 
-func TestJJBuildGetsTheTagAsItsVersion(t *testing.T) {
+// TestJJBuildGetsTheTagAndStripsTheBinary: a released jj that prints no version cannot be told apart in a box, and one
+// that keeps the debug info of the crate profile is ten times larger in every image that ships it.
+func TestJJBuildGetsTheTagAndStripsTheBinary(t *testing.T) {
 	t.Parallel()
 	var out strings.Builder
 	if err := jjCmd([]string{"-out", "x", "-arch", "amd64", "-version", "v1.2.3", "-dry-run"}, &out); err != nil {
@@ -33,5 +35,8 @@ func TestJJBuildGetsTheTagAsItsVersion(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "-e MOTTE_VERSION=v1.2.3 ") {
 		t.Errorf("build command lacks the version:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "-e CARGO_PROFILE_RELEASE_STRIP=symbols ") {
+		t.Errorf("build command does not strip the binary:\n%s", out.String())
 	}
 }
