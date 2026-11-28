@@ -520,7 +520,7 @@ The crate `jj/` builds the binary `jj`: jj 0.47.1 (`jj-lib` and `jj-cli`, pinned
 
 The names are written into `.jj/repo/*/type` and `.jj/working_copy/type`. A rename is a migration.
 
-The backend writes the bytes of `GitBackend::write_commit` (the `change-id` and `jj:trees` headers, the signing path, and the retry that lowers the committer time when a commit ID exists with other extras) and git trees in git entry order. A commit ID is the git SHA. `jj/tests/differential.rs` proves that the object IDs equal those of stock `GitBackend`. The working copy reads the dirty set of the daemon instead of walking the tree. `.jj` is a symlink in the mount to a directory outside it. `set_sparse_patterns` is unsupported.
+The backend writes the bytes of `GitBackend::write_commit` (the `change-id` and `jj:trees` headers, the signing path, and the retry that lowers the committer time when a commit ID exists with other extras) and git trees in git entry order. A commit ID is the git SHA. `jj/tests/differential.rs` proves that the object IDs equal those of stock `GitBackend`. The working copy reads the dirty set of the daemon instead of walking the tree. `.jj` is a symlink in the mount to a directory outside it. `set_sparse_patterns` is unsupported. From its first write to the mount until it finishes, a checkout sets the operation of the working-copy state to an ID that no op store holds (128 hex digits `f`). A checkout that fails part of the way leaves a part of the new tree in the mount; a later command then cannot load the operation of the working copy, so it neither finds the working copy fresh nor snapshots those files as edits of the old commit, and jj points to `jj workspace update-stale`, which keeps the mount in a recovery commit.
 
 ### Daemon channel
 

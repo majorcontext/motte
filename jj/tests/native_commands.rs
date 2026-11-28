@@ -5,6 +5,7 @@
 mod common;
 
 use std::collections::BTreeMap;
+use std::os::unix::fs::PermissionsExt;
 
 use common::{FakeDaemon, Fixture, UNSET, Workspace, collector};
 use gix::objs::Kind;
@@ -458,6 +459,21 @@ fn walk_stored(f: &Fixture, commit: &str) -> String {
         }
     }
     root
+}
+
+/// Catches a snapshot that takes the files of a checkout that failed part of the way for edits.
+#[test]
+fn a_snapshot_over_a_checkout_that_did_not_finish_stops() {
+    let f = Fixture::with(FakeDaemon::full());
+    let ws = native(&f);
+    bookmark(&f, &ws, "x", "2");
+    f.jj(&ws.mount, &["new", &ws.commit]);
+    std::fs::set_permissions(&ws.mount, PermissionsExt::from_mode(0o555)).unwrap();
+    assert!(!f.jj_try(&ws.mount, &["edit", "x"], &[]).0);
+    f.jj(&ws.mount, &["undo", "--ignore-working-copy"]);
+    let (ok, text) = f.jj_try(&ws.mount, &["status"], &[]);
+    std::fs::set_permissions(&ws.mount, PermissionsExt::from_mode(0o755)).unwrap();
+    assert!(!ok && text.contains("update-stale"), "{text}");
 }
 
 #[test]

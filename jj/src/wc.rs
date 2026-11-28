@@ -117,6 +117,12 @@ struct StateFile {
     unwritten: BTreeSet<String>,
 }
 
+/// The operation that the state names while a checkout writes the mount; no op store holds it.
+const UNFINISHED_CHECKOUT: &str = concat!(
+    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+);
+
 /// How a new workspace finds its mount and daemon.
 #[derive(Clone, Debug, Default)]
 pub struct VfsConfig {
@@ -1149,6 +1155,16 @@ impl LockedVfsWorkingCopy {
         let t_loop = Instant::now();
         let entries = diff_entries(old, new).await?;
         let t_diff = t_loop.elapsed();
+        if !entries.is_empty() && self.st.operation_id != UNFINISHED_CHECKOUT {
+            // From the first write until `finish`, the mount holds a part of the new tree while the
+            // state names the old one. A command that loaded the old operation would find the
+            // working copy fresh and snapshot those files as edits of the old commit; with no
+            // operation to load it stops, and `jj workspace update-stale` saves the mount in a
+            // recovery commit.
+            self.st.operation_id = UNFINISHED_CHECKOUT.to_owned();
+            write_state(&self.state_path, &self.st)
+                .map_err(|e| co_err("Failed to record the checkout", e))?;
+        }
         let mut plan = Plan::default();
         let (mut d_prefetch, mut d_writes) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
         let backend = self.store.backend();
